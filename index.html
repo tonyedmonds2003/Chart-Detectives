@@ -1,0 +1,1736 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LNC Workstation</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --navy: #1a2744;
+  --navy-light: #243358;
+  --navy-dark: #111b30;
+  --gold: #c9a84c;
+  --gold-light: #e2c77a;
+  --gold-pale: #f7f1e3;
+  --cream: #faf8f4;
+  --white: #ffffff;
+  --gray-50: #f8f8f7;
+  --gray-100: #efefed;
+  --gray-200: #dddcda;
+  --gray-400: #9b9a97;
+  --gray-600: #6b6a68;
+  --gray-800: #2c2c2a;
+  --success: #2d7a4f;
+  --success-bg: #eaf3de;
+  --warning: #8a5c0a;
+  --warning-bg: #faeeda;
+  --danger: #a32d2d;
+  --danger-bg: #fcebeb;
+  --info: #185fa5;
+  --info-bg: #e6f1fb;
+  --sidebar-w: 220px;
+  --top-h: 60px;
+  --radius: 10px;
+  --radius-sm: 6px;
+  --shadow: 0 1px 3px rgba(0,0,0,0.08), 0 4px 12px rgba(0,0,0,0.04);
+  --shadow-md: 0 2px 8px rgba(0,0,0,0.10), 0 8px 24px rgba(0,0,0,0.06);
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: 'DM Sans', sans-serif; background: var(--cream); color: var(--gray-800); min-height: 100vh; display: flex; flex-direction: column; font-size: 14px; }
+
+/* TOP BAR */
+.topbar { height: var(--top-h); background: var(--navy); display: flex; align-items: center; justify-content: space-between; padding: 0 24px; position: fixed; top: 0; left: 0; right: 0; z-index: 100; }
+.topbar-brand { display: flex; align-items: center; gap: 10px; }
+.topbar-brand svg { display: block; }
+.topbar-right { display: flex; align-items: center; gap: 16px; }
+.topbar-user { display: flex; align-items: center; gap: 8px; }
+.topbar-avatar { width: 32px; height: 32px; border-radius: 50%; background: var(--gold); display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 13px; color: var(--navy); }
+.topbar-name { color: var(--white); font-size: 13px; }
+.topbar-time { color: var(--gold-light); font-size: 12px; font-variant-numeric: tabular-nums; }
+
+/* SIDEBAR */
+.sidebar { width: var(--sidebar-w); background: var(--navy-dark); position: fixed; left: 0; top: var(--top-h); bottom: 0; overflow-y: auto; z-index: 90; display: flex; flex-direction: column; }
+.sidebar-section { padding: 16px 12px 8px; }
+.sidebar-label { font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--gold-light); opacity: 0.6; padding: 0 8px; margin-bottom: 4px; }
+.nav-item { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: var(--radius-sm); cursor: pointer; color: rgba(255,255,255,0.65); font-size: 13px; transition: all 0.15s; margin-bottom: 1px; border: none; background: none; width: 100%; text-align: left; }
+.nav-item:hover { background: rgba(255,255,255,0.07); color: white; }
+.nav-item.active { background: var(--gold); color: var(--navy); font-weight: 500; }
+.nav-item.active .nav-icon { opacity: 1; }
+.nav-icon { width: 16px; height: 16px; flex-shrink: 0; opacity: 0.7; }
+.nav-badge { margin-left: auto; background: var(--danger); color: white; font-size: 10px; padding: 1px 5px; border-radius: 10px; font-weight: 600; }
+.sidebar-bottom { margin-top: auto; padding: 12px; border-top: 1px solid rgba(255,255,255,0.06); }
+.sidebar-api-badge { background: rgba(201,168,76,0.15); border: 1px solid rgba(201,168,76,0.3); border-radius: var(--radius-sm); padding: 8px 10px; }
+.sidebar-api-badge p { font-size: 11px; color: var(--gold-light); line-height: 1.4; }
+
+/* MAIN */
+.main { margin-left: var(--sidebar-w); margin-top: var(--top-h); padding: 28px; min-height: calc(100vh - var(--top-h)); }
+.page { display: none; }
+.page.active { display: block; }
+.page-header { margin-bottom: 24px; }
+.page-title { font-family: 'DM Serif Display', serif; font-size: 26px; color: var(--navy); }
+.page-subtitle { font-size: 13px; color: var(--gray-600); margin-top: 3px; }
+
+/* CARDS */
+.card { background: var(--white); border-radius: var(--radius); border: 1px solid var(--gray-100); padding: 20px; box-shadow: var(--shadow); }
+.card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+.card-title { font-size: 14px; font-weight: 600; color: var(--navy); }
+
+/* GRID */
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
+.grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+
+/* STAT CARDS */
+.stat-card { background: var(--white); border-radius: var(--radius); border: 1px solid var(--gray-100); padding: 18px; box-shadow: var(--shadow); }
+.stat-label { font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--gray-400); margin-bottom: 6px; }
+.stat-value { font-family: 'DM Serif Display', serif; font-size: 28px; color: var(--navy); line-height: 1; }
+.stat-sub { font-size: 12px; color: var(--gray-400); margin-top: 4px; }
+.stat-up { color: var(--success); }
+.stat-down { color: var(--danger); }
+
+/* BUTTONS */
+.btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 16px; border-radius: var(--radius-sm); font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.15s; border: none; font-family: inherit; }
+.btn-primary { background: var(--navy); color: white; }
+.btn-primary:hover { background: var(--navy-light); }
+.btn-gold { background: var(--gold); color: var(--navy); }
+.btn-gold:hover { background: var(--gold-light); }
+.btn-outline { background: transparent; color: var(--navy); border: 1px solid var(--gray-200); }
+.btn-outline:hover { background: var(--gray-50); }
+.btn-danger { background: var(--danger-bg); color: var(--danger); border: 1px solid #f7c1c1; }
+.btn-sm { padding: 5px 12px; font-size: 12px; }
+.btn-icon { padding: 7px; border-radius: var(--radius-sm); background: var(--gray-50); border: 1px solid var(--gray-100); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+.btn-icon:hover { background: var(--gray-100); }
+
+/* FORMS */
+.form-group { margin-bottom: 14px; }
+.form-label { display: block; font-size: 12px; font-weight: 500; color: var(--gray-600); margin-bottom: 5px; }
+.form-control { width: 100%; padding: 8px 12px; border: 1px solid var(--gray-200); border-radius: var(--radius-sm); font-size: 13px; font-family: inherit; color: var(--gray-800); background: white; transition: border 0.15s; }
+.form-control:focus { outline: none; border-color: var(--navy); }
+textarea.form-control { resize: vertical; min-height: 90px; line-height: 1.5; }
+select.form-control { cursor: pointer; }
+
+/* BADGE */
+.badge { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 11px; font-weight: 500; }
+.badge-success { background: var(--success-bg); color: var(--success); }
+.badge-warning { background: var(--warning-bg); color: var(--warning); }
+.badge-danger { background: var(--danger-bg); color: var(--danger); }
+.badge-info { background: var(--info-bg); color: var(--info); }
+.badge-navy { background: #e8eaf2; color: var(--navy); }
+
+/* TABLE */
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; padding: 8px 12px; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--gray-400); border-bottom: 1px solid var(--gray-100); font-weight: 500; }
+td { padding: 11px 12px; border-bottom: 1px solid var(--gray-50); color: var(--gray-800); vertical-align: middle; }
+tr:last-child td { border-bottom: none; }
+tr:hover td { background: var(--gray-50); }
+
+/* TABS */
+.tabs { display: flex; gap: 2px; background: var(--gray-100); border-radius: var(--radius-sm); padding: 3px; margin-bottom: 20px; width: fit-content; }
+.tab { padding: 6px 14px; border-radius: 5px; font-size: 12px; font-weight: 500; cursor: pointer; color: var(--gray-600); border: none; background: none; font-family: inherit; transition: all 0.15s; }
+.tab.active { background: white; color: var(--navy); box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+
+/* MODAL */
+.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.45); z-index: 200; display: none; align-items: center; justify-content: center; }
+.modal-overlay.open { display: flex; }
+.modal { background: white; border-radius: var(--radius); padding: 24px; width: 560px; max-width: 95vw; max-height: 90vh; overflow-y: auto; box-shadow: var(--shadow-md); }
+.modal-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+.modal-title { font-family: 'DM Serif Display', serif; font-size: 20px; color: var(--navy); }
+.modal-close { cursor: pointer; color: var(--gray-400); font-size: 20px; border: none; background: none; line-height: 1; }
+
+/* AI RESULT AREA */
+.ai-result { background: var(--gold-pale); border: 1px solid #e8d99a; border-radius: var(--radius); padding: 16px; margin-top: 12px; white-space: pre-wrap; font-size: 13px; line-height: 1.7; color: var(--gray-800); max-height: 400px; overflow-y: auto; }
+.ai-loading { display: flex; align-items: center; gap: 10px; color: var(--gray-600); padding: 16px; }
+.ai-loading .spinner { width: 18px; height: 18px; border: 2px solid var(--gray-200); border-top-color: var(--navy); border-radius: 50%; animation: spin 0.8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* UPLOAD AREA */
+.upload-zone { border: 2px dashed var(--gray-200); border-radius: var(--radius); padding: 32px; text-align: center; cursor: pointer; transition: all 0.2s; }
+.upload-zone:hover, .upload-zone.drag { border-color: var(--gold); background: var(--gold-pale); }
+.upload-zone p { color: var(--gray-400); font-size: 13px; margin-top: 8px; }
+
+/* TIMER */
+.timer-display { font-family: 'DM Serif Display', serif; font-size: 42px; color: var(--navy); letter-spacing: 0.02em; text-align: center; }
+.timer-controls { display: flex; gap: 10px; justify-content: center; margin-top: 14px; }
+
+/* PROGRESS */
+.progress-bar { height: 6px; background: var(--gray-100); border-radius: 3px; overflow: hidden; }
+.progress-fill { height: 100%; background: var(--gold); border-radius: 3px; transition: width 0.3s; }
+
+/* DIVIDER */
+.divider { border: none; border-top: 1px solid var(--gray-100); margin: 16px 0; }
+
+/* ALERT */
+.alert { padding: 10px 14px; border-radius: var(--radius-sm); font-size: 13px; margin-bottom: 12px; }
+.alert-info { background: var(--info-bg); color: var(--info); border-left: 3px solid var(--info); }
+.alert-warning { background: var(--warning-bg); color: var(--warning); border-left: 3px solid #c9a84c; }
+.alert-success { background: var(--success-bg); color: var(--success); border-left: 3px solid var(--success); }
+
+/* CASE ROW */
+.case-row { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--gray-50); }
+.case-row:last-child { border-bottom: none; }
+.case-avatar { width: 36px; height: 36px; border-radius: 8px; background: var(--navy); display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 13px; color: var(--gold); flex-shrink: 0; }
+.case-info { flex: 1; min-width: 0; }
+.case-name { font-weight: 500; font-size: 13px; color: var(--gray-800); }
+.case-meta { font-size: 11px; color: var(--gray-400); margin-top: 1px; }
+
+/* INVOICE */
+.invoice-card { border: 1px solid var(--gray-100); border-radius: var(--radius); overflow: hidden; }
+.invoice-header { background: var(--navy); color: white; padding: 16px 20px; display: flex; justify-content: space-between; align-items: center; }
+.invoice-body { padding: 20px; }
+
+/* NOTIFICATION DOT */
+.notif-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--danger); display: inline-block; }
+
+/* SCROLLBAR */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--gray-200); border-radius: 3px; }
+</style>
+</head>
+<body>
+<script>
+(function(){
+  const correct = 'Anthony51';
+  let stored = sessionStorage.getItem('lnc_auth');
+  if(stored !== correct){
+    let attempt = '';
+    while(attempt !== correct){
+      attempt = prompt('Chart Detectives LNC Workstation\n\nPlease enter your password:', '');
+      if(attempt === null){ document.body.innerHTML = '<div style="font-family:sans-serif;text-align:center;padding:80px;color:#1a2744;"><h2>Access Denied</h2><p>Please refresh to try again.</p></div>'; return; }
+      if(attempt !== correct){ alert('Incorrect password. Please try again.'); }
+    }
+    sessionStorage.setItem('lnc_auth', correct);
+  }
+})();
+</script>
+
+
+<!-- TOP BAR -->
+<div class="topbar">
+  <div class="topbar-brand">
+    <svg width="220" height="48" viewBox="0 0 220 48" xmlns="http://www.w3.org/2000/svg">
+      <!-- Magnifying glass outer circle - WHITE -->
+      <circle cx="20" cy="20" r="14" fill="none" stroke="#ffffff" stroke-width="3"/>
+      <!-- EKG heartbeat line - RED -->
+      <polyline points="8,20 11,20 13.5,13 16,27 18.5,15 21,22 23.5,20 32,20" fill="none" stroke="#cc2222" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <!-- Handle - WHITE -->
+      <line x1="30" y1="30" x2="38" y2="38" stroke="#ffffff" stroke-width="3.5" stroke-linecap="round"/>
+      <!-- Chart Detectives -->
+      <text x="48" y="22" font-family="Georgia, 'Times New Roman', serif" font-size="17" font-weight="bold" fill="#ffffff">Chart Detectives</text>
+      <!-- Legal Nurse Consulting -->
+      <text x="49" y="37" font-family="Arial, Helvetica, sans-serif" font-size="9.5" fill="#c9a84c" letter-spacing="1.5">LEGAL NURSE CONSULTING</text>
+    </svg>
+  </div>
+  <div class="topbar-right">
+    <span class="topbar-time" id="clock">--:-- --</span>
+    <div class="topbar-user">
+      <div class="topbar-avatar">D</div>
+      <span class="topbar-name">Debbie</span>
+    </div>
+  </div>
+</div>
+
+<!-- SIDEBAR -->
+<div class="sidebar">
+  <div class="sidebar-section">
+    <div class="sidebar-label">Overview</div>
+    <button class="nav-item active" onclick="showPage('dashboard')">
+      <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+      Dashboard
+    </button>
+  </div>
+  <div class="sidebar-section">
+    <div class="sidebar-label">Case Work</div>
+    <button class="nav-item" onclick="showPage('cases')">
+      <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+      Case Manager
+      <span class="nav-badge" id="active-case-count">0</span>
+    </button>
+    <button class="nav-item" onclick="showPage('records')">
+      <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+      Record Analysis
+    </button>
+    <button class="nav-item" onclick="showPage('reports')">
+      <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+      Report Builder
+    </button>
+    <button class="nav-item" onclick="showPage('research')">
+      <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      SOC Research
+    </button>
+  </div>
+  <div class="sidebar-section">
+    <div class="sidebar-label">Business</div>
+    <button class="nav-item" onclick="showPage('time')">
+      <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+      Time Tracking
+    </button>
+    <button class="nav-item" onclick="showPage('billing')">
+      <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg>
+      Billing & Invoices
+    </button>
+  </div>
+  <div class="sidebar-bottom">
+    <div class="sidebar-api-badge">
+      <svg width="160" height="34" viewBox="0 0 160 34" xmlns="http://www.w3.org/2000/svg" style="display:block;margin-bottom:6px;">
+        <circle cx="14" cy="14" r="10" fill="none" stroke="#ffffff" stroke-width="2.2"/>
+        <polyline points="5,14 7.5,14 9.5,9 11.5,19 13.5,11 15.5,16 17.5,14 23,14" fill="none" stroke="#cc2222" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+        <line x1="21" y1="21" x2="27" y2="27" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round"/>
+        <text x="32" y="13" font-family="Georgia,serif" font-size="10" font-weight="bold" fill="#ffffff">Chart Detectives</text>
+        <text x="32" y="25" font-family="Arial,sans-serif" font-size="6" fill="#c9a84c" letter-spacing="0.8">LEGAL NURSE CONSULTING</text>
+      </svg>
+      <p style="font-size:10px;">⚡ AI-powered by Claude</p>
+    </div>
+  </div>
+</div>
+
+<!-- MAIN CONTENT -->
+<div class="main">
+
+<!-- DASHBOARD -->
+<div class="page active" id="page-dashboard">
+  <div class="page-header">
+    <div class="page-title">Good morning, Deborah</div>
+    <div class="page-subtitle">Here's your practice at a glance</div>
+  </div>
+  <div class="grid-4" style="margin-bottom: 20px;">
+    <div class="stat-card">
+      <div class="stat-label">Active Cases</div>
+      <div class="stat-value" id="dash-active">0</div>
+      <div class="stat-sub">this month</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Hours Logged</div>
+      <div class="stat-value" id="dash-hours">0.0</div>
+      <div class="stat-sub">this month</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Outstanding</div>
+      <div class="stat-value" id="dash-outstanding">$0</div>
+      <div class="stat-sub">unpaid invoices</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Revenue (MTD)</div>
+      <div class="stat-value" id="dash-revenue">$0</div>
+      <div class="stat-sub">paid this month</div>
+    </div>
+  </div>
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Active Cases</span>
+        <button class="btn btn-primary btn-sm" onclick="showPage('cases')">View all</button>
+      </div>
+      <div id="dash-cases-list"><p style="color:var(--gray-400);font-size:13px;">No active cases. Add one in Case Manager.</p></div>
+    </div>
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Upcoming Deadlines & Reminders</span>
+      </div>
+      <div id="dash-reminders">
+        <div class="alert alert-info">No upcoming deadlines. Deadlines are pulled from your cases.</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Recent Time Entries</span>
+        <button class="btn btn-outline btn-sm" onclick="showPage('time')">Log time</button>
+      </div>
+      <div id="dash-time-list"><p style="color:var(--gray-400);font-size:13px;">No time entries yet.</p></div>
+    </div>
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Invoice Status</span>
+        <button class="btn btn-outline btn-sm" onclick="showPage('billing')">View all</button>
+      </div>
+      <div id="dash-invoice-list"><p style="color:var(--gray-400);font-size:13px;">No invoices yet.</p></div>
+    </div>
+  </div>
+</div>
+
+<!-- CASES -->
+<div class="page" id="page-cases">
+  <div class="page-header" style="display:flex;justify-content:space-between;align-items:flex-start;">
+    <div>
+      <div class="page-title">Case Manager</div>
+      <div class="page-subtitle">Track all client matters, attorneys, and deadlines</div>
+    </div>
+    <button class="btn btn-gold" onclick="openModal('modal-new-case')">+ New Case</button>
+  </div>
+  <div class="tabs">
+    <button class="tab active" onclick="filterCases('all', this)">All Cases</button>
+    <button class="tab" onclick="filterCases('active', this)">Active</button>
+    <button class="tab" onclick="filterCases('review', this)">In Review</button>
+    <button class="tab" onclick="filterCases('complete', this)">Complete</button>
+  </div>
+  <div class="card">
+    <div class="table-wrap">
+      <table id="cases-table">
+        <thead>
+          <tr>
+            <th>Case / Patient</th>
+            <th>Attorney / Firm</th>
+            <th>Type</th>
+            <th>Received</th>
+            <th>Deadline</th>
+            <th>Status</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="cases-tbody">
+          <tr><td colspan="7" style="text-align:center;color:var(--gray-400);padding:24px;">No cases yet. Click "+ New Case" to get started.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- RECORD ANALYSIS -->
+<div class="page" id="page-records">
+  <div class="page-header">
+    <div class="page-title">Medical Record Analysis</div>
+    <div class="page-subtitle">Upload medical records for AI-powered chronology and summary</div>
+  </div>
+  <div class="grid-2" style="align-items:start;">
+    <div>
+      <div class="card" style="margin-bottom:16px;">
+        <div class="card-header"><span class="card-title">Upload Records</span></div>
+        <div class="form-group">
+          <label class="form-label">Select Case</label>
+          <select class="form-control" id="rec-case-select"><option value="">— choose a case —</option></select>
+        </div>
+        <div class="upload-zone" id="upload-zone" onclick="document.getElementById('file-input').click()">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="var(--gray-400)" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          <p>Click to upload or drag & drop<br><span style="font-size:11px;color:var(--gray-400);">PDF, DOCX, TXT, JPG, PNG supported</span></p>
+        </div>
+        <input type="file" id="file-input" multiple accept=".pdf,.doc,.docx,.txt,.jpg,.jpeg,.png" style="display:none" onchange="handleFileUpload(event)">
+        <div id="file-list" style="margin-top:10px;"></div>
+      </div>
+      <div class="card">
+        <div class="card-header"><span class="card-title">Analysis Options</span></div>
+        <div class="form-group">
+          <label class="form-label">Analysis type</label>
+          <select class="form-control" id="analysis-type">
+            <option value="chronology">Medical chronology</option>
+            <option value="summary">Narrative summary</option>
+            <option value="gaps">Care gaps & inconsistencies</option>
+            <option value="providers">Provider & medication list</option>
+            <option value="full">Full comprehensive analysis</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Additional instructions (optional)</label>
+          <textarea class="form-control" id="analysis-instructions" placeholder="e.g. Focus on the ICU stay in March 2023, or flag any medication errors"></textarea>
+        </div>
+        <button class="btn btn-primary" style="width:100%" onclick="runRecordAnalysis()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          Analyze Records
+        </button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">AI Analysis Result</span>
+        <button class="btn btn-outline btn-sm" id="copy-rec-btn" onclick="copyResult('rec-result')" style="display:none">Copy</button>
+      </div>
+      <div id="rec-result-area">
+        <div style="text-align:center;padding:40px 20px;color:var(--gray-400);">
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" style="margin-bottom:10px;opacity:0.4"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+          <p style="font-size:13px;">Upload records and click Analyze to generate<br>AI-powered medical chronology and summary</p>
+        </div>
+      </div>
+      <pre id="rec-result" style="display:none;"></pre>
+    </div>
+  </div>
+</div>
+
+<!-- REPORT BUILDER -->
+<div class="page" id="page-reports">
+  <div class="page-header">
+    <div class="page-title">Report Builder</div>
+    <div class="page-subtitle">AI drafts your LNC reports based on your findings and style</div>
+  </div>
+  <div class="grid-2" style="align-items:start;">
+    <div class="card">
+      <div class="card-header"><span class="card-title">Report Details</span></div>
+      <div class="form-group">
+        <label class="form-label">Case</label>
+        <select class="form-control" id="rep-case-select"><option value="">— choose a case —</option></select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Report type</label>
+        <select class="form-control" id="rep-type">
+          <option value="standard_of_care">Standard of care analysis</option>
+          <option value="causation">Causation analysis</option>
+          <option value="chronology">Medical chronology</option>
+          <option value="damages">Damages summary</option>
+          <option value="screening">Case screening report</option>
+          <option value="rebuttal">Rebuttal report</option>
+          <option value="custom">Custom (describe below)</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Case type / specialty</label>
+        <select class="form-control" id="rep-specialty">
+          <option>Medical malpractice</option>
+          <option>Personal injury</option>
+          <option>Workers' compensation</option>
+          <option>Long-term care / nursing home</option>
+          <option>Pediatric / birth injury</option>
+          <option>Surgical error</option>
+          <option>Medication error</option>
+          <option>Emergency care</option>
+          <option>Other</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Key findings / issues identified</label>
+        <textarea class="form-control" id="rep-findings" style="min-height:110px" placeholder="Summarize your key findings, deviations from standard of care, significant events, etc."></textarea>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Your professional opinion</label>
+        <textarea class="form-control" id="rep-opinion" placeholder="State your conclusions and opinions here"></textarea>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Attorney / audience notes (optional)</label>
+        <textarea class="form-control" id="rep-audience" placeholder="e.g. This is for plaintiff's counsel. Attorney prefers concise executive summary format."></textarea>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Upload example report (optional — teaches AI your style)</label>
+        <input type="file" id="rep-example-file" accept=".pdf,.doc,.docx,.txt" class="form-control" style="padding:5px;">
+      </div>
+      <button class="btn btn-primary" style="width:100%;margin-top:4px;" onclick="runReportDraft()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+        Draft Report
+      </button>
+    </div>
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">AI Draft Report</span>
+        <div style="display:flex;gap:6px;">
+          <button class="btn btn-outline btn-sm" id="copy-rep-btn" onclick="copyResult('rep-result')" style="display:none">Copy</button>
+          <button class="btn btn-gold btn-sm" id="export-rep-btn" onclick="exportReport()" style="display:none">Export</button>
+        </div>
+      </div>
+      <div id="rep-result-area">
+        <div style="text-align:center;padding:40px 20px;color:var(--gray-400);">
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" style="margin-bottom:10px;opacity:0.4"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+          <p style="font-size:13px;">Fill in the case details and click Draft Report<br>to generate a professional LNC report</p>
+        </div>
+      </div>
+      <textarea id="rep-result" style="display:none;width:100%;min-height:420px;font-size:13px;line-height:1.7;border:1px solid var(--gray-200);border-radius:var(--radius-sm);padding:14px;font-family:inherit;resize:vertical;"></textarea>
+    </div>
+  </div>
+</div>
+
+<!-- SOC RESEARCH -->
+<div class="page" id="page-research">
+  <div class="page-header">
+    <div class="page-title">Standard of Care Research</div>
+    <div class="page-subtitle">AI-powered literature review and clinical guideline search</div>
+  </div>
+  <div class="grid-2" style="align-items:start;">
+    <div class="card">
+      <div class="card-header"><span class="card-title">Research Query</span></div>
+      <div class="form-group">
+        <label class="form-label">Clinical topic or question</label>
+        <textarea class="form-control" id="research-query" style="min-height:100px" placeholder="e.g. What is the standard of care for postoperative monitoring after laparoscopic cholecystectomy? Or: ICU sepsis bundle 2022 guidelines"></textarea>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Relevant specialty</label>
+        <select class="form-control" id="research-specialty">
+          <option>General surgery</option>
+          <option>Emergency medicine</option>
+          <option>Critical care / ICU</option>
+          <option>Obstetrics & gynecology</option>
+          <option>Orthopedics</option>
+          <option>Cardiology</option>
+          <option>Neurology</option>
+          <option>Pediatrics</option>
+          <option>Oncology</option>
+          <option>Nursing / general care</option>
+          <option>Long-term care</option>
+          <option>Other</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Time period (if relevant)</label>
+        <input type="text" class="form-control" id="research-period" placeholder="e.g. 2020–2023 or at time of incident in April 2021">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Incident date (for applicable SOC)</label>
+        <input type="date" class="form-control" id="research-date">
+      </div>
+      <button class="btn btn-primary" style="width:100%" onclick="runResearch()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        Research SOC
+      </button>
+    </div>
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Research Summary</span>
+        <button class="btn btn-outline btn-sm" id="copy-res-btn" onclick="copyResult('res-result')" style="display:none">Copy</button>
+      </div>
+      <div id="res-result-area">
+        <div style="text-align:center;padding:40px 20px;color:var(--gray-400);">
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" style="margin-bottom:10px;opacity:0.4"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <p style="font-size:13px;">Enter a clinical question to get a structured<br>standard of care research summary</p>
+        </div>
+      </div>
+      <pre id="res-result" style="display:none;white-space:pre-wrap;font-size:13px;line-height:1.7;"></pre>
+    </div>
+  </div>
+</div>
+
+<!-- TIME TRACKING -->
+<div class="page" id="page-time">
+  <div class="page-header" style="display:flex;justify-content:space-between;align-items:flex-start;">
+    <div>
+      <div class="page-title">Time Tracking</div>
+      <div class="page-subtitle">Track billable hours by case — exports to QuickBooks</div>
+    </div>
+    <button class="btn btn-gold" onclick="openModal('modal-log-time')">+ Log Time</button>
+  </div>
+
+  <!-- Timer -->
+  <div class="card" style="margin-bottom:16px;">
+    <div class="card-header"><span class="card-title">Live Timer</span></div>
+    <div class="grid-2" style="align-items:center;gap:24px;">
+      <div>
+        <div class="form-group">
+          <label class="form-label">Select case to bill</label>
+          <select class="form-control" id="timer-case-select"><option value="">— choose a case —</option></select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Activity</label>
+          <select class="form-control" id="timer-activity">
+            <option>Record review</option>
+            <option>Report writing</option>
+            <option>Research</option>
+            <option>Attorney consultation</option>
+            <option>Chronology preparation</option>
+            <option>Deposition preparation</option>
+            <option>Expert review</option>
+            <option>Administrative</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Notes</label>
+          <input type="text" class="form-control" id="timer-notes" placeholder="Optional note for this session">
+        </div>
+      </div>
+      <div style="text-align:center;">
+        <div class="timer-display" id="timer-display">00:00:00</div>
+        <div style="font-size:12px;color:var(--gray-400);margin-top:4px;" id="timer-status">Stopped</div>
+        <div class="timer-controls">
+          <button class="btn btn-primary" id="timer-start-btn" onclick="startTimer()">Start</button>
+          <button class="btn btn-outline" id="timer-stop-btn" onclick="stopTimer()" disabled>Stop & Save</button>
+          <button class="btn btn-outline" id="timer-reset-btn" onclick="resetTimer()">Reset</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Time Entries -->
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title">Time Entries</span>
+      <div style="display:flex;gap:8px;">
+        <select class="form-control" id="time-filter-case" onchange="renderTimeEntries()" style="width:160px;font-size:12px;padding:5px 8px;">
+          <option value="">All cases</option>
+        </select>
+        <button class="btn btn-outline btn-sm" onclick="exportTimeToCSV()">Export CSV</button>
+        <button class="btn btn-gold btn-sm" onclick="exportToQuickBooks()">→ QuickBooks</button>
+      </div>
+    </div>
+    <div id="time-summary" style="display:flex;gap:16px;margin-bottom:14px;flex-wrap:wrap;"></div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Date</th><th>Case</th><th>Activity</th><th>Duration</th><th>Rate</th><th>Amount</th><th>Notes</th><th></th></tr>
+        </thead>
+        <tbody id="time-tbody">
+          <tr><td colspan="8" style="text-align:center;color:var(--gray-400);padding:24px;">No time entries yet. Start the timer or log time manually.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- BILLING -->
+<div class="page" id="page-billing">
+  <div class="page-header" style="display:flex;justify-content:space-between;align-items:flex-start;">
+    <div>
+      <div class="page-title">Billing & Invoices</div>
+      <div class="page-subtitle">Generate invoices, track payments, send reminders</div>
+    </div>
+    <button class="btn btn-gold" onclick="openModal('modal-new-invoice')">+ New Invoice</button>
+  </div>
+  <div class="grid-4" style="margin-bottom:20px;">
+    <div class="stat-card">
+      <div class="stat-label">Total Billed</div>
+      <div class="stat-value" id="bill-total">$0</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Paid</div>
+      <div class="stat-value" id="bill-paid" style="color:var(--success);">$0</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Outstanding</div>
+      <div class="stat-value" id="bill-outstanding" style="color:var(--warning);">$0</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Overdue</div>
+      <div class="stat-value" id="bill-overdue" style="color:var(--danger);">$0</div>
+    </div>
+  </div>
+  <div class="card" style="margin-bottom:16px;">
+    <div class="card-header">
+      <span class="card-title">Invoices</span>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-outline btn-sm" onclick="exportInvoicesCSV()">Export CSV</button>
+        <button class="btn btn-gold btn-sm" onclick="syncQuickBooks()">Sync QuickBooks</button>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>#</th><th>Case / Client</th><th>Attorney</th><th>Date</th><th>Due Date</th><th>Amount</th><th>Status</th><th>Actions</th></tr>
+        </thead>
+        <tbody id="invoice-tbody">
+          <tr><td colspan="8" style="text-align:center;color:var(--gray-400);padding:24px;">No invoices yet. Click "+ New Invoice" to get started.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-header"><span class="card-title">Invoice Reminders</span></div>
+    <div class="alert alert-info" style="margin-bottom:12px;">Reminders are automatically flagged when invoices become overdue. Use the buttons below to generate reminder emails.</div>
+    <div id="reminder-list"><p style="color:var(--gray-400);font-size:13px;">No overdue invoices.</p></div>
+  </div>
+</div>
+
+</div><!-- end .main -->
+
+<!-- ====== MODALS ====== -->
+
+<!-- New Case Modal -->
+<div class="modal-overlay" id="modal-new-case">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title">New Case</div>
+      <button class="modal-close" onclick="closeModal('modal-new-case')">×</button>
+    </div>
+    <div class="grid-2">
+      <div class="form-group">
+        <label class="form-label">Patient name (or alias)</label>
+        <input type="text" class="form-control" id="new-patient" placeholder="Smith, John">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Case reference #</label>
+        <input type="text" class="form-control" id="new-caseid" placeholder="Auto-generated if blank">
+      </div>
+    </div>
+    <div class="grid-2">
+      <div class="form-group">
+        <label class="form-label">Attorney name</label>
+        <input type="text" class="form-control" id="new-attorney">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Law firm</label>
+        <input type="text" class="form-control" id="new-firm">
+      </div>
+    </div>
+    <div class="grid-2">
+      <div class="form-group">
+        <label class="form-label">Case type</label>
+        <select class="form-control" id="new-casetype">
+          <option>Medical malpractice</option>
+          <option>Personal injury</option>
+          <option>Workers' comp</option>
+          <option>Long-term care</option>
+          <option>Birth injury</option>
+          <option>Other</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Plaintiff / defendant</label>
+        <select class="form-control" id="new-side">
+          <option>Plaintiff</option>
+          <option>Defense</option>
+        </select>
+      </div>
+    </div>
+    <div class="grid-2">
+      <div class="form-group">
+        <label class="form-label">Date received</label>
+        <input type="date" class="form-control" id="new-received">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Report deadline</label>
+        <input type="date" class="form-control" id="new-deadline">
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Hourly rate ($)</label>
+      <input type="number" class="form-control" id="new-rate" value="150" min="0" step="5">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Notes</label>
+      <textarea class="form-control" id="new-notes" placeholder="Brief description, key facts, special instructions..."></textarea>
+    </div>
+    <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px;">
+      <button class="btn btn-outline" onclick="closeModal('modal-new-case')">Cancel</button>
+      <button class="btn btn-gold" onclick="saveCase()">Save Case</button>
+    </div>
+  </div>
+</div>
+
+<!-- Log Time Modal -->
+<div class="modal-overlay" id="modal-log-time">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title">Log Time Entry</div>
+      <button class="modal-close" onclick="closeModal('modal-log-time')">×</button>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Case</label>
+      <select class="form-control" id="log-case-select"><option value="">— select case —</option></select>
+    </div>
+    <div class="grid-2">
+      <div class="form-group">
+        <label class="form-label">Date</label>
+        <input type="date" class="form-control" id="log-date">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Duration (hours)</label>
+        <input type="number" class="form-control" id="log-hours" min="0.25" step="0.25" value="1">
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Activity</label>
+      <select class="form-control" id="log-activity">
+        <option>Record review</option>
+        <option>Report writing</option>
+        <option>Research</option>
+        <option>Attorney consultation</option>
+        <option>Chronology preparation</option>
+        <option>Deposition preparation</option>
+        <option>Expert review</option>
+        <option>Administrative</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Notes</label>
+      <input type="text" class="form-control" id="log-notes" placeholder="Optional description">
+    </div>
+    <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px;">
+      <button class="btn btn-outline" onclick="closeModal('modal-log-time')">Cancel</button>
+      <button class="btn btn-gold" onclick="saveTimeEntry()">Save Entry</button>
+    </div>
+  </div>
+</div>
+
+<!-- New Invoice Modal -->
+<div class="modal-overlay" id="modal-new-invoice">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title">Create Invoice</div>
+      <button class="modal-close" onclick="closeModal('modal-new-invoice')">×</button>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Case</label>
+      <select class="form-control" id="inv-case-select" onchange="populateInvoiceFromCase()"><option value="">— select case —</option></select>
+    </div>
+    <div class="grid-2">
+      <div class="form-group">
+        <label class="form-label">Invoice date</label>
+        <input type="date" class="form-control" id="inv-date">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Due date</label>
+        <input type="date" class="form-control" id="inv-due">
+      </div>
+    </div>
+    <div id="inv-line-items">
+      <label class="form-label">Line items</label>
+      <div id="inv-items-list"></div>
+      <button class="btn btn-outline btn-sm" style="margin-top:8px;" onclick="addInvoiceLineItem()">+ Add line item</button>
+    </div>
+    <hr class="divider">
+    <div style="display:flex;justify-content:space-between;align-items:center;font-weight:500;">
+      <span>Total:</span>
+      <span id="inv-total-display" style="font-size:18px;color:var(--navy);">$0.00</span>
+    </div>
+    <div class="form-group" style="margin-top:12px;">
+      <label class="form-label">Notes / payment instructions</label>
+      <textarea class="form-control" id="inv-notes" placeholder="e.g. Please remit within 30 days. Payment by check or ACH."></textarea>
+    </div>
+    <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px;">
+      <button class="btn btn-outline" onclick="closeModal('modal-new-invoice')">Cancel</button>
+      <button class="btn btn-gold" onclick="saveInvoice()">Create Invoice</button>
+    </div>
+  </div>
+</div>
+
+<!-- Reminder Email Modal -->
+<div class="modal-overlay" id="modal-reminder">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title">Invoice Reminder Email</div>
+      <button class="modal-close" onclick="closeModal('modal-reminder')">×</button>
+    </div>
+    <div id="reminder-email-content" style="background:var(--gray-50);border-radius:var(--radius-sm);padding:16px;font-size:13px;line-height:1.7;white-space:pre-wrap;max-height:360px;overflow-y:auto;"></div>
+    <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:16px;">
+      <button class="btn btn-outline" onclick="copyReminderEmail()">Copy Email</button>
+      <button class="btn btn-gold" onclick="closeModal('modal-reminder')">Done</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
+
+// ===== STATE =====
+let state = {
+  cases: [],
+  timeEntries: [],
+  invoices: [],
+  nextInvNum: 1001
+};
+let casesFilter = 'all';
+let uploadedFiles = [];
+let timerInterval = null, timerStart = null, timerElapsed = 0, timerRunning = false;
+let invoiceLineItems = [];
+
+function save() { try { localStorage.setItem('lnc_state', JSON.stringify(state)); } catch(e) {} }
+function load() {
+  try {
+    const d = localStorage.getItem('lnc_state');
+    if (d) state = JSON.parse(d);
+  } catch(e) {}
+}
+
+// ===== INIT =====
+load();
+setInterval(() => {
+  const now = new Date();
+  const el = document.getElementById('clock');
+  if (el) el.textContent = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}, 1000);
+
+function init() {
+  populateCaseDropdowns();
+  renderDashboard();
+  renderCases();
+  renderTimeEntries();
+  renderInvoices();
+  updateActiveCaseBadge();
+  // Set default dates
+  const today = new Date().toISOString().split('T')[0];
+  ['new-received','log-date','inv-date'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.value = today;
+  });
+  const due = new Date(); due.setDate(due.getDate() + 30);
+  const invDue = document.getElementById('inv-due');
+  if (invDue) invDue.value = due.toISOString().split('T')[0];
+  addInvoiceLineItem();
+}
+init();
+
+// ===== NAVIGATION =====
+function showPage(id) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.getElementById('page-' + id).classList.add('active');
+  document.querySelectorAll('.nav-item').forEach(btn => {
+    if (btn.getAttribute('onclick') && btn.getAttribute('onclick').includes("'" + id + "'")) btn.classList.add('active');
+  });
+  populateCaseDropdowns();
+}
+
+function openModal(id) { document.getElementById(id).classList.add('open'); }
+function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+document.querySelectorAll('.modal-overlay').forEach(overlay => {
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.classList.remove('open'); });
+});
+
+// ===== CASES =====
+function saveCase() {
+  const patient = document.getElementById('new-patient').value.trim();
+  if (!patient) { alert('Patient name is required.'); return; }
+  const c = {
+    id: document.getElementById('new-caseid').value.trim() || 'LNC-' + Date.now().toString().slice(-5),
+    patient, attorney: document.getElementById('new-attorney').value.trim(),
+    firm: document.getElementById('new-firm').value.trim(),
+    type: document.getElementById('new-casetype').value,
+    side: document.getElementById('new-side').value,
+    received: document.getElementById('new-received').value,
+    deadline: document.getElementById('new-deadline').value,
+    rate: parseFloat(document.getElementById('new-rate').value) || 150,
+    notes: document.getElementById('new-notes').value.trim(),
+    status: 'active', created: new Date().toISOString()
+  };
+  state.cases.push(c); save();
+  closeModal('modal-new-case');
+  clearCaseForm();
+  populateCaseDropdowns();
+  renderCases(); renderDashboard(); updateActiveCaseBadge();
+}
+
+function clearCaseForm() {
+  ['new-patient','new-caseid','new-attorney','new-firm','new-notes'].forEach(id => document.getElementById(id).value = '');
+  document.getElementById('new-rate').value = '150';
+}
+
+function updateCaseStatus(caseId, status) {
+  const c = state.cases.find(x => x.id === caseId);
+  if (c) { c.status = status; save(); renderCases(); renderDashboard(); updateActiveCaseBadge(); }
+}
+
+function deleteCase(caseId) {
+  if (!confirm('Delete this case? This cannot be undone.')) return;
+  state.cases = state.cases.filter(x => x.id !== caseId); save();
+  renderCases(); renderDashboard(); updateActiveCaseBadge(); populateCaseDropdowns();
+}
+
+function filterCases(f, btn) {
+  casesFilter = f;
+  document.querySelectorAll('.tabs .tab').forEach(t => t.classList.remove('active'));
+  btn.classList.add('active');
+  renderCases();
+}
+
+function renderCases() {
+  const tbody = document.getElementById('cases-tbody');
+  let cases = state.cases;
+  if (casesFilter !== 'all') cases = cases.filter(c => c.status === casesFilter);
+  if (!cases.length) {
+    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--gray-400);padding:24px;">No cases found.</td></tr>';
+    return;
+  }
+  const statusMap = { active: 'badge-info', review: 'badge-warning', complete: 'badge-success', on_hold: 'badge-navy' };
+  tbody.innerHTML = cases.map(c => `
+    <tr>
+      <td><b>${esc(c.patient)}</b><br><span style="font-size:11px;color:var(--gray-400);">${esc(c.id)}</span></td>
+      <td>${esc(c.attorney)}<br><span style="font-size:11px;color:var(--gray-400);">${esc(c.firm)}</span></td>
+      <td>${esc(c.type)}</td>
+      <td>${fmt(c.received)}</td>
+      <td style="${c.deadline && isPast(c.deadline) ? 'color:var(--danger);font-weight:500;' : ''}">${fmt(c.deadline)}</td>
+      <td>
+        <select class="form-control" style="font-size:11px;padding:3px 6px;width:110px;" onchange="updateCaseStatus('${c.id}', this.value)">
+          <option value="active" ${c.status==='active'?'selected':''}>Active</option>
+          <option value="review" ${c.status==='review'?'selected':''}>In Review</option>
+          <option value="complete" ${c.status==='complete'?'selected':''}>Complete</option>
+          <option value="on_hold" ${c.status==='on_hold'?'selected':''}>On Hold</option>
+        </select>
+      </td>
+      <td>
+        <div style="display:flex;gap:4px;">
+          <button class="btn btn-outline btn-sm" onclick="showPage('records')">Records</button>
+          <button class="btn btn-outline btn-sm" onclick="showPage('reports')">Report</button>
+          <button class="btn btn-danger btn-sm" onclick="deleteCase('${c.id}')">×</button>
+        </div>
+      </td>
+    </tr>
+  `).join('');
+}
+
+function updateActiveCaseBadge() {
+  const n = state.cases.filter(c => c.status === 'active').length;
+  document.getElementById('active-case-count').textContent = n;
+}
+
+// ===== DASHBOARD =====
+function renderDashboard() {
+  const now = new Date();
+  const thisMonth = now.toISOString().slice(0,7);
+  const activeCases = state.cases.filter(c => c.status === 'active');
+  const monthTime = state.timeEntries.filter(t => t.date && t.date.startsWith(thisMonth));
+  const totalHours = monthTime.reduce((s, t) => s + (t.hours || 0), 0);
+  const paidMonthly = state.invoices.filter(i => i.status === 'paid' && i.date && i.date.startsWith(thisMonth));
+  const outstanding = state.invoices.filter(i => i.status !== 'paid' && i.status !== 'void');
+  document.getElementById('dash-active').textContent = activeCases.length;
+  document.getElementById('dash-hours').textContent = totalHours.toFixed(1);
+  document.getElementById('dash-outstanding').textContent = '$' + outstanding.reduce((s,i) => s + (i.total||0), 0).toFixed(0);
+  document.getElementById('dash-revenue').textContent = '$' + paidMonthly.reduce((s,i) => s + (i.total||0), 0).toFixed(0);
+  // Cases list
+  const cl = document.getElementById('dash-cases-list');
+  if (!activeCases.length) { cl.innerHTML = '<p style="color:var(--gray-400);font-size:13px;">No active cases.</p>'; }
+  else { cl.innerHTML = activeCases.slice(0,5).map(c => `<div class="case-row"><div class="case-avatar">${initials(c.patient)}</div><div class="case-info"><div class="case-name">${esc(c.patient)}</div><div class="case-meta">${esc(c.attorney)} · ${esc(c.type)}</div></div>${c.deadline ? `<span class="${isPast(c.deadline)?'badge badge-danger':'badge badge-info'}">${fmt(c.deadline)}</span>` : ''}</div>`).join(''); }
+  // Reminders
+  const rem = document.getElementById('dash-reminders');
+  const urgent = state.cases.filter(c => c.deadline && daysUntil(c.deadline) <= 7 && c.status === 'active');
+  const overdueInvs = state.invoices.filter(i => i.status === 'sent' && i.dueDate && isPast(i.dueDate));
+  let remHtml = '';
+  urgent.forEach(c => { remHtml += `<div class="alert alert-warning" style="margin-bottom:6px;">📅 <b>${esc(c.patient)}</b> report due ${fmt(c.deadline)} (${daysUntil(c.deadline)} days)</div>`; });
+  overdueInvs.forEach(i => { remHtml += `<div class="alert alert-danger" style="margin-bottom:6px;">💰 Invoice #${i.num} for <b>${esc(i.patient)}</b> is overdue by ${-daysUntil(i.dueDate)} days</div>`; });
+  rem.innerHTML = remHtml || '<div class="alert alert-info">No urgent reminders.</div>';
+  // Recent time
+  const tl = document.getElementById('dash-time-list');
+  const recent = [...state.timeEntries].reverse().slice(0,4);
+  tl.innerHTML = recent.length ? recent.map(t => `<div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--gray-50);font-size:13px;"><span>${esc(t.patient)} · ${esc(t.activity)}</span><span style="color:var(--gray-400);">${t.hours}h · ${fmt(t.date)}</span></div>`).join('') : '<p style="color:var(--gray-400);font-size:13px;">No entries yet.</p>';
+  // Invoice status
+  const il = document.getElementById('dash-invoice-list');
+  const recentInv = [...state.invoices].reverse().slice(0,4);
+  il.innerHTML = recentInv.length ? recentInv.map(i => `<div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--gray-50);font-size:13px;"><span>#${i.num} · ${esc(i.patient)}</span><span>${statusBadge(i.status)} $${(i.total||0).toFixed(0)}</span></div>`).join('') : '<p style="color:var(--gray-400);font-size:13px;">No invoices yet.</p>';
+}
+
+// ===== POPULATE DROPDOWNS =====
+function populateCaseDropdowns() {
+  const ids = ['rec-case-select','rep-case-select','timer-case-select','log-case-select','inv-case-select','time-filter-case'];
+  ids.forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const isFilter = id === 'time-filter-case';
+    const cur = el.value;
+    el.innerHTML = isFilter ? '<option value="">All cases</option>' : '<option value="">— select case —</option>';
+    state.cases.forEach(c => {
+      const opt = document.createElement('option');
+      opt.value = c.id;
+      opt.textContent = `${c.patient} (${c.id})`;
+      el.appendChild(opt);
+    });
+    if (cur) el.value = cur;
+  });
+}
+
+// ===== RECORD ANALYSIS =====
+function handleFileUpload(event) {
+  const files = Array.from(event.target.files);
+  uploadedFiles = [...uploadedFiles, ...files];
+  renderFileList();
+}
+function renderFileList() {
+  const el = document.getElementById('file-list');
+  el.innerHTML = uploadedFiles.map((f,i) => `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 8px;background:var(--gray-50);border-radius:var(--radius-sm);margin-bottom:4px;font-size:12px;"><span>📄 ${esc(f.name)}</span><button onclick="removeFile(${i})" style="border:none;background:none;color:var(--danger);cursor:pointer;">×</button></div>`).join('');
+}
+function removeFile(i) { uploadedFiles.splice(i,1); renderFileList(); }
+
+async function runRecordAnalysis() {
+  const caseId = document.getElementById('rec-case-select').value;
+  const type = document.getElementById('analysis-type').value;
+  const instructions = document.getElementById('analysis-instructions').value;
+  const area = document.getElementById('rec-result-area');
+  const pre = document.getElementById('rec-result');
+
+  let fileContext = '';
+  if (uploadedFiles.length > 0) {
+    fileContext = `Files uploaded: ${uploadedFiles.map(f => f.name).join(', ')}\n`;
+    // Try to read text files
+    for (const f of uploadedFiles) {
+      if (f.type === 'text/plain') {
+        try { fileContext += '\n--- ' + f.name + ' ---\n' + await f.text(); } catch(e) {}
+      }
+    }
+  }
+
+  const caseInfo = caseId ? state.cases.find(c => c.id === caseId) : null;
+  const caseContext = caseInfo ? `Patient: ${caseInfo.patient}, Case type: ${caseInfo.type}, Attorney: ${caseInfo.attorney}` : '';
+
+  const typeLabels = { chronology: 'detailed medical chronology', summary: 'comprehensive narrative summary', gaps: 'analysis of care gaps and inconsistencies', providers: 'list of all providers, diagnoses, and medications', full: 'full comprehensive LNC analysis including chronology, summary, gaps, providers, and nursing care assessment' };
+
+  const prompt = `You are an expert Legal Nurse Consultant reviewing medical records. 
+${caseContext ? 'Case context: ' + caseContext : ''}
+${fileContext ? 'Record context: ' + fileContext : 'No records were uploaded — generate a demonstration template.'}
+${instructions ? 'Special instructions: ' + instructions : ''}
+
+Please produce a ${typeLabels[type] || type}. Format your response clearly with sections, dates, and source references where applicable. Use professional LNC terminology. If no records were provided, create a clearly labeled example/template showing the format.`;
+
+  area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Analyzing records with AI...</span></div>';
+  pre.style.display = 'none';
+  document.getElementById('copy-rec-btn').style.display = 'none';
+
+  try {
+    const res = await callClaude(prompt);
+    area.style.display = 'none';
+    pre.textContent = res;
+    pre.style.display = 'block';
+    document.getElementById('copy-rec-btn').style.display = '';
+  } catch(e) {
+    area.innerHTML = `<div class="alert alert-danger">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+// ===== REPORT BUILDER =====
+async function runReportDraft() {
+  const caseId = document.getElementById('rep-case-select').value;
+  const caseInfo = caseId ? state.cases.find(c => c.id === caseId) : null;
+  const type = document.getElementById('rep-type').value;
+  const specialty = document.getElementById('rep-specialty').value;
+  const findings = document.getElementById('rep-findings').value;
+  const opinion = document.getElementById('rep-opinion').value;
+  const audience = document.getElementById('rep-audience').value;
+
+  if (!findings.trim()) { alert('Please enter your key findings.'); return; }
+
+  const area = document.getElementById('rep-result-area');
+  const ta = document.getElementById('rep-result');
+
+  const typeLabels = { standard_of_care: 'Standard of Care Analysis Report', causation: 'Causation Analysis Report', chronology: 'Medical Chronology Report', damages: 'Damages Summary Report', screening: 'Case Screening Report', rebuttal: 'Rebuttal Report', custom: 'LNC Report' };
+
+  let styleNote = '';
+  const exampleFile = document.getElementById('rep-example-file').files[0];
+  if (exampleFile && exampleFile.type === 'text/plain') {
+    try { styleNote = 'Match the writing style and structure of this example report:\n' + await exampleFile.text(); } catch(e) {}
+  }
+
+  const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+  const prompt = `You are Deborah J Edmonds BSN, RN, LNHA, GERO-BC — a legal nurse consultant with over 35 years of healthcare experience encompassing long-term care, sub-acute rehab, medical-surgical and neurological/orthopedic nursing, operating room settings, and nursing leadership and administration. Your business is Chart Detectives Legal Nurse Consulting, LLC.
+
+You are drafting a ${typeLabels[type] || 'Comprehensive Nurse Review'} for an attorney. Use EXACTLY the structure, tone, and style described below.
+
+CASE INFO: ${caseInfo ? caseInfo.patient + ' — ' + caseInfo.type + ' — ' + caseInfo.side + "'s case — Attorney: " + caseInfo.attorney + (caseInfo.firm ? ', ' + caseInfo.firm : '') : '[case details not provided]'}
+SPECIALTY: ${specialty}
+KEY FINDINGS: ${findings}
+PROFESSIONAL OPINION: ${opinion || '[to be completed by Debbie]'}
+AUDIENCE NOTES: ${audience || 'Standard LNC report for plaintiff attorney review'}
+${styleNote ? 'STYLE REFERENCE: ' + styleNote : ''}
+
+FORMAT THE FULL REPORT AS FOLLOWS:
+
+Comprehensive Nurse Review
+Deborah J Edmonds BSN, RN, LNHA, GERO-BC
+
+[Today's date: ${today}]
+
+[Attorney Name], Esq.
+[Law Firm Name]
+[Address]
+
+Re: [FULL CASE CAPTION IN ALL CAPS — use patient name from case info]
+
+Introduction
+Write 2-3 sentences establishing qualifications: 35+ years diverse healthcare experience encompassing long-term care, sub-acute rehab, medical-surgical and neurological/orthopedic nursing, operating room settings, and nursing leadership and administration; BSN and geriatric nursing certification; full-time legal nurse consultant with active RN and Nursing Home Administrator licenses in Michigan.
+
+Brief Chronology
+Bullet list of facility/hospital/care transitions with date ranges, based on the findings provided. End with "Death: [date]" if applicable.
+
+Injury Analysis:
+[Write this section in italics in the final output — note this with *italics* markdown]
+Narrative paragraph describing how the injury developed, key clinical turning points, and how the patient's condition deteriorated. Reference document codes in brackets like [A-126] where provided in findings.
+
+Deviations from the standards of care: [Facility Name] ([Date range])
+Bulleted list of deviations. Each top-level bullet must:
+• Start with "The facility failed to..."
+• Include the applicable federal CFR citation in brackets, e.g. [42 CFR §483.21(b)(1)(c)(3)(i)]
+  o Sub-bullets with specific dated examples from the record
+    ▪ The standard of care requires... [explanation]
+
+Use real CFR citations appropriate to long-term care/nursing home cases: 42 CFR §483.21 (care planning), §483.25 (quality of care, pressure ulcers, hydration, pain), §483.70 (medical records), §483.10 (resident rights).
+
+Records reviewed and record Legend:
+[Table: Prefix | File Name | Total Pages — use placeholders if not provided]
+
+Chronology:
+Detailed two-column chronological table of clinical events. Left column: date, facility/source. Right column: clinical detail, findings, orders. Far right: provider name. Be thorough — cover the full clinical course.
+
+Medical History
+Bullet list of all diagnoses and relevant conditions.
+
+History of Illness
+Narrative paragraph(s) describing prior hospitalizations and medical history leading to the at-issue admission, with dates.
+
+Opinion
+Write 4-6 substantial paragraphs covering: (1) admission risks and failure to monitor/plan, (2) infection monitoring failures, (3) skin integrity/wound care failures, (4) pain management failures, (5) documentation and medication administration failures, (6) summary of how these failures cascaded into harm.
+
+The final two paragraphs must read verbatim as follows (fill in bracketed fields):
+"It is my opinion, to a reasonable degree of nursing certainty, that the care and skill exhibited in the treatment of [patient name] fell outside acceptable professional nursing standards. The facility failed to implement proactive care plans for skin care, hydration, infection, and pain. These breaches constituted neglect, increased the risk of harm, and were a foreseeable cause of preventable injuries."
+
+"Based on my education and extensive experience as a registered nurse, Director of Nursing, Regional Clinical Nurse, and Legal Nurse Consultant, it is my opinion to a reasonable degree of nursing certainty that the care provided to [patient name] at [facility name] is below the standards of care provided by commonly accepted clinical guidelines and violated federal regulations. These opinions are based on the records provided and reviewed to date."
+
+Then add:
+"Thank you for the opportunity to review these records. I reserve the right to revise my opinion should additional records or testimony be provided to me. If you have any questions, please do not hesitate to contact me."
+
+"I declare under penalty of perjury that the foregoing report is true and accurate to the best of my knowledge."
+
+Sincerely,
+
+Deborah J Edmonds BSN, RN, LNHA, GERO-BC
+Chart Detectives Legal Nurse Consulting, LLC
+
+---
+Write the complete report. Be thorough and detailed. Use formal third-person clinical language. Cite federal regulations for every deviation. Do not truncate or summarize.`;
+
+  area.style.display = 'none';
+  ta.style.display = 'none';
+  area.style.display = 'block';
+  area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Drafting your report with AI...</span></div>';
+  document.getElementById('copy-rep-btn').style.display = 'none';
+  document.getElementById('export-rep-btn').style.display = 'none';
+
+  try {
+    const res = await callClaude(prompt);
+    area.style.display = 'none';
+    ta.value = res;
+    ta.style.display = 'block';
+    document.getElementById('copy-rep-btn').style.display = '';
+    document.getElementById('export-rep-btn').style.display = '';
+  } catch(e) {
+    area.innerHTML = `<div class="alert alert-danger">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+function exportReport() {
+  const text = document.getElementById('rep-result').value;
+  if (!text) return;
+  const blob = new Blob([text], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'LNC_Report_' + new Date().toISOString().split('T')[0] + '.txt';
+  a.click();
+}
+
+// ===== RESEARCH =====
+async function runResearch() {
+  const query = document.getElementById('research-query').value.trim();
+  if (!query) { alert('Please enter a research question.'); return; }
+  const specialty = document.getElementById('research-specialty').value;
+  const period = document.getElementById('research-period').value;
+  const date = document.getElementById('research-date').value;
+
+  const area = document.getElementById('res-result-area');
+  const pre = document.getElementById('res-result');
+  area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Researching standard of care...</span></div>';
+  pre.style.display = 'none';
+  document.getElementById('copy-res-btn').style.display = 'none';
+
+  const prompt = `You are an expert Legal Nurse Consultant conducting a standard of care research review.
+
+Clinical question: ${query}
+Specialty: ${specialty}
+${period ? 'Time period: ' + period : ''}
+${date ? 'Incident date: ' + date : ''}
+
+Provide a structured standard of care research summary including:
+
+1. APPLICABLE STANDARDS OF CARE
+   - Relevant clinical guidelines and their sources (ANA, CMS, JCAHO, specialty society guidelines, etc.)
+   - Applicable federal/state regulations if relevant
+   - Community standard considerations
+
+2. CLINICAL EXPECTATIONS
+   - What a reasonably prudent nurse/provider should have done
+   - Specific clinical benchmarks and timeframes
+   - Documentation requirements
+
+3. DEVIATION INDICATORS
+   - Common deviations seen in litigation for this issue
+   - Red flags to look for in the records
+
+4. SUPPORTING LITERATURE
+   - Key evidence-based practice references (cite by author, publication, year where possible)
+   - Clinical pathways or protocols typically in use
+
+5. EXPERT OPINION FOUNDATION
+   - How to frame the standard of care opinion
+   - Key points for attorney education
+
+Note any limitations and recommend records-specific verification.`;
+
+  try {
+    const res = await callClaude(prompt);
+    area.style.display = 'none';
+    pre.textContent = res;
+    pre.style.display = 'block';
+    document.getElementById('copy-res-btn').style.display = '';
+  } catch(e) {
+    area.innerHTML = `<div class="alert alert-danger">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+// ===== TIME TRACKING =====
+function startTimer() {
+  if (!document.getElementById('timer-case-select').value) { alert('Please select a case first.'); return; }
+  timerRunning = true;
+  timerStart = Date.now() - timerElapsed;
+  timerInterval = setInterval(updateTimerDisplay, 1000);
+  document.getElementById('timer-start-btn').disabled = true;
+  document.getElementById('timer-stop-btn').disabled = false;
+  document.getElementById('timer-status').textContent = 'Running...';
+}
+
+function stopTimer() {
+  if (!timerRunning) return;
+  clearInterval(timerInterval);
+  timerRunning = false;
+  timerElapsed = Date.now() - timerStart;
+  const hours = timerElapsed / 3600000;
+  const caseId = document.getElementById('timer-case-select').value;
+  const activity = document.getElementById('timer-activity').value;
+  const notes = document.getElementById('timer-notes').value;
+  const caseInfo = state.cases.find(c => c.id === caseId);
+  state.timeEntries.push({
+    id: Date.now().toString(), caseId, patient: caseInfo ? caseInfo.patient : caseId,
+    activity, hours: Math.round(hours * 4) / 4, rate: caseInfo ? caseInfo.rate : 150,
+    notes, date: new Date().toISOString().split('T')[0]
+  });
+  save(); renderTimeEntries(); renderDashboard();
+  document.getElementById('timer-start-btn').disabled = false;
+  document.getElementById('timer-stop-btn').disabled = true;
+  document.getElementById('timer-status').textContent = 'Saved!';
+  resetTimer();
+}
+
+function resetTimer() {
+  clearInterval(timerInterval); timerRunning = false; timerElapsed = 0;
+  document.getElementById('timer-display').textContent = '00:00:00';
+  document.getElementById('timer-status').textContent = 'Stopped';
+  document.getElementById('timer-start-btn').disabled = false;
+  document.getElementById('timer-stop-btn').disabled = true;
+  document.getElementById('timer-notes').value = '';
+}
+
+function updateTimerDisplay() {
+  timerElapsed = Date.now() - timerStart;
+  const h = Math.floor(timerElapsed / 3600000).toString().padStart(2,'0');
+  const m = Math.floor((timerElapsed % 3600000) / 60000).toString().padStart(2,'0');
+  const s = Math.floor((timerElapsed % 60000) / 1000).toString().padStart(2,'0');
+  document.getElementById('timer-display').textContent = `${h}:${m}:${s}`;
+}
+
+function saveTimeEntry() {
+  const caseId = document.getElementById('log-case-select').value;
+  if (!caseId) { alert('Please select a case.'); return; }
+  const hours = parseFloat(document.getElementById('log-hours').value);
+  const caseInfo = state.cases.find(c => c.id === caseId);
+  state.timeEntries.push({
+    id: Date.now().toString(), caseId, patient: caseInfo ? caseInfo.patient : caseId,
+    activity: document.getElementById('log-activity').value,
+    hours, rate: caseInfo ? caseInfo.rate : 150,
+    notes: document.getElementById('log-notes').value,
+    date: document.getElementById('log-date').value
+  });
+  save(); closeModal('modal-log-time'); renderTimeEntries(); renderDashboard(); populateCaseDropdowns();
+}
+
+function renderTimeEntries() {
+  const filterCase = document.getElementById('time-filter-case') ? document.getElementById('time-filter-case').value : '';
+  let entries = state.timeEntries;
+  if (filterCase) entries = entries.filter(t => t.caseId === filterCase);
+  const tbody = document.getElementById('time-tbody');
+  if (!entries.length) {
+    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--gray-400);padding:24px;">No time entries.</td></tr>';
+    document.getElementById('time-summary').innerHTML = '';
+    return;
+  }
+  const totalH = entries.reduce((s,t) => s + t.hours, 0);
+  const totalAmt = entries.reduce((s,t) => s + t.hours * t.rate, 0);
+  document.getElementById('time-summary').innerHTML = `
+    <div class="stat-card" style="padding:10px 16px;"><div class="stat-label">Total hours</div><div class="stat-value" style="font-size:20px;">${totalH.toFixed(2)}</div></div>
+    <div class="stat-card" style="padding:10px 16px;"><div class="stat-label">Total billable</div><div class="stat-value" style="font-size:20px;">$${totalAmt.toFixed(2)}</div></div>
+  `;
+  tbody.innerHTML = [...entries].reverse().map(t => `
+    <tr>
+      <td>${fmt(t.date)}</td>
+      <td>${esc(t.patient)}</td>
+      <td>${esc(t.activity)}</td>
+      <td>${t.hours}h</td>
+      <td>$${t.rate}/hr</td>
+      <td><b>$${(t.hours * t.rate).toFixed(2)}</b></td>
+      <td style="color:var(--gray-400);">${esc(t.notes||'')}</td>
+      <td><button class="btn btn-danger btn-sm" onclick="deleteTimeEntry('${t.id}')">×</button></td>
+    </tr>
+  `).join('');
+}
+
+function deleteTimeEntry(id) {
+  state.timeEntries = state.timeEntries.filter(t => t.id !== id);
+  save(); renderTimeEntries(); renderDashboard();
+}
+
+function exportTimeToCSV() {
+  if (!state.timeEntries.length) { alert('No time entries to export.'); return; }
+  const rows = [['Date','Case','Patient','Activity','Hours','Rate','Amount','Notes']];
+  state.timeEntries.forEach(t => rows.push([t.date, t.caseId, t.patient, t.activity, t.hours, t.rate, (t.hours*t.rate).toFixed(2), t.notes||'']));
+  downloadCSV(rows, 'time_entries.csv');
+}
+
+function exportToQuickBooks() {
+  if (!state.timeEntries.length) { alert('No time entries to export.'); return; }
+  // QuickBooks IIF format
+  let iif = 'TIMTXN\tDATE\tEMP\tCUST:JOB\tITEM\tDURATION\tNOTE\n';
+  state.timeEntries.forEach(t => {
+    iif += `TIMTXN\t${t.date}\tDeborah Edmonds\t${t.patient}\t${t.activity}\t${t.hours}\t${t.notes||''}\n`;
+  });
+  const blob = new Blob([iif], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'quickbooks_time_' + new Date().toISOString().split('T')[0] + '.iif';
+  a.click();
+  alert('QuickBooks IIF file downloaded. Import via QuickBooks → File → Utilities → Import → IIF Files.');
+}
+
+// ===== BILLING =====
+function addInvoiceLineItem() {
+  invoiceLineItems.push({ desc: '', qty: 1, rate: 150, amount: 150 });
+  renderInvoiceItems();
+}
+
+function renderInvoiceItems() {
+  const el = document.getElementById('inv-items-list');
+  el.innerHTML = invoiceLineItems.map((item, i) => `
+    <div style="display:grid;grid-template-columns:2fr 80px 90px 80px 30px;gap:6px;align-items:center;margin-bottom:6px;">
+      <input type="text" class="form-control" value="${esc(item.desc)}" placeholder="Description" onchange="updateLineItem(${i},'desc',this.value)" style="font-size:12px;padding:5px 8px;">
+      <input type="number" class="form-control" value="${item.qty}" min="0" step="0.25" onchange="updateLineItem(${i},'qty',this.value)" style="font-size:12px;padding:5px 8px;" placeholder="Qty">
+      <input type="number" class="form-control" value="${item.rate}" min="0" onchange="updateLineItem(${i},'rate',this.value)" style="font-size:12px;padding:5px 8px;" placeholder="Rate">
+      <span style="font-size:13px;font-weight:500;text-align:right;">$${(item.qty*item.rate).toFixed(2)}</span>
+      <button onclick="removeLineItem(${i})" style="border:none;background:none;color:var(--danger);cursor:pointer;font-size:16px;">×</button>
+    </div>
+  `).join('');
+  const total = invoiceLineItems.reduce((s,i) => s + i.qty*i.rate, 0);
+  document.getElementById('inv-total-display').textContent = '$' + total.toFixed(2);
+}
+
+function updateLineItem(i, field, val) {
+  invoiceLineItems[i][field] = field === 'desc' ? val : parseFloat(val) || 0;
+  renderInvoiceItems();
+}
+function removeLineItem(i) { invoiceLineItems.splice(i,1); renderInvoiceItems(); }
+
+function populateInvoiceFromCase() {
+  const caseId = document.getElementById('inv-case-select').value;
+  const caseInfo = state.cases.find(c => c.id === caseId);
+  if (!caseInfo) return;
+  // Pull unbilled time for this case
+  const entries = state.timeEntries.filter(t => t.caseId === caseId && !t.billed);
+  if (entries.length) {
+    invoiceLineItems = entries.map(t => ({ desc: `${t.activity} (${t.date})`, qty: t.hours, rate: t.rate, amount: t.hours*t.rate, timeId: t.id }));
+    renderInvoiceItems();
+  }
+}
+
+function saveInvoice() {
+  const caseId = document.getElementById('inv-case-select').value;
+  if (!caseId) { alert('Please select a case.'); return; }
+  const caseInfo = state.cases.find(c => c.id === caseId);
+  const total = invoiceLineItems.reduce((s,i) => s + i.qty*i.rate, 0);
+  const inv = {
+    id: Date.now().toString(),
+    num: state.nextInvNum++,
+    caseId, patient: caseInfo ? caseInfo.patient : '',
+    attorney: caseInfo ? caseInfo.attorney : '',
+    firm: caseInfo ? caseInfo.firm : '',
+    date: document.getElementById('inv-date').value,
+    dueDate: document.getElementById('inv-due').value,
+    lineItems: [...invoiceLineItems],
+    total, status: 'sent',
+    notes: document.getElementById('inv-notes').value
+  };
+  // Mark time entries as billed
+  invoiceLineItems.forEach(item => { if (item.timeId) { const t = state.timeEntries.find(t => t.id === item.timeId); if (t) t.billed = true; }});
+  state.invoices.push(inv); save();
+  closeModal('modal-new-invoice');
+  invoiceLineItems = [{ desc: '', qty: 1, rate: 150, amount: 150 }];
+  renderInvoices(); renderDashboard();
+}
+
+function renderInvoices() {
+  const tbody = document.getElementById('invoice-tbody');
+  if (!state.invoices.length) {
+    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--gray-400);padding:24px;">No invoices yet.</td></tr>';
+    updateBillingStats();
+    document.getElementById('reminder-list').innerHTML = '<p style="color:var(--gray-400);font-size:13px;">No overdue invoices.</p>';
+    return;
+  }
+  tbody.innerHTML = [...state.invoices].reverse().map(inv => `
+    <tr>
+      <td><b>#${inv.num}</b></td>
+      <td>${esc(inv.patient)}</td>
+      <td>${esc(inv.attorney)}<br><span style="font-size:11px;color:var(--gray-400);">${esc(inv.firm)}</span></td>
+      <td>${fmt(inv.date)}</td>
+      <td style="${inv.status !== 'paid' && isPast(inv.dueDate) ? 'color:var(--danger);font-weight:500;' : ''}">${fmt(inv.dueDate)}</td>
+      <td><b>$${(inv.total||0).toFixed(2)}</b></td>
+      <td>${statusBadge(inv.status)}</td>
+      <td>
+        <div style="display:flex;gap:4px;">
+          ${inv.status !== 'paid' ? `<button class="btn btn-outline btn-sm" onclick="markPaid('${inv.id}')">Mark Paid</button>` : ''}
+          ${inv.status === 'sent' && isPast(inv.dueDate) ? `<button class="btn btn-gold btn-sm" onclick="sendReminder(${JSON.stringify(inv).split('"').join("'")})">Remind</button>` : ''}
+          <button class="btn btn-outline btn-sm" onclick="printInvoice('${inv.id}')">View</button>
+        </div>
+      </td>
+    </tr>
+  `).join('');
+  updateBillingStats();
+  renderReminders();
+}
+
+function updateBillingStats() {
+  const total = state.invoices.reduce((s,i) => s + (i.total||0), 0);
+  const paid = state.invoices.filter(i => i.status === 'paid').reduce((s,i) => s + (i.total||0), 0);
+  const outstanding = state.invoices.filter(i => i.status !== 'paid' && i.status !== 'void').reduce((s,i) => s + (i.total||0), 0);
+  const overdue = state.invoices.filter(i => i.status === 'sent' && isPast(i.dueDate)).reduce((s,i) => s + (i.total||0), 0);
+  document.getElementById('bill-total').textContent = '$' + total.toFixed(0);
+  document.getElementById('bill-paid').textContent = '$' + paid.toFixed(0);
+  document.getElementById('bill-outstanding').textContent = '$' + outstanding.toFixed(0);
+  document.getElementById('bill-overdue').textContent = '$' + overdue.toFixed(0);
+}
+
+function renderReminders() {
+  const overdue = state.invoices.filter(i => i.status === 'sent' && isPast(i.dueDate));
+  const el = document.getElementById('reminder-list');
+  if (!overdue.length) { el.innerHTML = '<p style="color:var(--gray-400);font-size:13px;">No overdue invoices.</p>'; return; }
+  el.innerHTML = overdue.map(inv => `
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--gray-50);">
+      <div>
+        <span class="badge badge-danger">Overdue ${-daysUntil(inv.dueDate)} days</span>
+        <span style="margin-left:8px;font-size:13px;font-weight:500;">#${inv.num} · ${esc(inv.patient)}</span>
+        <span style="margin-left:8px;font-size:13px;color:var(--gray-400);">$${inv.total.toFixed(2)} · ${esc(inv.attorney)}</span>
+      </div>
+      <button class="btn btn-gold btn-sm" onclick='sendReminder(${JSON.stringify(inv)})'>Generate Reminder</button>
+    </div>
+  `).join('');
+}
+
+function markPaid(id) {
+  const inv = state.invoices.find(i => i.id === id);
+  if (inv) { inv.status = 'paid'; inv.paidDate = new Date().toISOString().split('T')[0]; save(); renderInvoices(); renderDashboard(); }
+}
+
+async function sendReminder(inv) {
+  if (typeof inv === 'string') inv = JSON.parse(inv.replace(/'/g, '"'));
+  const modal = document.getElementById('modal-reminder');
+  const content = document.getElementById('reminder-email-content');
+  content.textContent = 'Generating reminder email...';
+  openModal('modal-reminder');
+  const daysOver = -daysUntil(inv.dueDate);
+  const prompt = `Write a professional, firm but polite invoice payment reminder email from a Legal Nurse Consulting firm.
+
+Details:
+- Invoice #${inv.num}
+- Amount due: $${inv.total.toFixed(2)}
+- Original due date: ${inv.dueDate}
+- Days overdue: ${daysOver}
+- Attorney/client: ${inv.attorney} at ${inv.firm}
+- Case: ${inv.patient}
+- LNC consultant name: Deborah J Edmonds BSN, RN, LNHA, GERO-BC, Chart Detectives Legal Nurse Consulting, LLC
+
+Write the email from Deborah Edmonds's perspective, representing Chart Detectives Legal Nurse Consulting, LLC. Include: subject line, professional greeting, invoice details, clear call to action, and polite closing. Keep it under 200 words.`;
+  try {
+    const res = await callClaude(prompt);
+    content.textContent = res;
+  } catch(e) {
+    content.textContent = 'Error generating email: ' + e.message;
+  }
+}
+
+function copyReminderEmail() {
+  const text = document.getElementById('reminder-email-content').textContent;
+  navigator.clipboard.writeText(text).then(() => alert('Email copied to clipboard!'));
+}
+
+function printInvoice(id) {
+  const inv = state.invoices.find(i => i.id === id);
+  if (!inv) return;
+  const w = window.open('', '_blank');
+  w.document.write(`<html><head><title>Invoice #${inv.num}</title><style>body{font-family:sans-serif;max-width:700px;margin:40px auto;color:#222;}h1{color:#1a2744;}table{width:100%;border-collapse:collapse;}th,td{padding:8px;border:1px solid #ddd;text-align:left;}th{background:#f5f5f5;}.total{font-size:18px;font-weight:bold;}.footer{margin-top:40px;font-size:12px;color:#999;}</style></head><body>
+<script>
+(function(){
+  const correct = 'Anthony51';
+  let stored = sessionStorage.getItem('lnc_auth');
+  if(stored !== correct){
+    let attempt = '';
+    while(attempt !== correct){
+      attempt = prompt('Chart Detectives LNC Workstation\n\nPlease enter your password:', '');
+      if(attempt === null){ document.body.innerHTML = '<div style="font-family:sans-serif;text-align:center;padding:80px;color:#1a2744;"><h2>Access Denied</h2><p>Please refresh to try again.</p></div>'; return; }
+      if(attempt !== correct){ alert('Incorrect password. Please try again.'); }
+    }
+    sessionStorage.setItem('lnc_auth', correct);
+  }
+})();
+</script>
+
+  <h1>Invoice #${inv.num}</h1>
+  <div style="display:flex;align-items:center;gap:16px;margin-bottom:8px;">
+<img src="data:image/png;base64,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" alt="Chart Detectives Legal Nurse Consulting" style="height:48px;width:auto;display:block;margin-bottom:10px;">
+  </div>
+  <p><strong>From:</strong> Deborah J Edmonds BSN, RN, LNHA, GERO-BC — Chart Detectives Legal Nurse Consulting, LLC</p>
+  <p><strong>To:</strong> ${esc(inv.attorney)}, ${esc(inv.firm)}</p>
+  <p><strong>Re:</strong> ${esc(inv.patient)}</p>
+  <p><strong>Date:</strong> ${inv.date} &nbsp;&nbsp; <strong>Due:</strong> ${inv.dueDate}</p>
+  <hr>
+  <table><tr><th>Description</th><th>Qty/Hours</th><th>Rate</th><th>Amount</th></tr>
+  ${(inv.lineItems||[]).map(li => `<tr><td>${esc(li.desc)}</td><td>${li.qty}</td><td>$${li.rate}</td><td>$${(li.qty*li.rate).toFixed(2)}</td></tr>`).join('')}
+  </table>
+  <p class="total" style="text-align:right;margin-top:16px;">Total: $${inv.total.toFixed(2)}</p>
+  ${inv.notes ? `<p style="margin-top:16px;font-size:13px;">${esc(inv.notes)}</p>` : ''}
+  <div class="footer">Generated by LNC Workstation</div>
+  </body></html>`);
+  w.document.close(); w.print();
+}
+
+function exportInvoicesCSV() {
+  if (!state.invoices.length) { alert('No invoices to export.'); return; }
+  const rows = [['Invoice #','Patient','Attorney','Firm','Date','Due Date','Total','Status']];
+  state.invoices.forEach(i => rows.push([i.num, i.patient, i.attorney, i.firm, i.date, i.dueDate, i.total.toFixed(2), i.status]));
+  downloadCSV(rows, 'invoices.csv');
+}
+
+function syncQuickBooks() {
+  if (!state.invoices.length) { alert('No invoices to sync.'); return; }
+  // Generate QuickBooks IIF invoice format
+  let iif = 'TRNS\tTRNSTYPE\tDATE\tACCNT\tNAME\tAMOUNT\tMEMO\n';
+  iif += 'SPL\tTRNSTYPE\tDATE\tACCNT\tNAME\tAMOUNT\tMEMO\n';
+  iif += 'ENDTRNS\n';
+  state.invoices.filter(i => i.status !== 'void').forEach(inv => {
+    iif += `TRNS\tINVOICE\t${inv.date}\tAccounts Receivable\t${inv.attorney}\t${inv.total.toFixed(2)}\tInvoice #${inv.num} - ${inv.patient}\n`;
+    (inv.lineItems||[]).forEach(li => { iif += `SPL\tINVOICE\t${inv.date}\tConsulting Income\t${inv.attorney}\t-${(li.qty*li.rate).toFixed(2)}\t${li.desc}\n`; });
+    iif += 'ENDTRNS\n';
+  });
+  const blob = new Blob([iif], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'quickbooks_invoices_' + new Date().toISOString().split('T')[0] + '.iif';
+  a.click();
+  alert('QuickBooks IIF file downloaded!\n\nTo import: QuickBooks → File → Utilities → Import → IIF Files');
+}
+
+// ===== CLAUDE API =====
+async function callClaude(prompt) {
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: CLAUDE_MODEL,
+      max_tokens: 2000,
+      system: 'You are Deborah J Edmonds BSN, RN, LNHA, GERO-BC, a legal nurse consultant with Chart Detectives Legal Nurse Consulting, LLC. You have over 35 years of healthcare experience and deep knowledge of medical standards, nursing practice, federal long-term care regulations (42 CFR), and legal documentation. Provide thorough, professional, and accurate responses appropriate for use in legal proceedings.',
+      messages: [{ role: 'user', content: prompt }]
+    })
+  });
+  if (!res.ok) { const err = await res.json(); throw new Error(err.error?.message || 'API error'); }
+  const data = await res.json();
+  return data.content.map(b => b.text || '').join('');
+}
+
+// ===== HELPERS =====
+function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function fmt(d) { if (!d) return '—'; const p = d.split('-'); if (p.length < 3) return d; return `${p[1]}/${p[2]}/${p[0].slice(2)}`; }
+function isPast(d) { if (!d) return false; return new Date(d) < new Date(new Date().toDateString()); }
+function daysUntil(d) { if (!d) return 999; return Math.ceil((new Date(d) - new Date(new Date().toDateString())) / 86400000); }
+function initials(name) { return (name||'?').split(/[\s,]+/).filter(Boolean).map(w => w[0]).slice(0,2).join('').toUpperCase(); }
+function statusBadge(s) {
+  const m = { sent: 'badge-info', paid: 'badge-success', overdue: 'badge-danger', draft: 'badge-navy', void: 'badge-navy' };
+  return `<span class="badge ${m[s]||'badge-navy'}">${s}</span>`;
+}
+function copyResult(id) {
+  const el = document.getElementById(id);
+  const text = el.tagName === 'TEXTAREA' ? el.value : el.textContent;
+  navigator.clipboard.writeText(text).then(() => alert('Copied to clipboard!'));
+}
+function downloadCSV(rows, filename) {
+  const csv = rows.map(r => r.map(v => `"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = filename; a.click();
+}
+
+// Upload drag-drop
+const uz = document.getElementById('upload-zone');
+uz.addEventListener('dragover', e => { e.preventDefault(); uz.classList.add('drag'); });
+uz.addEventListener('dragleave', () => uz.classList.remove('drag'));
+uz.addEventListener('drop', e => { e.preventDefault(); uz.classList.remove('drag'); const files = Array.from(e.dataTransfer.files); uploadedFiles = [...uploadedFiles, ...files]; renderFileList(); });
+</script>
+</body>
+</html>
