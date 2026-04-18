@@ -1679,20 +1679,22 @@ function syncQuickBooks() {
 // ===== CLAUDE API =====
 async function callClaude(prompt) {
   if (!PROXY_URL || PROXY_URL === 'YOUR_CLOUDFLARE_WORKER_URL_HERE') {
-    throw new Error('Proxy not configured. Please set your Cloudflare Worker URL in the app.');
+    throw new Error('Proxy not configured.');
   }
+  // Use no-cors-friendly approach: send as text/plain to avoid preflight
+  const payload = JSON.stringify({
+    auth: 'Anthony51',
+    payload: {
+      model: CLAUDE_MODEL,
+      max_tokens: 2000,
+      system: 'You are Deborah J Edmonds BSN, RN, LNHA, GERO-BC, a legal nurse consultant with Chart Detectives Legal Nurse Consulting, LLC. You have over 35 years of healthcare experience and deep knowledge of medical standards, nursing practice, federal long-term care regulations (42 CFR), and legal documentation. Provide thorough, professional, and accurate responses appropriate for use in legal proceedings.',
+      messages: [{ role: 'user', content: prompt }]
+    }
+  });
   const res = await fetch(PROXY_URL, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      auth: 'Anthony51',
-      payload: {
-        model: CLAUDE_MODEL,
-        max_tokens: 2000,
-        system: 'You are Deborah J Edmonds BSN, RN, LNHA, GERO-BC, a legal nurse consultant with Chart Detectives Legal Nurse Consulting, LLC. You have over 35 years of healthcare experience and deep knowledge of medical standards, nursing practice, federal long-term care regulations (42 CFR), and legal documentation. Provide thorough, professional, and accurate responses appropriate for use in legal proceedings.',
-        messages: [{ role: 'user', content: prompt }]
-      }
-    })
+    headers: { 'Content-Type': 'text/plain' },
+    body: payload
   });
   if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(err.error?.message || 'API error ' + res.status); }
   const data = await res.json();
