@@ -893,6 +893,10 @@ tr:hover td { background: var(--gray-50); }
 <script>
 const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
 
+// ===== PROXY CONFIG =====
+// After setting up your Cloudflare Worker, paste your Worker URL below
+const PROXY_URL = 'https://chartdetectives.tonyedmonds2003.workers.dev';
+
 // ===== STATE =====
 let state = {
   cases: [],
@@ -1674,17 +1678,23 @@ function syncQuickBooks() {
 
 // ===== CLAUDE API =====
 async function callClaude(prompt) {
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
+  if (!PROXY_URL || PROXY_URL === 'YOUR_CLOUDFLARE_WORKER_URL_HERE') {
+    throw new Error('Proxy not configured. Please set your Cloudflare Worker URL in the app.');
+  }
+  const res = await fetch(PROXY_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      model: CLAUDE_MODEL,
-      max_tokens: 2000,
-      system: 'You are Deborah J Edmonds BSN, RN, LNHA, GERO-BC, a legal nurse consultant with Chart Detectives Legal Nurse Consulting, LLC. You have over 35 years of healthcare experience and deep knowledge of medical standards, nursing practice, federal long-term care regulations (42 CFR), and legal documentation. Provide thorough, professional, and accurate responses appropriate for use in legal proceedings.',
-      messages: [{ role: 'user', content: prompt }]
+      auth: 'Anthony51',
+      payload: {
+        model: CLAUDE_MODEL,
+        max_tokens: 2000,
+        system: 'You are Deborah J Edmonds BSN, RN, LNHA, GERO-BC, a legal nurse consultant with Chart Detectives Legal Nurse Consulting, LLC. You have over 35 years of healthcare experience and deep knowledge of medical standards, nursing practice, federal long-term care regulations (42 CFR), and legal documentation. Provide thorough, professional, and accurate responses appropriate for use in legal proceedings.',
+        messages: [{ role: 'user', content: prompt }]
+      }
     })
   });
-  if (!res.ok) { const err = await res.json(); throw new Error(err.error?.message || 'API error'); }
+  if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(err.error?.message || 'API error ' + res.status); }
   const data = await res.json();
   return data.content.map(b => b.text || '').join('');
 }
