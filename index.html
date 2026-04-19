@@ -1279,7 +1279,9 @@ async function downscaleImageBlob(blob, maxDim, quality) {
 // Uses adaptive windowing: tries the biggest window first; if the serialized sub-PDF exceeds
 // maxBytes it halves the window and retries. Returns [{bytes, startPage, endPage, totalPages}].
 async function splitPdfIntoChunks(pdfBytes, maxBytes, maxPages) {
-  maxBytes = maxBytes || 20 * 1024 * 1024;  // 20 MB raw → ~27 MB base64, safe under Claude's 32MB per-doc limit
+  // 18 MB raw → ~24 MB base64 (safely under the downstream 25 MB per-attachment cap).
+  // Earlier value of 20 MB produced ~27 MB base64 chunks, which tripped the oversize guard.
+  maxBytes = maxBytes || 18 * 1024 * 1024;
   maxPages = maxPages || 90;                // safe under Claude's 100-page per-doc limit
   if (!window.PDFLib) throw new Error('PDF splitter (pdf-lib) not loaded — refresh and try again.');
   const { PDFDocument } = window.PDFLib;
@@ -1471,6 +1473,11 @@ async function ensureProcessedFolder(caseFolderId) {
 // Drive files have been split/converted, and the Drive IDs of the resulting artifacts.
 // Shape: { entries: { [sourceFileId]: { size, modifiedTime, kind: 'pdfChunks'|'heicJpeg', chunks:[{id,name,startPage,endPage,totalPages}] | jpegId } }, manifestFileId }
 const PROCESSED_MANIFEST_NAME = '_cache-manifest.json';
+// Bump this whenever splitter behavior changes (byte budget, compression options, etc.)
+// so we force a one-time re-split of stale cached chunks rather than re-using oversize output.
+//   v1: splitter maxBytes = 20 MB raw (→ ~27 MB base64, failed downstream 25 MB cap)
+//   v2: splitter maxBytes = 18 MB raw (→ ~24 MB base64, fits under 25 MB cap)
+const CHUNKER_VERSION = 2;
 
 async function loadProcessedManifest(processedFolderId) {
   if (!_driveToken) await driveSignIn(false);
@@ -1501,12 +1508,16 @@ async function saveProcessedManifest(manifest) {
   }
 }
 
-// True if the cached entry is still valid for the current source file metadata.
+// True if the cached entry is still valid for the current source file metadata
+// AND was produced by the current chunker version.
 function cacheEntryIsFresh(entry, sourceMeta) {
   if (!entry) return false;
   // Drive sometimes omits size for Google-native files but we only cache PDFs/HEICs so size is reliable.
   if (String(entry.size) !== String(sourceMeta.size)) return false;
   if (entry.modifiedTime !== sourceMeta.modifiedTime) return false;
+  // Reject stale chunker output (old byte budget, etc.). HEIC→JPEG entries predate versioning
+  // and don't need it, so only enforce on pdfChunks.
+  if (entry.kind === 'pdfChunks' && (entry.chunkerVersion || 1) !== CHUNKER_VERSION) return false;
   return true;
 }
 
@@ -2754,6 +2765,7 @@ async function runRecordAnalysis() {
                 size: sourceMeta.size,
                 modifiedTime: sourceMeta.modifiedTime,
                 kind: 'pdfChunks',
+                chunkerVersion: CHUNKER_VERSION,
                 chunks: chunkMeta
               };
               manifestDirty = true;
