@@ -910,7 +910,13 @@ const LOGO_B64 = 'iVBORw0KGgoAAAANSUhEUgAAArwAAACgCAIAAABhUyjdAAAACXBIWXMAABcSAA
 // restricted to the Drive + Picker APIs and to the tonyedmonds2003.github.io origin.
 const GOOGLE_CLIENT_ID = '596071943209-74kqaiismda2s6vca7kfvs5goc5co0eg.apps.googleusercontent.com';
 const GOOGLE_API_KEY   = 'AIzaSyDd3oLey0XlbgU0OGowIgvRaAGsHOB-6s0';
-const DRIVE_SCOPE      = 'https://www.googleapis.com/auth/drive.file';
+// Two scopes:
+//   drive.readonly — needed to READ files the app did not create (e.g. the PDFs Debbie
+//                    drops into a case folder). drive.file alone only exposes files that
+//                    were opened via Picker individually, so picking the folder wasn't enough.
+//   drive.file     — still needed so we can WRITE our generated analyses/reports back into
+//                    the picked folder. drive.readonly is read-only.
+const DRIVE_SCOPE      = 'https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file';
 
 let _tokenClient = null;      // Google Identity Services token client
 let _driveToken = null;       // current access token
