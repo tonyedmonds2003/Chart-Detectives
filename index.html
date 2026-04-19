@@ -2711,7 +2711,8 @@ async function runRecordAnalysis() {
               const partTitle = (cached.chunks.length === 1)
                 ? f.name
                 : f.name.replace(/\.pdf$/i,'') + ' — pp. ' + ck.startPage + '-' + ck.endPage + ' of ' + (ck.totalPages || '?') + '.pdf';
-              contentBlocks.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: b64 }, title: partTitle });
+              const cachedPageCount = (ck.endPage && ck.startPage) ? (ck.endPage - ck.startPage + 1) : 1;
+              contentBlocks.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: b64 }, title: partTitle, _pageCount: cachedPageCount });
             }
             continue;
           }
@@ -2732,7 +2733,8 @@ async function runRecordAnalysis() {
             const partTitle = (parts.length === 1)
               ? f.name
               : f.name.replace(/\.pdf$/i,'') + ' — pp. ' + p.startPage + '-' + p.endPage + ' of ' + p.totalPages + '.pdf';
-            contentBlocks.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: arrayBufferToBase64(p.bytes.buffer || p.bytes) }, title: partTitle });
+            const partPages = (p.endPage && p.startPage) ? (p.endPage - p.startPage + 1) : 1;
+            contentBlocks.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: arrayBufferToBase64(p.bytes.buffer || p.bytes) }, title: partTitle, _pageCount: partPages });
             if (processedFolderId && processedManifest) {
               try {
                 area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Caching chunk '+(pi+1)+'/'+parts.length+' of ' + esc(f.name) + ' to _processed…</span></div>';
@@ -2830,7 +2832,8 @@ async function runRecordAnalysis() {
           const partTitle = (parts.length === 1)
             ? f.name
             : f.name.replace(/\.pdf$/i,'') + ' — pp. ' + p.startPage + '-' + p.endPage + ' of ' + p.totalPages + '.pdf';
-          contentBlocks.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: arrayBufferToBase64(p.bytes.buffer || p.bytes) }, title: partTitle });
+          const partPages = (p.endPage && p.startPage) ? (p.endPage - p.startPage + 1) : 1;
+          contentBlocks.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: arrayBufferToBase64(p.bytes.buffer || p.bytes) }, title: partTitle, _pageCount: partPages });
         }
       } else if (isHeic) {
         let jpegBlob = await heicToJpegBlob(f);
@@ -2849,11 +2852,17 @@ async function runRecordAnalysis() {
     }
   }
 
-  // Compute total base64 bytes across all attachments. V8 can't build strings larger than
-  // ~512MB and the Cloudflare Worker caps at 100MB, so anything over ~40MB is batched.
+  // Compute total base64 bytes across all attachments. Anthropic's practical per-request ceiling
+  // (once JSON-wrapped with headers) is ~25 MB, not 32 — we learned the hard way via "Request
+  // exceeds the maximum size" errors on 30-40 MB batches. Claude's context window (200k tokens)
+  // and per-request PDF page cap (100) further constrain what a single call can hold — those are
+  // enforced alongside bytes inside chunkContentBlocks.
   const totalBase64Bytes = contentBlocks.reduce((n, b) => n + (b.source && b.source.data ? b.source.data.length : 0), 0);
+  const totalPages = contentBlocks.reduce((n, b) => n + (b.type === 'document' ? (b._pageCount || 1) : 1), 0);
   const totalMB = totalBase64Bytes / (1024 * 1024);
-  const SAFE_SINGLE_CALL_MB = 40;
+  const SAFE_SINGLE_CALL_MB    = 25;      // was 40 — empirically too large
+  const SAFE_SINGLE_CALL_PAGES = 90;      // 100 is Claude's hard cap; leave 10-page cushion
+  const SAFE_SINGLE_CALL_TOKENS = 150000; // leave ~50k of 200k window for prompt + response
 
   // Safety net: flag any single content block that's still oversize after PDF splitting
   // (shouldn't normally trigger, but protects against the rare case of a giant image).
@@ -2878,8 +2887,11 @@ async function runRecordAnalysis() {
     }
   }
 
-  // Branch A — total fits in a single call. Existing simple flow.
-  if (totalMB <= SAFE_SINGLE_CALL_MB) {
+  // Branch A — total fits in a single call. All three budgets must pass.
+  const fitsSingleCall = (totalMB <= SAFE_SINGLE_CALL_MB)
+                      && (totalPages <= SAFE_SINGLE_CALL_PAGES)
+                      && ((totalPages * 2200) <= SAFE_SINGLE_CALL_TOKENS);
+  if (fitsSingleCall) {
     const prompt = `You are an expert Legal Nurse Consultant reviewing medical records.
 ${caseContext ? 'Case context: ' + caseContext : ''}
 ${instructions ? 'Special instructions: ' + instructions : ''}
@@ -2887,7 +2899,7 @@ ${textAddendum ? '\nAdditional text records:' + textAddendum : ''}
 ${contentBlocks.length ? '\nThe medical records (PDFs/images) are attached. Review every page. Cite specific dates and record titles in your analysis.' : 'No records were provided — generate a demonstration template showing the format.'}
 
 Please produce a ${typeLabels[type] || type}. Format your response clearly with sections, dates, and source references where applicable. Use professional LNC terminology.`;
-    const messageContent = [{ type: 'text', text: prompt }, ...contentBlocks];
+    const messageContent = [{ type: 'text', text: prompt }, ...stripInternalFields(contentBlocks)];
     area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Analyzing ' + (contentBlocks.length || 'records') + (contentBlocks.length ? ' record(s) with AI…' : ' with AI…') + '</span></div>';
     pre.style.display = 'none';
     document.getElementById('copy-rec-btn').style.display = 'none';
@@ -2902,10 +2914,15 @@ Please produce a ${typeLabels[type] || type}. Format your response clearly with 
 
   // Branch B — total is too big for one call. Split into batches, extract facts from each,
   // then do a final synthesis call that combines all batch outputs into the requested report.
-  const batches = chunkContentBlocks(contentBlocks, SAFE_SINGLE_CALL_MB * 1024 * 1024);
+  const batches = chunkContentBlocks(
+    contentBlocks,
+    SAFE_SINGLE_CALL_MB * 1024 * 1024,
+    SAFE_SINGLE_CALL_PAGES,
+    SAFE_SINGLE_CALL_TOKENS
+  );
   const estCalls = batches.length + 1;
   const ok = confirm(
-    'This case has ' + contentBlocks.length + ' file(s) totaling ~' + totalMB.toFixed(0) + ' MB — too much for a single AI call.\n\n' +
+    'This case has ' + contentBlocks.length + ' file(s) totaling ~' + totalMB.toFixed(0) + ' MB (~' + totalPages + ' pages) — too much for a single AI call.\n\n' +
     'I can split them into ' + batches.length + ' batch(es), extract facts from each, then synthesize a final ' + (typeLabels[type] || type) + '.\n\n' +
     'This will make ~' + estCalls + ' AI calls and may take several minutes.\n\nContinue?'
   );
@@ -2920,7 +2937,8 @@ Please produce a ${typeLabels[type] || type}. Format your response clearly with 
   for (let bi = 0; bi < batches.length; bi++) {
     const batch = batches[bi];
     const batchMB = batch.reduce((n,b) => n + ((b.source && b.source.data) ? b.source.data.length : 0), 0) / (1024*1024);
-    area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>AI analysis — batch ' + (bi+1) + ' of ' + batches.length + ' (' + batch.length + ' file' + (batch.length>1?'s':'') + ', ' + batchMB.toFixed(0) + ' MB)…</span></div>';
+    const batchPages = batch.reduce((n,b) => n + (b.type === 'document' ? (b._pageCount || 1) : 1), 0);
+    area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>AI analysis — batch ' + (bi+1) + ' of ' + batches.length + ' (' + batch.length + ' file' + (batch.length>1?'s':'') + ', ' + batchMB.toFixed(0) + ' MB, ~' + batchPages + ' pages)…</span></div>';
     const batchPromptText = `You are an expert Legal Nurse Consultant reviewing medical records.
 ${caseContext ? 'Case context: ' + caseContext : ''}
 ${instructions ? 'Special instructions: ' + instructions : ''}
@@ -2935,13 +2953,16 @@ This is BATCH ${bi+1} of ${batches.length} for a large case. From the records at
 • Any photos/images: describe what is visible and cite the source filename
 
 Be thorough and factual. Cite the source record name/date for each fact. Do NOT write a narrative summary yet — just extract facts. A final synthesis step will combine your extractions across all batches into the full ${typeLabels[type] || type}.`;
-    const batchContent = [{ type: 'text', text: batchPromptText }, ...batch];
+    const batchContent = [{ type: 'text', text: batchPromptText }, ...stripInternalFields(batch)];
     try {
       const r = await callClaude(batchContent);
       batchOutputs.push({ batch: bi+1, text: r });
     } catch(e) {
       batchOutputs.push({ batch: bi+1, text: '[BATCH ' + (bi+1) + ' ERROR: ' + e.message + ']' });
     }
+    // Brief pause between batches to ease rate-limiting and let the proxy's connection pool recover.
+    // Matters on runs with 20+ batches where the last few were prone to "Failed to fetch".
+    if (bi < batches.length - 1) await new Promise(r => setTimeout(r, 750));
   }
 
   // Synthesis pass (text only — small payload).
@@ -2973,31 +2994,60 @@ ${batchOutputs.map(br => '===== BATCH ' + br.batch + ' EXTRACTION =====\n' + br.
   }
 }
 
-// Split an array of Claude content blocks into sub-arrays where each sub-array's combined
-// base64 byte count is ≤ maxBytes. Blocks larger than maxBytes are placed alone (caller
-// should have already flagged these as oversize).
-function chunkContentBlocks(blocks, maxBytes) {
+// Split an array of Claude content blocks into sub-arrays where each sub-array honors
+// THREE budgets simultaneously:
+//   • combined base64 byte count ≤ maxBytes (default ~25 MB — Anthropic's practical per-request ceiling
+//     once JSON wrapping and headers are included)
+//   • combined PDF page count ≤ maxPages (default 90 — Claude caps at 100 pages per request)
+//   • combined token estimate ≤ maxTokens (default ~150k — leaves headroom under the 200k context window
+//     for the system prompt, user prompt text, and the response itself)
+// PDF blocks may carry a `_pageCount` sidecar field (stripped before sending) so we can budget them
+// accurately. Images are assumed to be ~1 page / ~1.5k tokens.
+function chunkContentBlocks(blocks, maxBytes, maxPages, maxTokens) {
+  maxBytes  = maxBytes  || 25 * 1024 * 1024;
+  maxPages  = maxPages  || 90;
+  maxTokens = maxTokens || 150000;
+  const pagesFor  = b => (b.type === 'document') ? (b._pageCount || 1) : 1;
+  // Claude PDF token cost runs ~1500-3000 per page depending on layout. Use 2200 as a middle estimate
+  // and 1500 per image. This is rough but keeps us well inside the 200k window.
+  const tokensFor = b => (b.type === 'document') ? (pagesFor(b) * 2200) : 1500;
+
   const batches = [];
   let cur = [];
-  let curSize = 0;
+  let curSize = 0, curPages = 0, curTokens = 0;
   for (const b of blocks) {
     const sz = (b.source && b.source.data) ? b.source.data.length : 0;
-    if (sz > maxBytes) { // lone oversize — its own batch (shouldn't normally reach here)
-      if (cur.length) { batches.push(cur); cur = []; curSize = 0; }
+    const pg = pagesFor(b);
+    const tk = tokensFor(b);
+    const fitsNew = (sz <= maxBytes && pg <= maxPages && tk <= maxTokens);
+    if (!fitsNew) { // lone oversize — its own batch (shouldn't normally reach here after splitPdfIntoChunks)
+      if (cur.length) { batches.push(cur); cur = []; curSize = 0; curPages = 0; curTokens = 0; }
       batches.push([b]);
       continue;
     }
-    if (curSize + sz > maxBytes && cur.length) {
+    const wouldOverflow = (curSize + sz > maxBytes)
+                      || (curPages + pg > maxPages)
+                      || (curTokens + tk > maxTokens);
+    if (wouldOverflow && cur.length) {
       batches.push(cur);
       cur = [b];
-      curSize = sz;
+      curSize = sz; curPages = pg; curTokens = tk;
     } else {
       cur.push(b);
-      curSize += sz;
+      curSize += sz; curPages += pg; curTokens += tk;
     }
   }
   if (cur.length) batches.push(cur);
   return batches;
+}
+
+// Strip internal sidecar fields (e.g. _pageCount) from content blocks before sending to the API —
+// Anthropic may reject unknown properties on content objects.
+function stripInternalFields(blocks) {
+  return blocks.map(b => {
+    const { _pageCount, ...rest } = b;
+    return rest;
+  });
 }
 
 // Common finish routine for both single-call and batched paths: show result, save to Drive.
@@ -3634,11 +3684,14 @@ async function callClaude(promptOrContent) {
     }
     throw e;
   }
-  // Retry on transient network errors (Failed to fetch, 5xx, 408, 429). Three attempts
+  // Retry on transient network errors (Failed to fetch, 5xx, 408, 429). Five attempts
   // with exponential backoff. Non-transient errors (4xx message-level, CORS) bail immediately.
+  // Five attempts (was 3) — on long batch runs the proxy's connection pool occasionally drops
+  // late-run requests and three retries wasn't enough to ride through a 30+ second outage.
+  const MAX_ATTEMPTS = 5;
   let lastErr;
   let data;
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
       const res = await fetch(PROXY_URL, {
         method: 'POST',
@@ -3649,9 +3702,9 @@ async function callClaude(promptOrContent) {
         const errBody = await res.json().catch(() => ({}));
         const msg = errBody.error?.message || 'API error ' + res.status;
         // Retry only transient HTTP statuses. Content-level errors (400 "max pages", etc.) shouldn't retry.
-        if ([408, 429, 500, 502, 503, 504].includes(res.status) && attempt < 3) {
+        if ([408, 429, 500, 502, 503, 504].includes(res.status) && attempt < MAX_ATTEMPTS) {
           lastErr = new Error(msg);
-          await new Promise(r => setTimeout(r, 1500 * attempt));
+          await new Promise(r => setTimeout(r, 2000 * attempt));  // 2s, 4s, 6s, 8s
           continue;
         }
         throw new Error(msg);
@@ -3662,8 +3715,8 @@ async function callClaude(promptOrContent) {
     } catch (e) {
       lastErr = e;
       // "Failed to fetch" is a TypeError from the network stack — almost always transient.
-      if (/Failed to fetch|NetworkError|timeout|load failed/i.test(e.message) && attempt < 3) {
-        await new Promise(r => setTimeout(r, 1500 * attempt));
+      if (/Failed to fetch|NetworkError|timeout|load failed|ECONNRESET|socket hang up/i.test(e.message) && attempt < MAX_ATTEMPTS) {
+        await new Promise(r => setTimeout(r, 2000 * attempt));
         continue;
       }
       throw e;
