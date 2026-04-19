@@ -188,7 +188,9 @@ tr:hover td { background: var(--gray-50); }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--gray-200); border-radius: 3px; }
 </style>
-<script src="https://unpkg.com/docx@8.5.0/build/index.js"></script>
+<!-- docx-js: load from jsdelivr first (more reliable UMD), fall back to unpkg if it fails -->
+<script src="https://cdn.jsdelivr.net/npm/docx@7.8.2/build/index.js"
+        onerror="var s=document.createElement('script');s.src='https://unpkg.com/docx@7.8.2/build/index.js';document.head.appendChild(s);"></script>
 </head>
 <body>
 <script>
@@ -951,6 +953,10 @@ function batesToDriveUrl(fileId) {
 
 // ===== DOCX GENERATION =====
 async function generateDocx(title, content, patientName, caseId) {
+  // Defensive load check — surface a clear error if the docx library failed to load (CDN blocked, offline, etc.)
+  if (!window.docx || !window.docx.Document) {
+    throw new Error('Word document library failed to load. Check your internet connection and refresh the page.');
+  }
   const { Document, Packer, Paragraph, TextRun, ExternalHyperlink, ImageRun, Header, AlignmentType,
     BorderStyle, HeadingLevel, LevelFormat, UnderlineType, WidthType, ShadingType, TableRow,
     TableCell, Table } = window.docx;
