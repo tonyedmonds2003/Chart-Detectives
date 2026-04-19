@@ -1063,6 +1063,42 @@ async function heicToJpegBlob(heicBlob) {
   return Array.isArray(out) ? out[0] : out;
 }
 
+// Downscale an image Blob to a reasonable size before sending to the API.
+// Medical/injury photos don't need 12MP — 1600px on the long edge at JPEG q0.75 is
+// more than legible and keeps the base64 payload small enough to actually send.
+// Returns a JPEG Blob (mime: image/jpeg).
+async function downscaleImageBlob(blob, maxDim, quality) {
+  maxDim = maxDim || 1600;
+  quality = quality || 0.75;
+  const dataUrl = await new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = reject;
+    r.readAsDataURL(blob);
+  });
+  const img = await new Promise((resolve, reject) => {
+    const i = new Image();
+    i.onload = () => resolve(i);
+    i.onerror = () => reject(new Error('Failed to decode image for resize'));
+    i.src = dataUrl;
+  });
+  const longEdge = Math.max(img.naturalWidth, img.naturalHeight);
+  if (longEdge <= maxDim) {
+    // Already small enough — re-encode to JPEG to drop any alpha/weird colorspace, but keep dims.
+    const c = document.createElement('canvas');
+    c.width = img.naturalWidth; c.height = img.naturalHeight;
+    c.getContext('2d').drawImage(img, 0, 0);
+    return await new Promise(r => c.toBlob(r, 'image/jpeg', quality));
+  }
+  const scale = maxDim / longEdge;
+  const w = Math.round(img.naturalWidth * scale);
+  const h = Math.round(img.naturalHeight * scale);
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  c.getContext('2d').drawImage(img, 0, 0, w, h);
+  return await new Promise(r => c.toBlob(r, 'image/jpeg', quality));
+}
+
 // Read a Blob's bytes as a base64 string (no data: prefix).
 function blobToBase64(blob) {
   return new Promise((resolve, reject) => {
@@ -1812,15 +1848,20 @@ async function runRecordAnalysis() {
           const b64 = await driveGetFileBase64(f.id);
           contentBlocks.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: b64 }, title: f.name });
         } else if (isHeic) {
-          // Convert HEIC/HEIF → JPEG in the browser, then attach as an image block.
+          // Convert HEIC/HEIF → JPEG in the browser, downscale, then attach as an image block.
           area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Converting HEIC ('+(idx+1)+'/'+selectedDrive.length+'): ' + esc(f.name) + '…</span></div>';
           const heicBlob = await driveGetFileBlob(f.id, 'image/heic');
-          const jpegBlob = await heicToJpegBlob(heicBlob);
-          const b64jpg   = await blobToBase64(jpegBlob);
+          let jpegBlob  = await heicToJpegBlob(heicBlob);
+          jpegBlob      = await downscaleImageBlob(jpegBlob, 1600, 0.75);
+          const b64jpg  = await blobToBase64(jpegBlob);
           contentBlocks.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: b64jpg } });
         } else if (f.mimeType && f.mimeType.startsWith('image/')) {
-          const b64 = await driveGetFileBase64(f.id);
-          contentBlocks.push({ type: 'image', source: { type: 'base64', media_type: f.mimeType, data: b64 } });
+          // Download, downscale, re-encode → JPEG base64. Keeps payload small for big photos.
+          area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Processing image ('+(idx+1)+'/'+selectedDrive.length+'): ' + esc(f.name) + '…</span></div>';
+          const imgBlob = await driveGetFileBlob(f.id, f.mimeType);
+          const small   = await downscaleImageBlob(imgBlob, 1600, 0.75);
+          const b64     = await blobToBase64(small);
+          contentBlocks.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: b64 } });
         } else if (f.mimeType === 'text/plain') {
           const b64 = await driveGetFileBase64(f.id);
           textAddendum += '\n\n--- ' + f.name + ' ---\n' + atob(b64);
@@ -1840,17 +1881,32 @@ async function runRecordAnalysis() {
       if (f.type === 'application/pdf') {
         contentBlocks.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: await fileToBase64(f) }, title: f.name });
       } else if (isHeic) {
-        const jpegBlob = await heicToJpegBlob(f);
-        const b64jpg   = await blobToBase64(jpegBlob);
+        let jpegBlob = await heicToJpegBlob(f);
+        jpegBlob     = await downscaleImageBlob(jpegBlob, 1600, 0.75);
+        const b64jpg = await blobToBase64(jpegBlob);
         contentBlocks.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: b64jpg } });
       } else if (f.type && f.type.startsWith('image/')) {
-        contentBlocks.push({ type: 'image', source: { type: 'base64', media_type: f.type, data: await fileToBase64(f) } });
+        const small = await downscaleImageBlob(f, 1600, 0.75);
+        const b64   = await blobToBase64(small);
+        contentBlocks.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: b64 } });
       } else if (f.type === 'text/plain') {
         textAddendum += '\n\n--- ' + f.name + ' ---\n' + await f.text();
       }
     } catch(e) {
       textAddendum += '\n\n[Could not read ' + f.name + ': ' + e.message + ']';
     }
+  }
+
+  // Pre-send size guard: total base64 across all attachments. V8 can't build strings
+  // larger than ~500MB, and the Cloudflare Worker caps at 100MB. Warn well before either.
+  const totalBase64Bytes = contentBlocks.reduce((n, b) => n + (b.source && b.source.data ? b.source.data.length : 0), 0);
+  const totalMB = totalBase64Bytes / (1024 * 1024);
+  if (totalMB > 60) {
+    const msg = 'The ' + contentBlocks.length + ' selected file(s) encode to ~' + totalMB.toFixed(0) + ' MB after base64. '
+              + 'The API will reject requests over ~100 MB and your browser may run out of memory before that. '
+              + 'Deselect some files (especially large PDFs) and try again.';
+    area.innerHTML = '<div class="alert alert-danger">' + esc(msg) + '</div>';
+    return;
   }
 
   // GUARD: if we have no attachments and no text records, we'd be asking Claude to
@@ -2476,15 +2532,24 @@ async function callClaude(promptOrContent) {
   // Use no-cors-friendly approach: send as text/plain to avoid preflight
   // max_tokens set to 32000 — Haiku 4.5 supports up to 64k, 32k is enough for a 70+ page LNC report.
   // The prior cap of 8000 was the cause of report truncation.
-  const payload = JSON.stringify({
-    auth: 'Anthony51',
-    payload: {
-      model: CLAUDE_MODEL,
-      max_tokens: 32000,
-      system: 'You are Deborah J Edmonds BSN, RN, LNHA, GERO-BC, a legal nurse consultant with Chart Detectives Legal Nurse Consulting, LLC. You have over 35 years of healthcare experience and deep knowledge of medical standards, nursing practice, federal long-term care regulations (42 CFR), and legal documentation. Provide thorough, professional, and accurate responses appropriate for use in legal proceedings.',
-      messages: [{ role: 'user', content: promptOrContent }]
+  let payload;
+  try {
+    payload = JSON.stringify({
+      auth: 'Anthony51',
+      payload: {
+        model: CLAUDE_MODEL,
+        max_tokens: 32000,
+        system: 'You are Deborah J Edmonds BSN, RN, LNHA, GERO-BC, a legal nurse consultant with Chart Detectives Legal Nurse Consulting, LLC. You have over 35 years of healthcare experience and deep knowledge of medical standards, nursing practice, federal long-term care regulations (42 CFR), and legal documentation. Provide thorough, professional, and accurate responses appropriate for use in legal proceedings.',
+        messages: [{ role: 'user', content: promptOrContent }]
+      }
+    });
+  } catch(e) {
+    // RangeError: Invalid string length — combined base64 + JSON wrapping blew past V8's ~512MB string cap.
+    if (e && /string length/i.test(e.message)) {
+      throw new Error('The attached files are too large to send in one request (browser string limit). Deselect some files — especially large PDFs or multi-page scans — and try again.');
     }
-  });
+    throw e;
+  }
   const res = await fetch(PROXY_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'text/plain' },
