@@ -196,6 +196,8 @@ tr:hover td { background: var(--gray-50); }
 <script src="https://apis.google.com/js/api.js" async defer></script>
 <!-- heic2any: converts iPhone HEIC/HEIF photos to JPEG in the browser so Claude can read them -->
 <script src="https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js"></script>
+<!-- pdf-lib: in-browser PDF splitting so large medical-record PDFs can be broken into page-range chunks -->
+<script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
 </head>
 <body>
 <script>
@@ -1099,6 +1101,48 @@ async function downscaleImageBlob(blob, maxDim, quality) {
   return await new Promise(r => c.toBlob(r, 'image/jpeg', quality));
 }
 
+// Split an ArrayBuffer of PDF bytes into page-range sub-PDFs, each ≤ maxBytes and ≤ maxPages.
+// Uses adaptive windowing: tries the biggest window first; if the serialized sub-PDF exceeds
+// maxBytes it halves the window and retries. Returns [{bytes, startPage, endPage, totalPages}].
+async function splitPdfIntoChunks(pdfBytes, maxBytes, maxPages) {
+  maxBytes = maxBytes || 20 * 1024 * 1024;  // 20 MB raw → ~27 MB base64, safe under Claude's 32MB per-doc limit
+  maxPages = maxPages || 90;                // safe under Claude's 100-page per-doc limit
+  if (!window.PDFLib) throw new Error('PDF splitter (pdf-lib) not loaded — refresh and try again.');
+  const { PDFDocument } = window.PDFLib;
+  const source = await PDFDocument.load(pdfBytes, { ignoreEncryption: true, updateMetadata: false });
+  const total = source.getPageCount();
+  const chunks = [];
+  let start = 0;
+  while (start < total) {
+    let window = Math.min(maxPages, total - start);
+    let chunkBytes = null;
+    while (window > 0) {
+      const dest = await PDFDocument.create();
+      const indices = [];
+      for (let i = 0; i < window; i++) indices.push(start + i);
+      const copied = await dest.copyPages(source, indices);
+      copied.forEach(p => dest.addPage(p));
+      const saved = await dest.save({ useObjectStreams: true });
+      if (saved.byteLength <= maxBytes || window === 1) { chunkBytes = saved; break; }
+      window = Math.max(1, Math.floor(window / 2));
+    }
+    chunks.push({ bytes: chunkBytes, startPage: start + 1, endPage: start + window, totalPages: total });
+    start += window;
+  }
+  return chunks;
+}
+
+// Convert an ArrayBuffer (PDF bytes) to a base64 string (no data: prefix), chunked.
+function arrayBufferToBase64(buf) {
+  const bytes = new Uint8Array(buf);
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
 // Read a Blob's bytes as a base64 string (no data: prefix).
 function blobToBase64(blob) {
   return new Promise((resolve, reject) => {
@@ -1845,8 +1889,21 @@ async function runRecordAnalysis() {
       try {
         const isHeic = /heic|heif/i.test(f.mimeType || '') || /\.(heic|heif)$/i.test(f.name);
         if (f.mimeType === 'application/pdf') {
-          const b64 = await driveGetFileBase64(f.id);
-          contentBlocks.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: b64 }, title: f.name });
+          // Fetch raw bytes. Large PDFs (> 20 MB) get split into page-range sub-PDFs that
+          // each satisfy Claude's 32MB/100-page per-document limit.
+          area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Downloading PDF ('+(idx+1)+'/'+selectedDrive.length+'): ' + esc(f.name) + '…</span></div>';
+          const blob = await driveGetFileBlob(f.id, 'application/pdf');
+          const buf  = await blob.arrayBuffer();
+          if (buf.byteLength <= 20 * 1024 * 1024) {
+            contentBlocks.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: arrayBufferToBase64(buf) }, title: f.name });
+          } else {
+            area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Splitting large PDF: ' + esc(f.name) + ' (' + (buf.byteLength/(1024*1024)).toFixed(0) + ' MB)…</span></div>';
+            const parts = await splitPdfIntoChunks(buf);
+            for (const p of parts) {
+              const partTitle = f.name.replace(/\.pdf$/i,'') + ' — pp. ' + p.startPage + '-' + p.endPage + ' of ' + p.totalPages + '.pdf';
+              contentBlocks.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: arrayBufferToBase64(p.bytes.buffer || p.bytes) }, title: partTitle });
+            }
+          }
         } else if (isHeic) {
           // Convert HEIC/HEIF → JPEG in the browser, downscale, then attach as an image block.
           area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Converting HEIC ('+(idx+1)+'/'+selectedDrive.length+'): ' + esc(f.name) + '…</span></div>';
@@ -1879,7 +1936,16 @@ async function runRecordAnalysis() {
     try {
       const isHeic = /heic|heif/i.test(f.type || '') || /\.(heic|heif)$/i.test(f.name);
       if (f.type === 'application/pdf') {
-        contentBlocks.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: await fileToBase64(f) }, title: f.name });
+        const buf = await f.arrayBuffer();
+        if (buf.byteLength <= 20 * 1024 * 1024) {
+          contentBlocks.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: arrayBufferToBase64(buf) }, title: f.name });
+        } else {
+          const parts = await splitPdfIntoChunks(buf);
+          for (const p of parts) {
+            const partTitle = f.name.replace(/\.pdf$/i,'') + ' — pp. ' + p.startPage + '-' + p.endPage + ' of ' + p.totalPages + '.pdf';
+            contentBlocks.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: arrayBufferToBase64(p.bytes.buffer || p.bytes) }, title: partTitle });
+          }
+        }
       } else if (isHeic) {
         let jpegBlob = await heicToJpegBlob(f);
         jpegBlob     = await downscaleImageBlob(jpegBlob, 1600, 0.75);
@@ -1903,13 +1969,14 @@ async function runRecordAnalysis() {
   const totalMB = totalBase64Bytes / (1024 * 1024);
   const SAFE_SINGLE_CALL_MB = 40;
 
-  // Check for any single file that exceeds the safe threshold — those can't fit in a single batch.
+  // Safety net: flag any single content block that's still oversize after PDF splitting
+  // (shouldn't normally trigger, but protects against the rare case of a giant image).
   const oversizeFiles = contentBlocks
     .map((b, i) => ({ i, sz: (b.source && b.source.data ? b.source.data.length : 0), name: b.title || ('image #' + (i+1)) }))
     .filter(x => x.sz > SAFE_SINGLE_CALL_MB * 1024 * 1024);
   if (oversizeFiles.length) {
     const names = oversizeFiles.map(x => '• ' + x.name + ' (' + (x.sz/(1024*1024)).toFixed(0) + ' MB)').join('\n');
-    area.innerHTML = '<div class="alert alert-danger">These file(s) are too large to analyze even in a batch — please split or compress them before retrying:<br><pre style="white-space:pre-wrap;font-size:12px;margin:6px 0 0 0;">' + esc(names) + '</pre></div>';
+    area.innerHTML = '<div class="alert alert-danger">One or more attachments are still too large after processing. Please split or compress them manually before retrying:<br><pre style="white-space:pre-wrap;font-size:12px;margin:6px 0 0 0;">' + esc(names) + '</pre></div>';
     return;
   }
 
