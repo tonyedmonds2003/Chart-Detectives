@@ -472,7 +472,10 @@ tr:hover td { background: var(--gray-50); }
     <div class="card">
       <div class="card-header">
         <span class="card-title">AI Analysis Result</span>
-        <button class="btn btn-outline btn-sm" id="copy-rec-btn" onclick="copyResult('rec-result')" style="display:none">Copy</button>
+        <div style="display:flex;gap:6px;">
+          <button class="btn btn-outline btn-sm" id="copy-rec-btn" onclick="copyResult('rec-result')" style="display:none">Copy</button>
+          <button class="btn btn-gold btn-sm" id="send-to-report-btn" onclick="sendAnalysisToReportBuilder()" style="display:none" title="Condense this analysis into Key Findings and open the Report Builder for this case">Send to Report Builder</button>
+        </div>
       </div>
       <div id="rec-result-area">
         <div style="text-align:center;padding:40px 20px;color:var(--gray-400);">
@@ -2903,6 +2906,7 @@ Please produce a ${typeLabels[type] || type}. Format your response clearly with 
     area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Analyzing ' + (contentBlocks.length || 'records') + (contentBlocks.length ? ' record(s) with AI…' : ' with AI…') + '</span></div>';
     pre.style.display = 'none';
     document.getElementById('copy-rec-btn').style.display = 'none';
+    { const s = document.getElementById('send-to-report-btn'); if (s) s.style.display = 'none'; }
     try {
       const res = await callClaude(messageContent);
       await finishAnalysis(res, caseInfo, type, typeLabels, area, pre);
@@ -2932,6 +2936,7 @@ Please produce a ${typeLabels[type] || type}. Format your response clearly with 
   }
   pre.style.display = 'none';
   document.getElementById('copy-rec-btn').style.display = 'none';
+  { const s = document.getElementById('send-to-report-btn'); if (s) s.style.display = 'none'; }
 
   const batchOutputs = [];
   for (let bi = 0; bi < batches.length; bi++) {
@@ -2965,23 +2970,78 @@ Be thorough and factual. Cite the source record name/date for each fact. Do NOT 
     if (bi < batches.length - 1) await new Promise(r => setTimeout(r, 750));
   }
 
-  // Synthesis pass (text only — small payload).
-  area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Synthesizing final ' + (typeLabels[type] || type) + ' from ' + batches.length + ' batches…</span></div>';
-  const synthPrompt = `You are an expert Legal Nurse Consultant.
+  // Synthesis pass. Text-only, but large runs can overflow the 200k-token context window:
+  // if 40 batches each produce ~5-10k tokens of extraction, concatenation can push 300k+ tokens.
+  // Guard with a rough estimate (~4 chars/token) and fall into a two-level hierarchical synthesis
+  // when the flat prompt would be too big.
+  const SYNTH_TOKEN_BUDGET = 150000;                 // leave ~50k for system prompt + response
+  const SYNTH_CHAR_BUDGET  = SYNTH_TOKEN_BUDGET * 4; // rough chars-per-token estimate
+  const PROMPT_PREAMBLE_CHARS = 2000;                // instructions + case context overhead
+
+  const buildSynthPrompt = (intro, items) =>
+`You are an expert Legal Nurse Consultant.
 ${caseContext ? 'Case context: ' + caseContext : ''}
 ${instructions ? 'Special instructions: ' + instructions : ''}
 
-Below are fact extractions from ${batches.length} batches of medical records for this case. Combine them into a single ${typeLabels[type] || type}.
+${intro}
 
 Rules:
 • Deduplicate repeated facts.
 • Order events chronologically by date.
 • Preserve all source citations (record names/dates).
 • Use professional LNC terminology and clear section headings.
-• Do NOT mention "batches" or the batching process in the output — produce a unified document.
+• Do NOT mention "batches", "groups", or the batching process in the output — produce a unified document.
 • Be comprehensive; this is the final deliverable.
 
-${batchOutputs.map(br => '===== BATCH ' + br.batch + ' EXTRACTION =====\n' + br.text).join('\n\n')}`;
+${items.join('\n\n')}`;
+
+  const flatItems = batchOutputs.map(br => '===== BATCH ' + br.batch + ' EXTRACTION =====\n' + br.text);
+  const flatChars = flatItems.reduce((n, s) => n + s.length, 0) + PROMPT_PREAMBLE_CHARS;
+
+  area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Synthesizing final ' + (typeLabels[type] || type) + ' from ' + batches.length + ' batches…</span></div>';
+
+  let synthPrompt;
+  if (flatChars <= SYNTH_CHAR_BUDGET) {
+    // Fast path — everything fits.
+    synthPrompt = buildSynthPrompt(
+      'Below are fact extractions from ' + batches.length + ' batches of medical records for this case. Combine them into a single ' + (typeLabels[type] || type) + '.',
+      flatItems
+    );
+  } else {
+    // Hierarchical path — group batch outputs, synthesize each group, then combine.
+    // Split into groups that each fit under the budget.
+    const groups = [];
+    let g = []; let gChars = PROMPT_PREAMBLE_CHARS;
+    for (const item of flatItems) {
+      if (gChars + item.length > SYNTH_CHAR_BUDGET && g.length) {
+        groups.push(g); g = [item]; gChars = PROMPT_PREAMBLE_CHARS + item.length;
+      } else {
+        g.push(item); gChars += item.length;
+      }
+    }
+    if (g.length) groups.push(g);
+    area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Large case — running 2-level synthesis across ' + groups.length + ' groups…</span></div>';
+    const midLevelSummaries = [];
+    for (let gi = 0; gi < groups.length; gi++) {
+      area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Synthesizing group ' + (gi+1) + ' of ' + groups.length + '…</span></div>';
+      const groupPrompt = buildSynthPrompt(
+        'Below are fact extractions from a subset of this case\'s records. Produce a consolidated, deduplicated fact extraction covering this subset only — preserve every date, source citation, medication, provider, diagnosis, and deviation. This will be combined with other subsets in a final step.',
+        groups[gi]
+      );
+      try {
+        const r = await callClaude(groupPrompt);
+        midLevelSummaries.push('===== GROUP ' + (gi+1) + ' CONSOLIDATED EXTRACTION =====\n' + r);
+      } catch(e) {
+        midLevelSummaries.push('===== GROUP ' + (gi+1) + ' ERROR =====\n[Group synthesis failed: ' + e.message + ']\n\nRaw batch extractions for this group follow:\n\n' + groups[gi].join('\n\n'));
+      }
+      if (gi < groups.length - 1) await new Promise(r => setTimeout(r, 750));
+    }
+    area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Combining group summaries into final ' + (typeLabels[type] || type) + '…</span></div>';
+    synthPrompt = buildSynthPrompt(
+      'Below are consolidated fact extractions from ' + groups.length + ' subsets of this case. Combine them into a single ' + (typeLabels[type] || type) + '.',
+      midLevelSummaries
+    );
+  }
 
   try {
     const res = await callClaude(synthPrompt);
@@ -3056,6 +3116,20 @@ async function finishAnalysis(res, caseInfo, type, typeLabels, area, pre) {
   pre.textContent = res;
   pre.style.display = 'block';
   document.getElementById('copy-rec-btn').style.display = '';
+  const sendBtn = document.getElementById('send-to-report-btn');
+  if (sendBtn) sendBtn.style.display = '';
+  // Persist the analysis on the case record so the Report Builder can pick it up later.
+  if (caseInfo && caseInfo.id) {
+    const c = state.cases.find(x => x.id === caseInfo.id);
+    if (c) {
+      c.lastAnalysis = res;
+      c.lastAnalysisType = type || '';
+      c.lastAnalysisAt = new Date().toISOString();
+      // Clear any stale summary — it'll be regenerated on demand when sent to the Report Builder.
+      c.lastAnalysisSummary = '';
+      save();
+    }
+  }
   if (caseInfo && caseInfo.driveFolderId) {
     try {
       const today = new Date().toISOString().split('T')[0];
@@ -3080,6 +3154,84 @@ function fileToBase64(file) {
     r.onerror = reject;
     r.readAsDataURL(file);
   });
+}
+
+// Condense a full Record Analysis into a concise Key Findings summary suitable for
+// the Report Builder. Preserves CFR citations, [record tags], dates, and deviations.
+// Returns the summary string.
+async function condenseAnalysisForReport(fullAnalysis, caseInfo) {
+  if (!fullAnalysis || !fullAnalysis.trim()) {
+    throw new Error('No analysis to condense.');
+  }
+  // The condenser prompt is tuned for the Report Builder: concise, bulleted, preserves
+  // everything the drafting pass will need (deviations, CFR citations, dates, record tags).
+  const caseLine = caseInfo
+    ? `${caseInfo.patient} — ${caseInfo.type || ''} — ${caseInfo.side || ''}'s case`
+    : '(case details not provided)';
+  const prompt = `You are distilling a detailed Record Analysis into a concise Key Findings summary for a legal nurse consultant's Report Builder. The summary you produce will be dropped directly into the "Key Findings / Issues Identified" field that feeds the report drafting step.
+
+CASE: ${caseLine}
+
+SOURCE ANALYSIS:
+${fullAnalysis}
+
+OUTPUT REQUIREMENTS — follow these strictly:
+• Produce 12–25 tight bullets total. Bullets should be one to three sentences each.
+• Preserve every CFR citation exactly as it appears (e.g. 42 CFR §483.25) — wrap in **bold**.
+• Preserve every [record reference] tag exactly (e.g. [6.14.2022 Fall], [Black Eye 2]). Do NOT invent new ones.
+• Preserve specific dates, facility names, providers, and measurements. No paraphrasing that loses a date or a number.
+• Group the bullets under these short headers (use "## " prefix), only include a header if you have bullets for it:
+  ## Chronology highlights
+  ## Deviations from the standard of care
+  ## Clinical turning points
+  ## Damages / outcomes
+  ## Open questions for the attorney
+• Every deviation bullet must start with "The facility failed to..." or "The provider failed to..." and end with the applicable CFR citation in **bold**.
+• Do NOT add an introduction, conclusion, or commentary — just the headers and bullets.
+• Do NOT include anything that isn't supported by the source analysis.
+
+Write the summary now.`;
+  const out = await callClaude(prompt);
+  return (out || '').trim();
+}
+
+// Invoked by the "Send to Report Builder" button on the Record Analysis card.
+// Condenses the full analysis, populates Key Findings on the case, pre-selects the
+// case in the Report Builder dropdown, and navigates there.
+async function sendAnalysisToReportBuilder() {
+  const btn = document.getElementById('send-to-report-btn');
+  const caseId = document.getElementById('rec-case-select').value;
+  const caseInfo = caseId ? state.cases.find(c => c.id === caseId) : null;
+  if (!caseInfo) {
+    alert('Pick a case on the Record Analysis page before sending to Report Builder.');
+    return;
+  }
+  if (!caseInfo.lastAnalysis || !caseInfo.lastAnalysis.trim()) {
+    alert('No saved analysis on this case yet — run Analyze Records first.');
+    return;
+  }
+  const origLabel = btn ? btn.textContent : '';
+  try {
+    if (btn) { btn.disabled = true; btn.textContent = 'Condensing…'; }
+    // Reuse a cached summary if we have one (avoids a Claude call on every click).
+    let summary = (caseInfo.lastAnalysisSummary || '').trim();
+    if (!summary) {
+      summary = await condenseAnalysisForReport(caseInfo.lastAnalysis, caseInfo);
+      const c = state.cases.find(x => x.id === caseInfo.id);
+      if (c) { c.lastAnalysisSummary = summary; c.lastAnalysisSummaryAt = new Date().toISOString(); save(); }
+    }
+    // Navigate first so the dropdowns are re-populated for the Reports page.
+    showPage('reports');
+    const repSel = document.getElementById('rep-case-select');
+    if (repSel) repSel.value = caseInfo.id;
+    const findingsEl = document.getElementById('rep-findings');
+    if (findingsEl) findingsEl.value = summary;
+    showToast('✅ Sent to Report Builder');
+  } catch (e) {
+    alert('Could not condense analysis: ' + (e && e.message ? e.message : e));
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = origLabel || 'Send to Report Builder'; }
+  }
 }
 
 // ===== REPORT BUILDER =====
@@ -3756,6 +3908,28 @@ const uz = document.getElementById('upload-zone');
 uz.addEventListener('dragover', e => { e.preventDefault(); uz.classList.add('drag'); });
 uz.addEventListener('dragleave', () => uz.classList.remove('drag'));
 uz.addEventListener('drop', e => { e.preventDefault(); uz.classList.remove('drag'); const files = Array.from(e.dataTransfer.files); uploadedFiles = [...uploadedFiles, ...files]; renderFileList(); });
+
+// Report Builder: when the user picks a case and the Key Findings textarea is empty,
+// auto-populate it from the case's saved analysis summary (produced by
+// sendAnalysisToReportBuilder). If the textarea already has content, we leave it alone
+// so we never clobber the user's edits.
+(function wireRepCaseSelectAutofill() {
+  const sel = document.getElementById('rep-case-select');
+  if (!sel) return;
+  sel.addEventListener('change', () => {
+    const caseId = sel.value;
+    if (!caseId) return;
+    const c = state.cases.find(x => x.id === caseId);
+    if (!c) return;
+    const findingsEl = document.getElementById('rep-findings');
+    if (!findingsEl) return;
+    const summary = (c.lastAnalysisSummary || '').trim();
+    if (summary && !findingsEl.value.trim()) {
+      findingsEl.value = summary;
+      showToast('📋 Key Findings auto-filled from saved analysis');
+    }
+  });
+})();
 </script>
 </body>
 </html>
