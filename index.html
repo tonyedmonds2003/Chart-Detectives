@@ -1897,20 +1897,23 @@ async function runRecordAnalysis() {
     }
   }
 
-  // Pre-send size guard: total base64 across all attachments. V8 can't build strings
-  // larger than ~500MB, and the Cloudflare Worker caps at 100MB. Warn well before either.
+  // Compute total base64 bytes across all attachments. V8 can't build strings larger than
+  // ~512MB and the Cloudflare Worker caps at 100MB, so anything over ~40MB is batched.
   const totalBase64Bytes = contentBlocks.reduce((n, b) => n + (b.source && b.source.data ? b.source.data.length : 0), 0);
   const totalMB = totalBase64Bytes / (1024 * 1024);
-  if (totalMB > 60) {
-    const msg = 'The ' + contentBlocks.length + ' selected file(s) encode to ~' + totalMB.toFixed(0) + ' MB after base64. '
-              + 'The API will reject requests over ~100 MB and your browser may run out of memory before that. '
-              + 'Deselect some files (especially large PDFs) and try again.';
-    area.innerHTML = '<div class="alert alert-danger">' + esc(msg) + '</div>';
+  const SAFE_SINGLE_CALL_MB = 40;
+
+  // Check for any single file that exceeds the safe threshold — those can't fit in a single batch.
+  const oversizeFiles = contentBlocks
+    .map((b, i) => ({ i, sz: (b.source && b.source.data ? b.source.data.length : 0), name: b.title || ('image #' + (i+1)) }))
+    .filter(x => x.sz > SAFE_SINGLE_CALL_MB * 1024 * 1024);
+  if (oversizeFiles.length) {
+    const names = oversizeFiles.map(x => '• ' + x.name + ' (' + (x.sz/(1024*1024)).toFixed(0) + ' MB)').join('\n');
+    area.innerHTML = '<div class="alert alert-danger">These file(s) are too large to analyze even in a batch — please split or compress them before retrying:<br><pre style="white-space:pre-wrap;font-size:12px;margin:6px 0 0 0;">' + esc(names) + '</pre></div>';
     return;
   }
 
-  // GUARD: if we have no attachments and no text records, we'd be asking Claude to
-  // invent a demo template. That's almost never what the user wants — confirm first.
+  // GUARD: no records → demo template
   if (!contentBlocks.length && !textAddendum.trim()) {
     const hint = caseInfo && caseInfo.driveFolderId
       ? 'The case is linked to Drive folder "' + (caseInfo.driveFolderName || caseInfo.driveFolderId) + '" but no files are loaded. Click "Connect Google Drive" then "📁 Load files from case folder" to fetch them.'
@@ -1922,41 +1925,143 @@ async function runRecordAnalysis() {
     }
   }
 
-  const prompt = `You are an expert Legal Nurse Consultant reviewing medical records.
+  // Branch A — total fits in a single call. Existing simple flow.
+  if (totalMB <= SAFE_SINGLE_CALL_MB) {
+    const prompt = `You are an expert Legal Nurse Consultant reviewing medical records.
 ${caseContext ? 'Case context: ' + caseContext : ''}
 ${instructions ? 'Special instructions: ' + instructions : ''}
 ${textAddendum ? '\nAdditional text records:' + textAddendum : ''}
 ${contentBlocks.length ? '\nThe medical records (PDFs/images) are attached. Review every page. Cite specific dates and record titles in your analysis.' : 'No records were provided — generate a demonstration template showing the format.'}
 
 Please produce a ${typeLabels[type] || type}. Format your response clearly with sections, dates, and source references where applicable. Use professional LNC terminology.`;
+    const messageContent = [{ type: 'text', text: prompt }, ...contentBlocks];
+    area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Analyzing ' + (contentBlocks.length || 'records') + (contentBlocks.length ? ' record(s) with AI…' : ' with AI…') + '</span></div>';
+    pre.style.display = 'none';
+    document.getElementById('copy-rec-btn').style.display = 'none';
+    try {
+      const res = await callClaude(messageContent);
+      await finishAnalysis(res, caseInfo, type, typeLabels, area, pre);
+    } catch(e) {
+      area.innerHTML = `<div class="alert alert-danger">Error: ${esc(e.message)}</div>`;
+    }
+    return;
+  }
 
-  // Build the final messages content: text prompt first, then any attachments.
-  const messageContent = [{ type: 'text', text: prompt }, ...contentBlocks];
-
-  area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Analyzing ' + (contentBlocks.length || 'records') + (contentBlocks.length ? ' record(s) with AI…' : ' with AI…') + '</span></div>';
+  // Branch B — total is too big for one call. Split into batches, extract facts from each,
+  // then do a final synthesis call that combines all batch outputs into the requested report.
+  const batches = chunkContentBlocks(contentBlocks, SAFE_SINGLE_CALL_MB * 1024 * 1024);
+  const estCalls = batches.length + 1;
+  const ok = confirm(
+    'This case has ' + contentBlocks.length + ' file(s) totaling ~' + totalMB.toFixed(0) + ' MB — too much for a single AI call.\n\n' +
+    'I can split them into ' + batches.length + ' batch(es), extract facts from each, then synthesize a final ' + (typeLabels[type] || type) + '.\n\n' +
+    'This will make ~' + estCalls + ' AI calls and may take several minutes.\n\nContinue?'
+  );
+  if (!ok) {
+    area.innerHTML = '<div class="alert alert-warning">Analysis cancelled. Deselect files or proceed with batching.</div>';
+    return;
+  }
   pre.style.display = 'none';
   document.getElementById('copy-rec-btn').style.display = 'none';
 
+  const batchOutputs = [];
+  for (let bi = 0; bi < batches.length; bi++) {
+    const batch = batches[bi];
+    const batchMB = batch.reduce((n,b) => n + ((b.source && b.source.data) ? b.source.data.length : 0), 0) / (1024*1024);
+    area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>AI analysis — batch ' + (bi+1) + ' of ' + batches.length + ' (' + batch.length + ' file' + (batch.length>1?'s':'') + ', ' + batchMB.toFixed(0) + ' MB)…</span></div>';
+    const batchPromptText = `You are an expert Legal Nurse Consultant reviewing medical records.
+${caseContext ? 'Case context: ' + caseContext : ''}
+${instructions ? 'Special instructions: ' + instructions : ''}
+${bi === 0 && textAddendum ? '\nAdditional text records (provided only in this first batch):' + textAddendum : ''}
+
+This is BATCH ${bi+1} of ${batches.length} for a large case. From the records attached to THIS batch, extract:
+• All dates and events (admissions, discharges, assessments, falls, injuries, ER visits)
+• Providers, facilities, and locations
+• Medications (start/stop dates, dose changes, PRN use, errors)
+• Diagnoses, vitals, labs, imaging findings
+• Nursing care decisions, interventions, and any deviations from standard of care
+• Any photos/images: describe what is visible and cite the source filename
+
+Be thorough and factual. Cite the source record name/date for each fact. Do NOT write a narrative summary yet — just extract facts. A final synthesis step will combine your extractions across all batches into the full ${typeLabels[type] || type}.`;
+    const batchContent = [{ type: 'text', text: batchPromptText }, ...batch];
+    try {
+      const r = await callClaude(batchContent);
+      batchOutputs.push({ batch: bi+1, text: r });
+    } catch(e) {
+      batchOutputs.push({ batch: bi+1, text: '[BATCH ' + (bi+1) + ' ERROR: ' + e.message + ']' });
+    }
+  }
+
+  // Synthesis pass (text only — small payload).
+  area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Synthesizing final ' + (typeLabels[type] || type) + ' from ' + batches.length + ' batches…</span></div>';
+  const synthPrompt = `You are an expert Legal Nurse Consultant.
+${caseContext ? 'Case context: ' + caseContext : ''}
+${instructions ? 'Special instructions: ' + instructions : ''}
+
+Below are fact extractions from ${batches.length} batches of medical records for this case. Combine them into a single ${typeLabels[type] || type}.
+
+Rules:
+• Deduplicate repeated facts.
+• Order events chronologically by date.
+• Preserve all source citations (record names/dates).
+• Use professional LNC terminology and clear section headings.
+• Do NOT mention "batches" or the batching process in the output — produce a unified document.
+• Be comprehensive; this is the final deliverable.
+
+${batchOutputs.map(br => '===== BATCH ' + br.batch + ' EXTRACTION =====\n' + br.text).join('\n\n')}`;
+
   try {
-    const res = await callClaude(messageContent);
-    area.style.display = 'none';
-    pre.textContent = res;
+    const res = await callClaude(synthPrompt);
+    await finishAnalysis(res, caseInfo, type, typeLabels, area, pre);
+  } catch(e) {
+    area.innerHTML = `<div class="alert alert-danger">Synthesis error: ${esc(e.message)}<br><br>Batch extractions were completed but could not be merged. You can still review them below.</div>`;
+    pre.textContent = batchOutputs.map(br => '===== BATCH ' + br.batch + ' =====\n' + br.text).join('\n\n');
     pre.style.display = 'block';
     document.getElementById('copy-rec-btn').style.display = '';
+  }
+}
 
-    // If this case has a Drive folder, save the analysis as a .txt into it.
-    if (caseInfo && caseInfo.driveFolderId) {
-      try {
-        const today = new Date().toISOString().split('T')[0];
-        const fname = (typeLabels[type] || 'Analysis').replace(/[^a-z0-9 ]/gi,'').replace(/\s+/g,'_') + ' - ' + caseInfo.patient.replace(/[^a-z0-9 ]/gi,'') + ' - ' + today + '.txt';
-        await driveUploadFile(caseInfo.driveFolderId, fname, 'text/plain', res);
-        showToast('💾 Analysis saved to Drive: ' + fname);
-      } catch(e) {
-        showToast('⚠️ Drive save failed: ' + e.message, true);
-      }
+// Split an array of Claude content blocks into sub-arrays where each sub-array's combined
+// base64 byte count is ≤ maxBytes. Blocks larger than maxBytes are placed alone (caller
+// should have already flagged these as oversize).
+function chunkContentBlocks(blocks, maxBytes) {
+  const batches = [];
+  let cur = [];
+  let curSize = 0;
+  for (const b of blocks) {
+    const sz = (b.source && b.source.data) ? b.source.data.length : 0;
+    if (sz > maxBytes) { // lone oversize — its own batch (shouldn't normally reach here)
+      if (cur.length) { batches.push(cur); cur = []; curSize = 0; }
+      batches.push([b]);
+      continue;
     }
-  } catch(e) {
-    area.innerHTML = `<div class="alert alert-danger">Error: ${esc(e.message)}</div>`;
+    if (curSize + sz > maxBytes && cur.length) {
+      batches.push(cur);
+      cur = [b];
+      curSize = sz;
+    } else {
+      cur.push(b);
+      curSize += sz;
+    }
+  }
+  if (cur.length) batches.push(cur);
+  return batches;
+}
+
+// Common finish routine for both single-call and batched paths: show result, save to Drive.
+async function finishAnalysis(res, caseInfo, type, typeLabels, area, pre) {
+  area.style.display = 'none';
+  pre.textContent = res;
+  pre.style.display = 'block';
+  document.getElementById('copy-rec-btn').style.display = '';
+  if (caseInfo && caseInfo.driveFolderId) {
+    try {
+      const today = new Date().toISOString().split('T')[0];
+      const fname = (typeLabels[type] || 'Analysis').replace(/[^a-z0-9 ]/gi,'').replace(/\s+/g,'_') + ' - ' + caseInfo.patient.replace(/[^a-z0-9 ]/gi,'') + ' - ' + today + '.txt';
+      await driveUploadFile(caseInfo.driveFolderId, fname, 'text/plain', res);
+      showToast('💾 Analysis saved to Drive: ' + fname);
+    } catch(e) {
+      showToast('⚠️ Drive save failed: ' + e.message, true);
+    }
   }
 }
 
