@@ -194,6 +194,8 @@ tr:hover td { background: var(--gray-50); }
 <!-- Google Identity Services (OAuth) and Google API client (for Drive Picker + Drive API) -->
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://apis.google.com/js/api.js" async defer></script>
+<!-- heic2any: converts iPhone HEIC/HEIF photos to JPEG in the browser so Claude can read them -->
+<script src="https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js"></script>
 </head>
 <body>
 <script>
@@ -414,7 +416,7 @@ tr:hover td { background: var(--gray-50); }
         <div class="upload-zone" id="upload-zone" onclick="document.getElementById('file-input').click()" style="padding:14px;">
           <p style="margin:0;font-size:12px;color:var(--gray-400);">…or click to upload local files (PDF, DOCX, TXT, JPG, PNG)</p>
         </div>
-        <input type="file" id="file-input" multiple accept=".pdf,.doc,.docx,.txt,.jpg,.jpeg,.png" style="display:none" onchange="handleFileUpload(event)">
+        <input type="file" id="file-input" multiple accept=".pdf,.doc,.docx,.txt,.jpg,.jpeg,.png,.heic,.heif" style="display:none" onchange="handleFileUpload(event)">
         <div id="file-list" style="margin-top:10px;"></div>
         <div id="drive-file-list" style="margin-top:10px;"></div>
       </div>
@@ -1040,6 +1042,39 @@ async function driveGetFileBase64(fileId) {
     binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
   }
   return btoa(binary);
+}
+
+// Download a Drive file as a Blob (used for HEIC conversion: we need raw bytes, not base64).
+async function driveGetFileBlob(fileId, fallbackMime) {
+  if (!_driveToken) await driveSignIn(false);
+  const url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
+  const res = await fetch(url, { headers: { Authorization: 'Bearer ' + _driveToken } });
+  if (!res.ok) throw new Error('Drive download failed: ' + res.status);
+  const b = await res.blob();
+  // Some Drive responses may not carry the right content-type — re-wrap if we know better.
+  return (fallbackMime && !b.type) ? b.slice(0, b.size, fallbackMime) : b;
+}
+
+// Convert a HEIC/HEIF Blob/File to a JPEG Blob using the heic2any library.
+async function heicToJpegBlob(heicBlob) {
+  if (!window.heic2any) throw new Error('HEIC converter not loaded — refresh the page and try again.');
+  const out = await window.heic2any({ blob: heicBlob, toType: 'image/jpeg', quality: 0.85 });
+  // heic2any may return either a single Blob or an array of Blobs (one per frame).
+  return Array.isArray(out) ? out[0] : out;
+}
+
+// Read a Blob's bytes as a base64 string (no data: prefix).
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => {
+      const s = r.result;
+      const idx = s.indexOf(',');
+      resolve(idx >= 0 ? s.slice(idx + 1) : s);
+    };
+    r.onerror = reject;
+    r.readAsDataURL(blob);
+  });
 }
 
 // Upload a file (Blob or string) into the named Drive folder. Returns the new file metadata.
@@ -1772,12 +1807,22 @@ async function runRecordAnalysis() {
       const f = selectedDrive[idx];
       area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Fetching from Drive (' + (idx+1) + '/' + selectedDrive.length + '): ' + esc(f.name) + '</span></div>';
       try {
-        const b64 = await driveGetFileBase64(f.id);
+        const isHeic = /heic|heif/i.test(f.mimeType || '') || /\.(heic|heif)$/i.test(f.name);
         if (f.mimeType === 'application/pdf') {
+          const b64 = await driveGetFileBase64(f.id);
           contentBlocks.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: b64 }, title: f.name });
-        } else if (f.mimeType && f.mimeType.startsWith('image/') && !/heic|heif/i.test(f.mimeType)) {
+        } else if (isHeic) {
+          // Convert HEIC/HEIF → JPEG in the browser, then attach as an image block.
+          area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Converting HEIC ('+(idx+1)+'/'+selectedDrive.length+'): ' + esc(f.name) + '…</span></div>';
+          const heicBlob = await driveGetFileBlob(f.id, 'image/heic');
+          const jpegBlob = await heicToJpegBlob(heicBlob);
+          const b64jpg   = await blobToBase64(jpegBlob);
+          contentBlocks.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: b64jpg } });
+        } else if (f.mimeType && f.mimeType.startsWith('image/')) {
+          const b64 = await driveGetFileBase64(f.id);
           contentBlocks.push({ type: 'image', source: { type: 'base64', media_type: f.mimeType, data: b64 } });
         } else if (f.mimeType === 'text/plain') {
+          const b64 = await driveGetFileBase64(f.id);
           textAddendum += '\n\n--- ' + f.name + ' ---\n' + atob(b64);
         } else {
           textAddendum += '\n\n[Skipped ' + f.name + ' — unsupported type ' + (f.mimeType||'unknown') + ']';
@@ -1791,14 +1836,21 @@ async function runRecordAnalysis() {
   // (2) Locally-uploaded files (kept as a fallback)
   for (const f of uploadedFiles) {
     try {
+      const isHeic = /heic|heif/i.test(f.type || '') || /\.(heic|heif)$/i.test(f.name);
       if (f.type === 'application/pdf') {
         contentBlocks.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: await fileToBase64(f) }, title: f.name });
-      } else if (f.type.startsWith('image/') && !/heic|heif/i.test(f.type)) {
+      } else if (isHeic) {
+        const jpegBlob = await heicToJpegBlob(f);
+        const b64jpg   = await blobToBase64(jpegBlob);
+        contentBlocks.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: b64jpg } });
+      } else if (f.type && f.type.startsWith('image/')) {
         contentBlocks.push({ type: 'image', source: { type: 'base64', media_type: f.type, data: await fileToBase64(f) } });
       } else if (f.type === 'text/plain') {
         textAddendum += '\n\n--- ' + f.name + ' ---\n' + await f.text();
       }
-    } catch(e) {}
+    } catch(e) {
+      textAddendum += '\n\n[Could not read ' + f.name + ': ' + e.message + ']';
+    }
   }
 
   // GUARD: if we have no attachments and no text records, we'd be asking Claude to
