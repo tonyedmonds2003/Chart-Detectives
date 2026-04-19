@@ -895,94 +895,228 @@ tr:hover td { background: var(--gray-50); }
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
 const LOGO_B64 = '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';
 
+// ===== BATES → GOOGLE DRIVE URL MAP =====
+// Maps a bracketed reference (as it appears inside [brackets] in the report text) to a Drive file ID.
+// Add a new entry here for every record you want auto-hyperlinked. Per-case maps can be layered on top later.
+const BATES_TO_URL = {
+  // ----- Kathleen Mimm records -----
+  // Fall incident reports
+  '6.14.2022 Fall': '1wdMDAsNpGq_GUs1R6PziXffdGcplrAQ5',
+  '7.12.2022 Fall': '1TUWirTq7X7KjMVjub9WitJzj9CUeIrW1',
+  '8.6.2022 Fall':  '1BzxZgA3U1EbDGUb26g6-ZpK5nCG2RqBV',
+  '11.16.2022 Fall':'1rJSej0W2hwsK9pvHRSpd4kCqhGjyIjPD',
+  '1.27.2023 Fall': '1oE54chs5oh0fKidFY8y3AbI_kMMF7pjF',
+  '8.9.2023 Fall':  '1Pg_SKWtOJNQldDDJWZSyes8jNxk23ypf',
+  // Bruising / skin alteration
+  '12.27.2022 Bruise':         '1dm9TgQxIkMOu39MjVqxZXZ5bufSZ0QmT',
+  '3.7.2023 Bruise':           '1Hc-X4nY3fyItFrO_s3bQbzA8T-oCbLOi',
+  '4.11.2023 Skin Alteration': '1-3H0i2izwjcWmE7Yv0Te-_D2Uc2thkhO',
+  '5.3.2023 Other Incident':   '1YNBgVUdnkIKsmZM2NLXzq5mIzHgCLD9I',
+  '5.4.2023 Bruise':           '1ZfS3feyfpTc_pzcjl2RvG3X9hmLpiGRW',
+  '5.17.2023 Alleged Abuse':   '14SA2_k1-r8w3SJJTbUGVfW3hukQI9aUl',
+  // Skin tears
+  '6.29.2023 Skin Tear': '1cabg0AwHuS7eO2kiHMzH0_Hcy8HaXEfO',
+  '9.5.2023 Skin Tear':  '1RYEPBYTcTXwEeEib5LDMPF8MYRTSM05S',
+  '9.12.2023 Skin Tear': '1Ow-fUapyN1Jx6nlpHlludxG5xQKnEFt5',
+  // Photographs - periorbital ecchymosis
+  'Black Eye':   '1o5LWDSjAAR0HWYXDAoKMdsDIXd93JCQO',
+  'Black Eye 2': '1zpeePFGOimRGEmgtOfxuK_a48LH94JeP',
+  'Black Eye 3': '1yIHjbkxSlg6vNqo5qAWl-EewPzekJKAF',
+  'Black Eye 4': '1_w7H-1Kj7fvrfip9bf2bG6i_avH1goMS',
+  'Black Eye 5': '1VLSleELIO82V7tWSzsEwFM33413hXxoW',
+  'Black Eye 2-5': '1zpeePFGOimRGEmgtOfxuK_a48LH94JeP',
+  // Photographs - bruising / trauma
+  'Bruise on Arm':   '13PgZJoKUzxzUjBOdcftOh8EQj7IHTPZk',
+  'Bruise on Arm 2': '1A6Ku9ddVcMhx4GuhwdKwFfrZvMLuLwoN',
+  'Bruise on Arm 3': '12KkOKj4J45Y_rjgS0Fql0Md07HvXTK3s',
+  'Bruise on Arm 4': '1d1i2WnAITblS8WMwoag3spBaWnSErhSx',
+  'Bruise on Arm 5': '1FGKgKQsoLvkk7XEbMdVIktzk-HZrCxGX',
+  'Bruise on Arm 2-5': '1A6Ku9ddVcMhx4GuhwdKwFfrZvMLuLwoN',
+  'Bruised Hand':       '1W_P_47UauP1HigjR-0WoJHy6ghzHm-Pd',
+  'Bruised Knee':       '1pbNYW8MazWknKbtIvpD7izNxD4Tj45jY',
+  'Cuts on Arm':        '1PguBzx-ARPhNUlkCRQCVaYUuBhMguWcO',
+  'Knees with Bandaid': '1k7m7KrMqZFIwU8IIsRtaHCFcYlR2usHV',
+  // Environmental hazards
+  'Ant in Water Cup': '10Zq6WrJTO58lqTw8UZCmbDGihOftWNbT',
+  'Ant on Chair':     '1dmPO7ZcV8JXGT9kOH3OAy7_aeJJ2SG64',
+  'Ant on Cup':       '1SlNMGtGewTCIv6dIRNgNJCQ6ApJhsxbW',
+  // Food documentation
+  'Food':   '1vOQlUtXk0Lae1548u1zlpRfxGslhOm2t',
+  'Food 2': '1s8bmAdggyTB8csWrpNgBc7meQ6GUmqjm',
+  'Food 3': '1Y4SyumGNs68y3YOU_4HwwwTYcdmoA6ju',
+};
+function batesToDriveUrl(fileId) {
+  return 'https://drive.google.com/file/d/' + fileId + '/view?usp=drivesdk';
+}
+
 // ===== DOCX GENERATION =====
 async function generateDocx(title, content, patientName, caseId) {
-  const { Document, Packer, Paragraph, TextRun, ImageRun, Header, AlignmentType,
-    BorderStyle, HeadingLevel, LevelFormat, WidthType, ShadingType, TableRow,
+  const { Document, Packer, Paragraph, TextRun, ExternalHyperlink, ImageRun, Header, AlignmentType,
+    BorderStyle, HeadingLevel, LevelFormat, UnderlineType, WidthType, ShadingType, TableRow,
     TableCell, Table } = window.docx;
 
   const NAVY = '1a2744';
   const GOLD = 'c9a84c';
   const RED = 'cc2222';
+  const LINK = '0563C1';
 
-  // Parse the text content into structured paragraphs
+  // ---------- Inline helpers ----------
+  function makeRun(text, opts) {
+    return new TextRun(Object.assign({ text, font: 'Arial', size: 22 }, opts || {}));
+  }
+  function hyperlinkRun(text, url, baseOpts) {
+    return new ExternalHyperlink({
+      link: url,
+      children: [ makeRun(text, Object.assign({}, baseOpts || {}, {
+        bold: true, color: LINK, underline: { type: UnderlineType.SINGLE }
+      })) ]
+    });
+  }
+  // Tokenize a line that may contain **bold** and [bracketed] tokens.
+  // Bracketed tokens may be semicolon-separated; each part that matches BATES_TO_URL
+  // becomes a hyperlink. Other bracketed parts (e.g. CFR citations) render as bold.
+  function parseInline(text, baseOpts) {
+    baseOpts = baseOpts || {};
+    const runs = [];
+    const regex = /(\*\*[^*]+\*\*)|(\[[^\]]+\])/g;
+    let last = 0, m;
+    while ((m = regex.exec(text)) !== null) {
+      if (m.index > last) runs.push(makeRun(text.slice(last, m.index), baseOpts));
+      if (m[1]) {
+        runs.push(makeRun(m[1].slice(2, -2), Object.assign({}, baseOpts, { bold: true })));
+      } else if (m[2]) {
+        const inner = m[2].slice(1, -1);
+        const parts = inner.split(';').map(s => s.trim());
+        runs.push(makeRun('[', Object.assign({}, baseOpts, { bold: true })));
+        parts.forEach((part, idx) => {
+          if (idx > 0) runs.push(makeRun('; ', Object.assign({}, baseOpts, { bold: true })));
+          const fid = BATES_TO_URL[part];
+          if (fid) runs.push(hyperlinkRun(part, batesToDriveUrl(fid), baseOpts));
+          else runs.push(makeRun(part, Object.assign({}, baseOpts, { bold: true })));
+        });
+        runs.push(makeRun(']', Object.assign({}, baseOpts, { bold: true })));
+      }
+      last = regex.lastIndex;
+    }
+    if (last < text.length) runs.push(makeRun(text.slice(last), baseOpts));
+    return runs.length ? runs : [makeRun(text, baseOpts)];
+  }
+  // Build a docx Table from a block of consecutive markdown pipe rows.
+  function buildPipeTable(rows) {
+    // rows is an array of arrays of cell strings. Drop a separator row like ['---', '---'] if present.
+    const filtered = rows.filter(r => !(r.length && r.every(c => /^\s*:?-{3,}:?\s*$/.test(c))));
+    if (!filtered.length) return null;
+    const header = filtered[0];
+    const body = filtered.slice(1);
+    const trows = [];
+    trows.push(new TableRow({
+      tableHeader: true,
+      children: header.map(h => new TableCell({
+        shading: { type: ShadingType.CLEAR, fill: NAVY, color: 'auto' },
+        children: [new Paragraph({ children: [makeRun(h, { bold: true, color: 'FFFFFF' })] })]
+      }))
+    }));
+    body.forEach(r => {
+      trows.push(new TableRow({
+        children: r.map(c => new TableCell({
+          children: [new Paragraph({ children: parseInline(c, {}) })]
+        }))
+      }));
+    });
+    return new Table({
+      rows: trows,
+      width: { size: 100, type: WidthType.PERCENTAGE }
+    });
+  }
+  function splitPipeRow(line) {
+    let s = line.trim();
+    if (s.startsWith('|')) s = s.slice(1);
+    if (s.endsWith('|')) s = s.slice(0, -1);
+    return s.split('|').map(c => c.trim());
+  }
+
+  // ---------- Parse body ----------
   const lines = content.split('\n');
   const children = [];
-
-  // Logo in header
   const logoBytes = Uint8Array.from(atob(LOGO_B64), c => c.charCodeAt(0));
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const trimmed = line.trim();
+
+    // Pipe table block: collect consecutive lines starting with '|'
+    if (trimmed.startsWith('|') && trimmed.endsWith('|') && trimmed.indexOf('|', 1) > 0) {
+      const block = [];
+      let j = i;
+      while (j < lines.length && lines[j].trim().startsWith('|') && lines[j].trim().endsWith('|')) {
+        block.push(splitPipeRow(lines[j]));
+        j++;
+      }
+      const tbl = buildPipeTable(block);
+      if (tbl) {
+        children.push(tbl);
+        children.push(new Paragraph({ spacing: { before: 80, after: 80 }, children: [] }));
+        i = j - 1;
+        continue;
+      }
+    }
+
     if (!trimmed) {
       children.push(new Paragraph({ spacing: { before: 80, after: 80 }, children: [] }));
       continue;
     }
 
-    // H1 — all caps or starts with #
-    if (trimmed.startsWith('# ') || trimmed === trimmed.toUpperCase() && trimmed.length > 3 && trimmed.length < 80) {
+    // H1 — explicit "# " or pure ALL-CAPS short line
+    if (trimmed.startsWith('# ') || (trimmed === trimmed.toUpperCase() && trimmed.length > 3 && trimmed.length < 80 && /[A-Z]/.test(trimmed))) {
       children.push(new Paragraph({
         spacing: { before: 320, after: 120 },
         border: { bottom: { style: BorderStyle.SINGLE, size: 6, color: NAVY, space: 4 } },
-        children: [new TextRun({ text: trimmed.replace(/^#+\s*/, ''), bold: true, size: 28, color: NAVY, font: 'Arial' })]
+        children: parseInline(trimmed.replace(/^#+\s*/, ''), { bold: true, size: 28, color: NAVY })
       }));
     }
-    // H2 — starts with ##
+    // H2
     else if (trimmed.startsWith('## ')) {
       children.push(new Paragraph({
         spacing: { before: 240, after: 80 },
-        children: [new TextRun({ text: trimmed.replace(/^#+\s*/, ''), bold: true, size: 24, color: NAVY, font: 'Arial' })]
+        children: parseInline(trimmed.replace(/^#+\s*/, ''), { bold: true, size: 24, color: NAVY })
       }));
     }
-    // H3 — starts with ###
+    // H3
     else if (trimmed.startsWith('### ')) {
       children.push(new Paragraph({
         spacing: { before: 160, after: 60 },
-        children: [new TextRun({ text: trimmed.replace(/^#+\s*/, ''), bold: true, size: 22, color: RED, font: 'Arial' })]
+        children: parseInline(trimmed.replace(/^#+\s*/, ''), { bold: true, size: 22, color: RED })
       }));
     }
-    // Bullet
+    // Top-level bullet
     else if (trimmed.startsWith('• ') || trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
-      const text = trimmed.slice(2);
       children.push(new Paragraph({
         numbering: { reference: 'bullets', level: 0 },
         spacing: { before: 40, after: 60 },
-        children: [new TextRun({ text, size: 22, font: 'Arial' })]
+        children: parseInline(trimmed.slice(2), {})
       }));
     }
-    // Sub-bullet
-    else if (trimmed.startsWith('  ▪') || trimmed.startsWith('  o ') || trimmed.startsWith('    -')) {
+    // Sub-bullet (indented "▪", "o ", "    -")
+    else if (line.startsWith('  ▪') || line.startsWith('  o ') || line.startsWith('    -') || line.startsWith('    ▪') || line.startsWith('  - ')) {
+      const cleaned = line.replace(/^\s*[▪o\-]\s*/, '');
       children.push(new Paragraph({
         numbering: { reference: 'bullets', level: 1 },
         spacing: { before: 20, after: 40 },
-        children: [new TextRun({ text: trimmed.replace(/^\s*[▪o\-]\s*/, ''), size: 20, font: 'Arial', italics: trimmed.includes('standard of care') })]
+        children: parseInline(cleaned, { italics: /standard of care/i.test(cleaned) })
       }));
     }
-    // Bold line (wrapped in **)
-    else if (trimmed.startsWith('**') && trimmed.endsWith('**')) {
-      children.push(new Paragraph({
-        spacing: { before: 100, after: 60 },
-        children: [new TextRun({ text: trimmed.replace(/\*\*/g, ''), bold: true, size: 22, font: 'Arial' })]
-      }));
-    }
-    // Italics (wrapped in *)
-    else if (trimmed.startsWith('*') && trimmed.endsWith('*') && !trimmed.startsWith('**')) {
+    // Italics-only line (wrapped in single *...*, not **)
+    else if (trimmed.startsWith('*') && trimmed.endsWith('*') && !trimmed.startsWith('**') && trimmed.length > 2) {
       children.push(new Paragraph({
         spacing: { before: 60, after: 80 },
-        children: [new TextRun({ text: trimmed.replace(/\*/g, ''), italics: true, size: 22, font: 'Arial' })]
+        children: parseInline(trimmed.replace(/^\*|\*$/g, ''), { italics: true })
       }));
     }
-    // Regular paragraph - handle inline bold
+    // Regular paragraph — full inline tokenizing (handles **bold** and [bracket] hyperlinks)
     else {
-      const parts = trimmed.split(/\*\*([^*]+)\*\*/);
-      const runs = parts.map((p, idx) => new TextRun({
-        text: p, size: 22, font: 'Arial',
-        bold: idx % 2 === 1
-      }));
       children.push(new Paragraph({
         spacing: { before: 60, after: 100 },
-        children: runs
+        children: parseInline(trimmed, {})
       }));
     }
   }
@@ -1411,54 +1545,81 @@ PROFESSIONAL OPINION: ${opinion || '[to be completed by Debbie]'}
 AUDIENCE NOTES: ${audience || 'Standard LNC report for plaintiff attorney review'}
 ${styleNote ? 'STYLE REFERENCE: ' + styleNote : ''}
 
-FORMAT THE FULL REPORT AS FOLLOWS:
+OUTPUT FORMAT — STRICT MARKDOWN RULES
+The report will be parsed and converted to a Word document. You MUST use the following markdown conventions precisely; they are the only way headings, bullets, tables and hyperlinks render correctly.
 
-Comprehensive Nurse Review
+• Major section titles: prefix with "# " (e.g. "# Introduction")
+• Sub-section titles:   prefix with "## "
+• Tertiary headings:    prefix with "### "
+• Top-level bullets:    start the line with "• " or "- "
+• Sub-bullets:          indent two spaces then "▪ " or "o "
+• Inline bold (for emphasis OR CFR citations): wrap in **double asterisks**, e.g. **42 CFR §483.25**
+• Record references: wrap in [square brackets], e.g. [6.14.2022 Fall], [Black Eye 2], [Bruise on Arm 3]. Multiple references in one bracket must be separated by semicolons: [Black Eye; Black Eye 2; Black Eye 3]. These are automatically converted to blue underlined hyperlinks to the source record in Google Drive, so use them liberally whenever citing a specific document.
+• Tables: use standard markdown pipe tables, e.g.
+  | Date | Facility | Clinical Event | Provider |
+  | --- | --- | --- | --- |
+  | 6/14/2022 | ABC Nursing Home | Unwitnessed fall in room; no injury noted [6.14.2022 Fall] | RN Smith |
+
+WRITE THE FULL REPORT BELOW, FOLLOWING THIS EXACT STRUCTURE:
+
+# Comprehensive Nurse Review
 Deborah J Edmonds BSN, RN, LNHA, GERO-BC
 
-[Today's date: ${today}]
+${today}
 
 [Attorney Name], Esq.
-[Law Firm Name]
-[Address]
+**[Law Firm Name]**
+[Address line 1]
+[Address line 2]
+[Phone]
 
 Re: [FULL CASE CAPTION IN ALL CAPS — use patient name from case info]
 
-Introduction
-Write 2-3 sentences establishing qualifications: 35+ years diverse healthcare experience encompassing long-term care, sub-acute rehab, medical-surgical and neurological/orthopedic nursing, operating room settings, and nursing leadership and administration; BSN and geriatric nursing certification; full-time legal nurse consultant with active RN and Nursing Home Administrator licenses in Michigan.
+# Introduction
+Write 2–3 sentences establishing qualifications: 35+ years diverse healthcare experience encompassing long-term care, sub-acute rehab, medical-surgical and neurological/orthopedic nursing, operating room settings, and nursing leadership and administration; BSN and geriatric nursing certification; full-time legal nurse consultant with active RN and Nursing Home Administrator licenses in Michigan.
 
-Brief Chronology
-Bullet list of facility/hospital/care transitions with date ranges, based on the findings provided. End with "Death: [date]" if applicable.
+# Brief Chronology
+Bullet list ("• ") of facility/hospital/care transitions with date ranges, based on the findings provided. End with "• Death: [date]" if applicable.
 
-Injury Analysis:
-[Write this section in italics in the final output — note this with *italics* markdown]
-Narrative paragraph describing how the injury developed, key clinical turning points, and how the patient's condition deteriorated. Reference document codes in brackets like [A-126] where provided in findings.
+# Injury Analysis
+*Write this section as one continuous italic narrative paragraph (3–6 long paragraphs total if needed).* Describe how the injury developed, the key clinical turning points, and how the patient's condition deteriorated. Reference specific records in brackets like [6.14.2022 Fall], [Black Eye 2], [Bruise on Arm 3] whenever you cite them.
 
-Deviations from the standards of care: [Facility Name] ([Date range])
-Bulleted list of deviations. Each top-level bullet must:
+# Deviations from the Standards of Care: [Facility Name] ([Date range])
+Bulleted list ("• ") of deviations. Each top-level bullet MUST:
 • Start with "The facility failed to..."
-• Include the applicable federal CFR citation in brackets, e.g. [42 CFR §483.21(b)(1)(c)(3)(i)]
-  o Sub-bullets with specific dated examples from the record
-    ▪ The standard of care requires... [explanation]
+• End with the applicable federal CFR citation in **bold** inside brackets, e.g. **[42 CFR §483.21(b)(1)(c)(3)(i)]**
+  ▪ Sub-bullet (two-space indent) with a specific dated example from the record, citing the bates tag, e.g. [6.14.2022 Fall]
+  ▪ Sub-bullet with the standard of care: "The standard of care requires..."
 
-Use real CFR citations appropriate to long-term care/nursing home cases: 42 CFR §483.21 (care planning), §483.25 (quality of care, pressure ulcers, hydration, pain), §483.70 (medical records), §483.10 (resident rights).
+Use real CFR citations appropriate to long-term care / nursing home cases: **42 CFR §483.21** (care planning), **§483.25** (quality of care — pressure ulcers, hydration, pain), **§483.70** (medical records), **§483.10** (resident rights).
 
-Records reviewed and record Legend:
-[Table: Prefix | File Name | Total Pages — use placeholders if not provided]
+Produce at least 6–10 distinct deviation bullets, each with 2–4 sub-bullets. Do not condense.
 
-Chronology:
-Detailed two-column chronological table of clinical events. Left column: date, facility/source. Right column: clinical detail, findings, orders. Far right: provider name. Be thorough — cover the full clinical course.
+# Records Reviewed and Record Legend
+Pipe table:
+| Prefix | File Name | Total Pages |
+| --- | --- | --- |
+| A | [Facility Name] Medical Records | [###] |
+| B | Hospital Records | [###] |
+...
 
-Medical History
-Bullet list of all diagnoses and relevant conditions.
+# Chronology
+Detailed pipe table of every clinical event of relevance. Columns:
+| Date | Facility / Source | Clinical Detail, Findings, Orders | Provider |
+| --- | --- | --- | --- |
 
-History of Illness
+Produce as many rows as the findings support — aim for at least 30 rows for a full comprehensive review. Cite bates references inline in the "Clinical Detail" column where applicable, e.g. "[6.14.2022 Fall]".
+
+# Medical History
+Bullet list ("• ") of all diagnoses and relevant conditions.
+
+# History of Illness
 Narrative paragraph(s) describing prior hospitalizations and medical history leading to the at-issue admission, with dates.
 
-Opinion
-Write 4-6 substantial paragraphs covering: (1) admission risks and failure to monitor/plan, (2) infection monitoring failures, (3) skin integrity/wound care failures, (4) pain management failures, (5) documentation and medication administration failures, (6) summary of how these failures cascaded into harm.
+# Opinion
+Write 5–7 substantial paragraphs covering: (1) admission risks and failure to monitor/plan, (2) infection monitoring failures, (3) skin integrity / wound-care failures, (4) pain-management failures, (5) documentation and medication-administration failures, (6) summary of how these failures cascaded into harm.
 
-The final two paragraphs must read verbatim as follows (fill in bracketed fields):
+The final two paragraphs must read verbatim (fill in bracketed fields):
 "It is my opinion, to a reasonable degree of nursing certainty, that the care and skill exhibited in the treatment of [patient name] fell outside acceptable professional nursing standards. The facility failed to implement proactive care plans for skin care, hydration, infection, and pain. These breaches constituted neglect, increased the risk of harm, and were a foreseeable cause of preventable injuries."
 
 "Based on my education and extensive experience as a registered nurse, Director of Nursing, Regional Clinical Nurse, and Legal Nurse Consultant, it is my opinion to a reasonable degree of nursing certainty that the care provided to [patient name] at [facility name] is below the standards of care provided by commonly accepted clinical guidelines and violated federal regulations. These opinions are based on the records provided and reviewed to date."
@@ -1471,10 +1632,10 @@ Then add:
 Sincerely,
 
 Deborah J Edmonds BSN, RN, LNHA, GERO-BC
-Chart Detectives Legal Nurse Consulting, LLC
+**Chart Detectives Legal Nurse Consulting, LLC**
 
 ---
-Write the complete report. Be thorough and detailed. Use formal third-person clinical language. Cite federal regulations for every deviation. Do not truncate or summarize.`;
+Write the complete report in a single response. Be thorough and exhaustive — this is expected to be 40–70 pages of output. Use formal third-person clinical language. Cite federal regulations for every deviation. Cite the bates reference in brackets for every factual assertion tied to a specific record. Do NOT truncate, summarize, or insert placeholders like "[...continues]". If you are running long, continue writing — the token budget is generous. Produce every section in full.`;
 
   area.style.display = 'none';
   ta.style.display = 'none';
@@ -1903,11 +2064,13 @@ async function callClaude(prompt) {
     throw new Error('Proxy not configured.');
   }
   // Use no-cors-friendly approach: send as text/plain to avoid preflight
+  // max_tokens set to 32000 — Haiku 4.5 supports up to 64k, 32k is enough for a 70+ page LNC report.
+  // The prior cap of 8000 was the cause of report truncation.
   const payload = JSON.stringify({
     auth: 'Anthony51',
     payload: {
       model: CLAUDE_MODEL,
-      max_tokens: 8000,
+      max_tokens: 32000,
       system: 'You are Deborah J Edmonds BSN, RN, LNHA, GERO-BC, a legal nurse consultant with Chart Detectives Legal Nurse Consulting, LLC. You have over 35 years of healthcare experience and deep knowledge of medical standards, nursing practice, federal long-term care regulations (42 CFR), and legal documentation. Provide thorough, professional, and accurate responses appropriate for use in legal proceedings.',
       messages: [{ role: 'user', content: prompt }]
     }
@@ -1919,6 +2082,10 @@ async function callClaude(prompt) {
   });
   if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(err.error?.message || 'API error ' + res.status); }
   const data = await res.json();
+  // Surface a warning if the model was cut off by the token cap so the user knows to regenerate / split.
+  if (data.stop_reason === 'max_tokens') {
+    showToast('⚠️ Output reached the token cap and may be truncated. Regenerate or split into sections.', true);
+  }
   return data.content.map(b => b.text || '').join('');
 }
 
