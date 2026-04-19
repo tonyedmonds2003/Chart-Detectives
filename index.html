@@ -405,7 +405,7 @@ tr:hover td { background: var(--gray-50); }
         <div class="card-header"><span class="card-title">Upload Records</span></div>
         <div class="form-group">
           <label class="form-label">Select Case</label>
-          <select class="form-control" id="rec-case-select"><option value="">— choose a case —</option></select>
+          <select class="form-control" id="rec-case-select" onchange="onRecCaseSelectChanged()"><option value="">— choose a case —</option></select>
         </div>
         <div style="display:flex;gap:8px;margin-bottom:10px;">
           <button class="btn btn-gold btn-sm" id="drive-signin-btn" onclick="driveSignIn(true).catch(e=>alert(e.message))" style="flex:1">Connect Google Drive</button>
@@ -1668,6 +1668,30 @@ function renderFileList() {
 }
 function removeFile(i) { uploadedFiles.splice(i,1); renderFileList(); }
 
+// Called when the user picks a case on the Records page. Auto-loads the linked
+// Drive folder's files so the user doesn't have to remember to click "Load files".
+async function onRecCaseSelectChanged() {
+  // Clear any files from a previously selected case so we never send the wrong ones
+  driveFiles = [];
+  driveFilesChecked = {};
+  const listEl = document.getElementById('drive-file-list');
+  if (listEl) listEl.innerHTML = '';
+  const caseId = document.getElementById('rec-case-select').value;
+  if (!caseId) return;
+  const c = state.cases.find(x => x.id === caseId);
+  if (!c || !c.driveFolderId) {
+    if (listEl) listEl.innerHTML = '<div style="padding:8px;color:var(--gray-400);font-size:12px;">No Drive folder linked to this case yet. Click <b>📁 Load files from case folder</b> to pick one, or go to Cases and use the 📁 Connect button.</div>';
+    return;
+  }
+  // Drive folder is linked — auto-load, but only if the user has already signed in.
+  // (If not signed in we just show a hint; we don't force a popup on every case pick.)
+  if (!_driveToken) {
+    if (listEl) listEl.innerHTML = '<div style="padding:8px;color:var(--gray-400);font-size:12px;">Drive folder linked: <b>' + esc(c.driveFolderName || c.driveFolderId) + '</b>. Click <b>Connect Google Drive</b> then <b>Load files</b> to list them.</div>';
+    return;
+  }
+  try { await loadCaseDriveFiles(); } catch(e) {}
+}
+
 // Fetch the file listing from the active case's Drive folder and render it as a checklist.
 async function loadCaseDriveFiles() {
   const caseId = document.getElementById('rec-case-select').value;
@@ -1769,6 +1793,19 @@ async function runRecordAnalysis() {
         textAddendum += '\n\n--- ' + f.name + ' ---\n' + await f.text();
       }
     } catch(e) {}
+  }
+
+  // GUARD: if we have no attachments and no text records, we'd be asking Claude to
+  // invent a demo template. That's almost never what the user wants — confirm first.
+  if (!contentBlocks.length && !textAddendum.trim()) {
+    const hint = caseInfo && caseInfo.driveFolderId
+      ? 'The case is linked to Drive folder "' + (caseInfo.driveFolderName || caseInfo.driveFolderId) + '" but no files are loaded. Click "Connect Google Drive" then "📁 Load files from case folder" to fetch them.'
+      : 'No records are loaded. Link a Drive folder or upload files first.';
+    const proceed = confirm('⚠️ No records loaded.\n\n' + hint + '\n\nClick OK to generate a blank DEMO TEMPLATE instead, or Cancel to go back and load records.');
+    if (!proceed) {
+      area.innerHTML = '<div class="alert alert-warning">' + esc(hint) + '</div>';
+      return;
+    }
   }
 
   const prompt = `You are an expert Legal Nurse Consultant reviewing medical records.
