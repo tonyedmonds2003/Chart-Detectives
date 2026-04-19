@@ -258,6 +258,10 @@ tr:hover td { background: var(--gray-50); }
       Case Manager
       <span class="nav-badge" id="active-case-count">0</span>
     </button>
+    <button class="nav-item" onclick="showPage('firms')">
+      <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 21h18"/><path d="M5 21V7l7-4 7 4v14"/><path d="M9 9h.01"/><path d="M9 13h.01"/><path d="M9 17h.01"/><path d="M14 9h.01"/><path d="M14 13h.01"/><path d="M14 17h.01"/></svg>
+      Firms &amp; Attorneys
+    </button>
     <button class="nav-item" onclick="showPage('records')">
       <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
       Record Analysis
@@ -367,7 +371,14 @@ tr:hover td { background: var(--gray-50); }
       <div class="page-title">Case Manager</div>
       <div class="page-subtitle">Track all client matters, attorneys, and deadlines</div>
     </div>
-    <button class="btn btn-gold" onclick="openModal('modal-new-case')">+ New Case</button>
+    <button class="btn btn-gold" onclick="openNewCaseModal()">+ New Case</button>
+  </div>
+  <!-- Chart Detectives root folder strip: when set, new cases auto-create Firm/Attorney/Case subfolders inside it. -->
+  <div id="drive-root-strip" style="display:flex;align-items:center;gap:10px;padding:10px 14px;margin-bottom:14px;background:var(--gray-50);border:1px solid var(--gray-100);border-radius:var(--radius-sm);font-size:13px;color:var(--gray-500);">
+    <span style="flex-shrink:0;">📁</span>
+    <span id="drive-root-label" style="flex:1;">Chart Detectives root folder: <b>not set</b> — new cases won't auto-organize in Drive.</span>
+    <button class="btn btn-outline btn-sm" onclick="pickDriveRootFolder()">Set root folder</button>
+    <button class="btn btn-outline btn-sm" id="drive-root-clear-btn" onclick="clearDriveRootFolder()" style="display:none;">Clear</button>
   </div>
   <div class="tabs">
     <button class="tab active" onclick="filterCases('all', this)">All Cases</button>
@@ -395,6 +406,20 @@ tr:hover td { background: var(--gray-50); }
       </table>
     </div>
   </div>
+</div>
+
+<div class="page" id="page-firms">
+  <div class="page-header" style="display:flex;justify-content:space-between;align-items:flex-start;">
+    <div>
+      <div class="page-title">Firms &amp; Attorneys</div>
+      <div class="page-subtitle">Client directory. Firm addresses here feed invoices and letters automatically.</div>
+    </div>
+    <div style="display:flex;gap:8px;">
+      <button class="btn btn-outline" onclick="openAttorneyModal()">+ New Attorney</button>
+      <button class="btn btn-gold" onclick="openFirmModal()">+ New Firm</button>
+    </div>
+  </div>
+  <div id="firms-list"></div>
 </div>
 
 <!-- RECORD ANALYSIS -->
@@ -749,12 +774,18 @@ tr:hover td { background: var(--gray-50); }
     </div>
     <div class="grid-2">
       <div class="form-group">
-        <label class="form-label">Attorney name</label>
-        <input type="text" class="form-control" id="new-attorney">
+        <label class="form-label">Law firm</label>
+        <select class="form-control" id="new-firmId" onchange="onCaseFirmChange()">
+          <option value="">— Select firm —</option>
+          <option value="__new__">+ Add new firm…</option>
+        </select>
       </div>
       <div class="form-group">
-        <label class="form-label">Law firm</label>
-        <input type="text" class="form-control" id="new-firm">
+        <label class="form-label">Attorney</label>
+        <select class="form-control" id="new-attorneyId" onchange="onCaseAttorneyChange()">
+          <option value="">— Select attorney —</option>
+          <option value="__new__">+ Add new attorney…</option>
+        </select>
       </div>
     </div>
     <div class="grid-2">
@@ -798,6 +829,146 @@ tr:hover td { background: var(--gray-50); }
     <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px;">
       <button class="btn btn-outline" onclick="closeModal('modal-new-case')">Cancel</button>
       <button class="btn btn-gold" onclick="saveCase()">Save Case</button>
+    </div>
+  </div>
+</div>
+
+<!-- Firm Modal -->
+<div class="modal-overlay" id="modal-firm">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title" id="firm-modal-title">New Firm</div>
+      <button class="modal-close" onclick="closeModal('modal-firm')">×</button>
+    </div>
+    <input type="hidden" id="firm-id">
+    <div class="form-group">
+      <label class="form-label">Firm name *</label>
+      <input type="text" class="form-control" id="firm-name" placeholder="e.g. Smith &amp; Associates">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Street address</label>
+      <input type="text" class="form-control" id="firm-street" placeholder="123 Market Street, Suite 400">
+    </div>
+    <div class="grid-2">
+      <div class="form-group">
+        <label class="form-label">City</label>
+        <input type="text" class="form-control" id="firm-city">
+      </div>
+      <div class="form-group">
+        <label class="form-label">State / ZIP</label>
+        <div style="display:flex;gap:8px;">
+          <input type="text" class="form-control" id="firm-state" maxlength="2" placeholder="PA" style="width:70px;text-transform:uppercase;">
+          <input type="text" class="form-control" id="firm-zip" placeholder="19102" style="flex:1;">
+        </div>
+      </div>
+    </div>
+    <div class="grid-2">
+      <div class="form-group">
+        <label class="form-label">Main phone</label>
+        <input type="text" class="form-control" id="firm-phone">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Fax</label>
+        <input type="text" class="form-control" id="firm-fax">
+      </div>
+    </div>
+    <div class="grid-2">
+      <div class="form-group">
+        <label class="form-label">General email</label>
+        <input type="email" class="form-control" id="firm-email">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Website</label>
+        <input type="text" class="form-control" id="firm-website" placeholder="smithassoc.com">
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Notes</label>
+      <textarea class="form-control" id="firm-notes" placeholder="Billing preferences, referral source, etc."></textarea>
+    </div>
+    <div style="display:flex;gap:10px;justify-content:space-between;margin-top:8px;">
+      <button class="btn btn-danger" id="firm-delete-btn" onclick="deleteFirm()" style="display:none;">Delete Firm</button>
+      <div style="display:flex;gap:10px;margin-left:auto;">
+        <button class="btn btn-outline" onclick="closeModal('modal-firm')">Cancel</button>
+        <button class="btn btn-gold" onclick="saveFirm()">Save Firm</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Attorney Modal -->
+<div class="modal-overlay" id="modal-attorney">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title" id="attorney-modal-title">New Attorney</div>
+      <button class="modal-close" onclick="closeModal('modal-attorney')">×</button>
+    </div>
+    <input type="hidden" id="attorney-id">
+    <div class="form-group">
+      <label class="form-label">Firm *</label>
+      <select class="form-control" id="attorney-firmId"></select>
+    </div>
+    <div class="grid-2">
+      <div class="form-group">
+        <label class="form-label">First name *</label>
+        <input type="text" class="form-control" id="attorney-firstName">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Last name *</label>
+        <input type="text" class="form-control" id="attorney-lastName">
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Title / position</label>
+      <input type="text" class="form-control" id="attorney-title" placeholder="Partner, Associate, Of Counsel…">
+    </div>
+    <div class="grid-2">
+      <div class="form-group">
+        <label class="form-label">Email</label>
+        <input type="email" class="form-control" id="attorney-email">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Direct phone</label>
+        <input type="text" class="form-control" id="attorney-directPhone">
+      </div>
+    </div>
+    <div class="grid-2">
+      <div class="form-group">
+        <label class="form-label">Cell phone</label>
+        <input type="text" class="form-control" id="attorney-cellPhone">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Fax</label>
+        <input type="text" class="form-control" id="attorney-fax">
+      </div>
+    </div>
+    <div style="margin:12px 0 4px 0;padding:10px;background:var(--gray-50);border-radius:var(--radius-sm);">
+      <div style="font-weight:500;font-size:12px;color:var(--gray-500);margin-bottom:6px;letter-spacing:0.3px;text-transform:uppercase;">Paralegal / Assistant</div>
+      <div class="grid-2">
+        <div class="form-group">
+          <label class="form-label">Name</label>
+          <input type="text" class="form-control" id="attorney-assistantName">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Email</label>
+          <input type="email" class="form-control" id="attorney-assistantEmail">
+        </div>
+      </div>
+      <div class="form-group" style="margin-bottom:0;">
+        <label class="form-label">Phone</label>
+        <input type="text" class="form-control" id="attorney-assistantPhone">
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Notes</label>
+      <textarea class="form-control" id="attorney-notes"></textarea>
+    </div>
+    <div style="display:flex;gap:10px;justify-content:space-between;margin-top:8px;">
+      <button class="btn btn-danger" id="attorney-delete-btn" onclick="deleteAttorney()" style="display:none;">Delete Attorney</button>
+      <div style="display:flex;gap:10px;margin-left:auto;">
+        <button class="btn btn-outline" onclick="closeModal('modal-attorney')">Cancel</button>
+        <button class="btn btn-gold" onclick="saveAttorney()">Save Attorney</button>
+      </div>
     </div>
   </div>
 </div>
@@ -1188,6 +1359,169 @@ async function driveUploadFile(folderId, filename, mime, blobOrText) {
   return res.json();
 }
 
+// Update an existing Drive file's content (same id, new bytes). Used to keep the cache manifest
+// up to date without spawning a new file every time.
+async function driveUpdateFileContent(fileId, mime, blobOrText) {
+  if (!_driveToken) await driveSignIn(false);
+  const blob = (typeof blobOrText === 'string') ? new Blob([blobOrText], { type: mime }) : blobOrText;
+  const res = await fetch('https://www.googleapis.com/upload/drive/v3/files/' + fileId + '?uploadType=media', {
+    method: 'PATCH',
+    headers: { Authorization: 'Bearer ' + _driveToken, 'Content-Type': mime },
+    body: blob
+  });
+  if (!res.ok) throw new Error('Drive file update failed: ' + res.status + ' ' + await res.text());
+  return res.json();
+}
+
+// Create a folder in Drive and return its new id.
+async function driveCreateFolder(parentId, name) {
+  if (!_driveToken) await driveSignIn(false);
+  const metadata = { name, mimeType: 'application/vnd.google-apps.folder' };
+  if (parentId) metadata.parents = [parentId];
+  const res = await fetch('https://www.googleapis.com/drive/v3/files?fields=id,name', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + _driveToken, 'Content-Type': 'application/json' },
+    body: JSON.stringify(metadata)
+  });
+  if (!res.ok) throw new Error('Drive folder create failed: ' + res.status + ' ' + await res.text());
+  return res.json();
+}
+
+// Drive treats the apostrophe as a quote delimiter in its q= query language — we must double
+// any apostrophes that appear inside the quoted literal.
+function driveEscapeQ(s) { return String(s||'').replace(/'/g, "\\'"); }
+
+// Find a child folder by name inside a parent, creating it if missing. Returns { id, name }.
+// Matching is case-insensitive on the trimmed name so "Smith & Associates" and "smith & associates"
+// don't wind up as separate folders.
+async function driveFindOrCreateFolder(parentId, name) {
+  if (!_driveToken) await driveSignIn(false);
+  const target = (name || '').trim();
+  if (!target) throw new Error('Folder name is required.');
+  const q = `'${parentId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false and name = '${driveEscapeQ(target)}'`;
+  const url = 'https://www.googleapis.com/drive/v3/files?q=' + encodeURIComponent(q) + '&fields=files(id,name)&pageSize=100';
+  const res = await fetch(url, { headers: { Authorization: 'Bearer ' + _driveToken } });
+  if (!res.ok) throw new Error('Drive folder lookup failed: ' + res.status + ' ' + await res.text());
+  const data = await res.json();
+  const hit = (data.files || []).find(f => (f.name||'').trim().toLowerCase() === target.toLowerCase());
+  if (hit) return { id: hit.id, name: hit.name };
+  const created = await driveCreateFolder(parentId, target);
+  return { id: created.id, name: created.name };
+}
+
+// Look up a single Drive file's metadata (used for cache freshness: size + modifiedTime).
+async function driveGetFileMeta(fileId) {
+  if (!_driveToken) await driveSignIn(false);
+  const url = 'https://www.googleapis.com/drive/v3/files/' + fileId + '?fields=id,name,mimeType,size,modifiedTime';
+  const res = await fetch(url, { headers: { Authorization: 'Bearer ' + _driveToken } });
+  if (!res.ok) throw new Error('Drive meta fetch failed: ' + res.status);
+  return res.json();
+}
+
+// Move a file/folder to a new parent. Used by the "Reorganize" button to slot an existing
+// case folder under the Firm/Attorney hierarchy.
+async function driveMoveFile(fileId, newParentId) {
+  if (!_driveToken) await driveSignIn(false);
+  // Drive wants addParents + removeParents — fetch the current parents first to know what to remove.
+  const metaRes = await fetch('https://www.googleapis.com/drive/v3/files/' + fileId + '?fields=parents', {
+    headers: { Authorization: 'Bearer ' + _driveToken }
+  });
+  if (!metaRes.ok) throw new Error('Drive parent lookup failed: ' + metaRes.status);
+  const meta = await metaRes.json();
+  const currentParents = (meta.parents || []).join(',');
+  const url = 'https://www.googleapis.com/drive/v3/files/' + fileId + '?addParents=' + encodeURIComponent(newParentId) + '&removeParents=' + encodeURIComponent(currentParents) + '&fields=id,parents';
+  const res = await fetch(url, { method: 'PATCH', headers: { Authorization: 'Bearer ' + _driveToken } });
+  if (!res.ok) throw new Error('Drive move failed: ' + res.status + ' ' + await res.text());
+  return res.json();
+}
+
+// ===== HIERARCHY BUILDER =====
+// Walks Root → Firm → Attorney → Case, creating folders as needed. Returns the case folder id.
+// Guardrails: needs a root, needs a firm record, needs an attorney record. Missing pieces
+// (e.g. a case with a firm but no attorney) fall back to {root}/{firm}/{case}.
+async function ensureCaseHierarchy(caseInfo) {
+  if (!state.driveRootFolderId) throw new Error('Set a Chart Detectives root folder first.');
+  if (!caseInfo) throw new Error('Unknown case.');
+  const firmRec = caseInfo.firmId ? state.firms.find(f => f.id === caseInfo.firmId) : null;
+  const attyRec = caseInfo.attorneyId ? state.attorneys.find(a => a.id === caseInfo.attorneyId) : null;
+  if (!firmRec) throw new Error('This case has no firm selected — pick a firm before organizing into Drive.');
+  const firmFolder = await driveFindOrCreateFolder(state.driveRootFolderId, firmRec.name || 'Unnamed Firm');
+  let parentId = firmFolder.id;
+  if (attyRec) {
+    const fullName = ((attyRec.firstName||'') + ' ' + (attyRec.lastName||'')).trim() || 'Unnamed Attorney';
+    const attyFolder = await driveFindOrCreateFolder(parentId, fullName);
+    parentId = attyFolder.id;
+  }
+  const caseFolderName = ((caseInfo.patient || 'Untitled') + ' — ' + (caseInfo.id || '')).trim().replace(/ — $/,'');
+  const caseFolder = await driveFindOrCreateFolder(parentId, caseFolderName);
+  return caseFolder;
+}
+
+// Ensure the _processed subfolder exists inside a case folder and return its id.
+async function ensureProcessedFolder(caseFolderId) {
+  const f = await driveFindOrCreateFolder(caseFolderId, '_processed');
+  return f.id;
+}
+
+// ===== PROCESSED CACHE =====
+// A single JSON file named _cache-manifest.json in the _processed folder tracks which source
+// Drive files have been split/converted, and the Drive IDs of the resulting artifacts.
+// Shape: { entries: { [sourceFileId]: { size, modifiedTime, kind: 'pdfChunks'|'heicJpeg', chunks:[{id,name,startPage,endPage,totalPages}] | jpegId } }, manifestFileId }
+const PROCESSED_MANIFEST_NAME = '_cache-manifest.json';
+
+async function loadProcessedManifest(processedFolderId) {
+  if (!_driveToken) await driveSignIn(false);
+  const q = `'${processedFolderId}' in parents and name = '${PROCESSED_MANIFEST_NAME}' and trashed = false`;
+  const url = 'https://www.googleapis.com/drive/v3/files?q=' + encodeURIComponent(q) + '&fields=files(id,name)&pageSize=10';
+  const res = await fetch(url, { headers: { Authorization: 'Bearer ' + _driveToken } });
+  if (!res.ok) throw new Error('Cache manifest lookup failed: ' + res.status);
+  const data = await res.json();
+  const file = (data.files || [])[0];
+  if (!file) return { entries: {}, manifestFileId: null, processedFolderId };
+  // Fetch the JSON body
+  const body = await fetch('https://www.googleapis.com/drive/v3/files/' + file.id + '?alt=media', {
+    headers: { Authorization: 'Bearer ' + _driveToken }
+  });
+  if (!body.ok) throw new Error('Cache manifest download failed: ' + body.status);
+  let parsed = {};
+  try { parsed = await body.json(); } catch(e) { parsed = {}; }
+  return { entries: parsed.entries || {}, manifestFileId: file.id, processedFolderId };
+}
+
+async function saveProcessedManifest(manifest) {
+  const payload = JSON.stringify({ entries: manifest.entries || {}, updatedAt: new Date().toISOString() }, null, 2);
+  if (manifest.manifestFileId) {
+    await driveUpdateFileContent(manifest.manifestFileId, 'application/json', payload);
+  } else {
+    const meta = await driveUploadFile(manifest.processedFolderId, PROCESSED_MANIFEST_NAME, 'application/json', payload);
+    manifest.manifestFileId = meta.id;
+  }
+}
+
+// True if the cached entry is still valid for the current source file metadata.
+function cacheEntryIsFresh(entry, sourceMeta) {
+  if (!entry) return false;
+  // Drive sometimes omits size for Google-native files but we only cache PDFs/HEICs so size is reliable.
+  if (String(entry.size) !== String(sourceMeta.size)) return false;
+  if (entry.modifiedTime !== sourceMeta.modifiedTime) return false;
+  return true;
+}
+
+// Upload a single PDF chunk into _processed and return its metadata.
+async function uploadPdfChunk(processedFolderId, sourceName, chunk) {
+  const name = sourceName.replace(/\.pdf$/i,'') + '.p' + chunk.startPage + '-' + chunk.endPage + '.pdf';
+  const blob = new Blob([chunk.bytes], { type: 'application/pdf' });
+  const meta = await driveUploadFile(processedFolderId, name, 'application/pdf', blob);
+  return { id: meta.id, name, startPage: chunk.startPage, endPage: chunk.endPage, totalPages: chunk.totalPages };
+}
+
+// Upload a converted HEIC → JPEG blob into _processed.
+async function uploadConvertedJpeg(processedFolderId, sourceName, jpegBlob) {
+  const name = sourceName.replace(/\.(heic|heif)$/i, '') + '.converted.jpg';
+  const meta = await driveUploadFile(processedFolderId, name, 'image/jpeg', jpegBlob);
+  return { id: meta.id, name };
+}
+
 // ===== BATES → GOOGLE DRIVE URL MAP =====
 // Maps a bracketed reference (as it appears inside [brackets] in the report text) to a Drive file ID.
 // Add a new entry here for every record you want auto-hyperlinked. Per-case maps can be layered on top later.
@@ -1557,7 +1891,13 @@ let state = {
   cases: [],
   timeEntries: [],
   invoices: [],
-  nextInvNum: 1001
+  firms: [],
+  attorneys: [],
+  nextInvNum: 1001,
+  // Top-level Chart Detectives folder in Drive. When set, new cases auto-organize into
+  // {root}/{firm}/{attorney}/{case}/ — see ensureCaseHierarchy().
+  driveRootFolderId: '',
+  driveRootFolderName: ''
 };
 let casesFilter = 'all';
 let uploadedFiles = [];
@@ -1570,6 +1910,52 @@ function load() {
     const d = localStorage.getItem('lnc_state');
     if (d) state = JSON.parse(d);
   } catch(e) {}
+  // Back-fill new state slots for anyone upgrading from pre-firms data.
+  if (!Array.isArray(state.firms)) state.firms = [];
+  if (!Array.isArray(state.attorneys)) state.attorneys = [];
+  migrateFirmsAndAttorneys();
+}
+
+// One-time sweep: turn every case's free-text firm/attorney fields into firm/attorney records,
+// then link each case to the record by ID. Idempotent — skips any case that's already linked.
+function migrateFirmsAndAttorneys() {
+  let changed = false;
+  const newId = (p) => p + '-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,6);
+  state.cases.forEach(c => {
+    // Firm
+    if (c.firm && !c.firmId) {
+      const name = c.firm.trim();
+      if (name) {
+        let f = state.firms.find(x => (x.name||'').trim().toLowerCase() === name.toLowerCase());
+        if (!f) {
+          f = { id: newId('F'), name, street:'', city:'', state:'', zip:'', phone:'', fax:'', email:'', website:'', notes:'' };
+          state.firms.push(f);
+        }
+        c.firmId = f.id;
+        changed = true;
+      }
+    }
+    // Attorney
+    if (c.attorney && !c.attorneyId) {
+      const full = c.attorney.trim();
+      if (full) {
+        const parts = full.split(/\s+/);
+        const firstName = parts.length > 1 ? parts.slice(0,-1).join(' ') : parts[0];
+        const lastName  = parts.length > 1 ? parts[parts.length-1] : '';
+        let a = state.attorneys.find(x =>
+          x.firmId === c.firmId &&
+          ((x.firstName||'') + ' ' + (x.lastName||'')).trim().toLowerCase() === full.toLowerCase()
+        );
+        if (!a) {
+          a = { id: newId('A'), firmId: c.firmId || null, firstName, lastName, title:'', email:'', directPhone:'', cellPhone:'', fax:'', assistantName:'', assistantEmail:'', assistantPhone:'', notes:'' };
+          state.attorneys.push(a);
+        }
+        c.attorneyId = a.id;
+        changed = true;
+      }
+    }
+  });
+  if (changed) save();
 }
 
 // ===== INIT =====
@@ -1584,9 +1970,11 @@ function init() {
   populateCaseDropdowns();
   renderDashboard();
   renderCases();
+  renderFirms();
   renderTimeEntries();
   renderInvoices();
   updateActiveCaseBadge();
+  renderDriveRootStrip();
   // Set default dates
   const today = new Date().toISOString().split('T')[0];
   ['new-received','log-date','inv-date'].forEach(id => {
@@ -1618,13 +2006,76 @@ document.querySelectorAll('.modal-overlay').forEach(overlay => {
 });
 
 // ===== CASES =====
+// When the New Case modal opens, (re)populate the firm dropdown from state.firms.
+function populateCaseFirmDropdown(selectedFirmId) {
+  const sel = document.getElementById('new-firmId');
+  if (!sel) return;
+  const firms = [...state.firms].sort((a,b) => (a.name||'').localeCompare(b.name||''));
+  sel.innerHTML = '<option value="">— Select firm —</option>' +
+    firms.map(f => `<option value="${f.id}">${esc(f.name || '(unnamed firm)')}</option>`).join('') +
+    '<option value="__new__">+ Add new firm…</option>';
+  if (selectedFirmId) sel.value = selectedFirmId;
+  populateCaseAttorneyDropdown(sel.value);
+}
+
+// Populate the attorney dropdown filtered to the chosen firm.
+function populateCaseAttorneyDropdown(firmId, selectedAttorneyId) {
+  const sel = document.getElementById('new-attorneyId');
+  if (!sel) return;
+  const attys = state.attorneys
+    .filter(a => !firmId || a.firmId === firmId)
+    .sort((a,b) => ((a.lastName||'') + (a.firstName||'')).localeCompare((b.lastName||'') + (b.firstName||'')));
+  sel.innerHTML = '<option value="">— Select attorney —</option>' +
+    attys.map(a => `<option value="${a.id}">${esc(((a.firstName||'') + ' ' + (a.lastName||'')).trim() || '(unnamed)')}${a.title ? ' (' + esc(a.title) + ')' : ''}</option>`).join('') +
+    '<option value="__new__">+ Add new attorney…</option>';
+  if (selectedAttorneyId) sel.value = selectedAttorneyId;
+}
+
+// Fired when the firm dropdown on the case form changes. If the user picked "+ add new",
+// open the firm modal in "creating-from-case" mode so the new firm auto-selects afterwards.
+function onCaseFirmChange() {
+  const sel = document.getElementById('new-firmId');
+  if (sel.value === '__new__') {
+    sel.value = '';
+    openFirmModal(null, { returnTo: 'case' });
+    return;
+  }
+  populateCaseAttorneyDropdown(sel.value);
+}
+
+function onCaseAttorneyChange() {
+  const sel = document.getElementById('new-attorneyId');
+  if (sel.value === '__new__') {
+    sel.value = '';
+    const firmId = document.getElementById('new-firmId').value || '';
+    if (!firmId) { alert('Pick a firm first — then add an attorney within it.'); return; }
+    openAttorneyModal(null, { firmId, returnTo: 'case' });
+  }
+}
+
+// Wrapper around openModal that also primes dropdowns.
+function openNewCaseModal() {
+  clearCaseForm();
+  populateCaseFirmDropdown();
+  openModal('modal-new-case');
+}
+
 function saveCase() {
   const patient = document.getElementById('new-patient').value.trim();
   if (!patient) { alert('Patient name is required.'); return; }
+  const firmId = document.getElementById('new-firmId').value || '';
+  const attorneyId = document.getElementById('new-attorneyId').value || '';
+  const firmRec = firmId ? state.firms.find(f => f.id === firmId) : null;
+  const attyRec = attorneyId ? state.attorneys.find(a => a.id === attorneyId) : null;
   const c = {
     id: document.getElementById('new-caseid').value.trim() || 'LNC-' + Date.now().toString().slice(-5),
-    patient, attorney: document.getElementById('new-attorney').value.trim(),
-    firm: document.getElementById('new-firm').value.trim(),
+    patient,
+    firmId,
+    attorneyId,
+    // Keep the legacy free-text fields populated as convenience strings (used by invoices,
+    // letters, reports, CSV exports, etc.) so nothing downstream has to change.
+    firm: firmRec ? (firmRec.name || '') : '',
+    attorney: attyRec ? ((attyRec.firstName||'') + ' ' + (attyRec.lastName||'')).trim() : '',
     type: document.getElementById('new-casetype').value,
     side: document.getElementById('new-side').value,
     received: document.getElementById('new-received').value,
@@ -1638,10 +2089,27 @@ function saveCase() {
   clearCaseForm();
   populateCaseDropdowns();
   renderCases(); renderDashboard(); updateActiveCaseBadge();
+  // Fire-and-forget: if the Drive root is set and the case has both firm + attorney, try
+  // to auto-build the Firm/Attorney/Case hierarchy. We don't block the UI on this — the
+  // case is already saved and a network failure shouldn't keep the form open.
+  if (state.driveRootFolderId && c.firmId && c.attorneyId && _driveToken) {
+    ensureCaseHierarchy(c).then(folder => {
+      c.driveFolderId = folder.id;
+      c.driveFolderName = folder.name;
+      save();
+      renderCases();
+      showToast('📁 Auto-created ' + folder.name + ' in Drive.');
+    }).catch(e => {
+      console.warn('Hierarchy auto-create failed:', e);
+      showToast('⚠ Could not auto-organize in Drive: ' + e.message);
+    });
+  }
 }
 
 function clearCaseForm() {
-  ['new-patient','new-caseid','new-attorney','new-firm','new-notes'].forEach(id => document.getElementById(id).value = '');
+  ['new-patient','new-caseid','new-notes'].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+  const fsel = document.getElementById('new-firmId'); if (fsel) fsel.value = '';
+  const asel = document.getElementById('new-attorneyId'); if (asel) asel.value = '';
   document.getElementById('new-rate').value = '150';
 }
 
@@ -1690,6 +2158,7 @@ function renderCases() {
       <td>
         <div style="display:flex;gap:4px;flex-wrap:wrap;">
           <button class="btn btn-outline btn-sm" onclick="connectCaseFolder('${c.id}')" title="${c.driveFolderName ? 'Change Drive folder ('+esc(c.driveFolderName)+')' : 'Connect Drive folder'}">${c.driveFolderId ? '📁 ✓' : '📁 Connect'}</button>
+          <button class="btn btn-outline btn-sm" onclick="reorganizeCaseIntoHierarchy('${c.id}')" title="Move or create this case's folder under Chart Detectives / Firm / Attorney / ...">🗂 Organize</button>
           <button class="btn btn-outline btn-sm" onclick="showPage('records')">Records</button>
           <button class="btn btn-outline btn-sm" onclick="showPage('reports')">Report</button>
           <button class="btn btn-danger btn-sm" onclick="deleteCase('${c.id}')">×</button>
@@ -1719,6 +2188,322 @@ async function connectCaseFolder(caseId) {
 function updateActiveCaseBadge() {
   const n = state.cases.filter(c => c.status === 'active').length;
   document.getElementById('active-case-count').textContent = n;
+}
+
+// ===== DRIVE ROOT FOLDER =====
+// Reflects state.driveRootFolderId/Name in the Case Manager strip. Called from init() and
+// after any change to the root.
+function renderDriveRootStrip() {
+  const label = document.getElementById('drive-root-label');
+  const clearBtn = document.getElementById('drive-root-clear-btn');
+  if (!label) return;
+  if (state.driveRootFolderId && state.driveRootFolderName) {
+    label.innerHTML = 'Chart Detectives root folder: <b>' + esc(state.driveRootFolderName) + '</b> — new cases auto-organize into <code>Firm / Attorney / Case</code> inside it.';
+    if (clearBtn) clearBtn.style.display = '';
+  } else {
+    label.innerHTML = 'Chart Detectives root folder: <b>not set</b> — new cases won\u2019t auto-organize in Drive.';
+    if (clearBtn) clearBtn.style.display = 'none';
+  }
+}
+
+async function pickDriveRootFolder() {
+  try {
+    const picked = await pickDriveFolder();
+    if (!picked) return;
+    state.driveRootFolderId = picked.id;
+    state.driveRootFolderName = picked.name;
+    save();
+    renderDriveRootStrip();
+    showToast('📁 Root set to ' + picked.name);
+  } catch (e) {
+    alert('Could not open Drive picker: ' + e.message);
+  }
+}
+
+function clearDriveRootFolder() {
+  if (!confirm('Clear the Chart Detectives root folder? New cases will stop auto-organizing in Drive until you set it again.')) return;
+  state.driveRootFolderId = '';
+  state.driveRootFolderName = '';
+  save();
+  renderDriveRootStrip();
+}
+
+// One-click migration: move this case's existing Drive folder into {root}/{firm}/{attorney}/.
+// If the case has no folder yet, it creates one.
+async function reorganizeCaseIntoHierarchy(caseId) {
+  const c = state.cases.find(x => x.id === caseId);
+  if (!c) return;
+  if (!state.driveRootFolderId) { alert('Set a Chart Detectives root folder first (Case Manager page).'); return; }
+  if (!c.firmId) { alert('This case has no firm selected — pick a firm before reorganizing.'); return; }
+  try {
+    const firmRec = state.firms.find(f => f.id === c.firmId);
+    const attyRec = c.attorneyId ? state.attorneys.find(a => a.id === c.attorneyId) : null;
+    // Build the Firm [/ Attorney] parent path — we want to drop the EXISTING case folder here.
+    const firmFolder = await driveFindOrCreateFolder(state.driveRootFolderId, firmRec.name || 'Unnamed Firm');
+    let parentId = firmFolder.id;
+    if (attyRec) {
+      const fullName = ((attyRec.firstName||'') + ' ' + (attyRec.lastName||'')).trim() || 'Unnamed Attorney';
+      const attyFolder = await driveFindOrCreateFolder(parentId, fullName);
+      parentId = attyFolder.id;
+    }
+    if (c.driveFolderId) {
+      await driveMoveFile(c.driveFolderId, parentId);
+      showToast('📁 Moved ' + (c.driveFolderName || 'case folder') + ' into ' + (attyRec ? 'Firm/Attorney' : 'Firm') + ' hierarchy.');
+    } else {
+      // No folder yet — create one now with a sensible name.
+      const caseFolderName = ((c.patient || 'Untitled') + ' — ' + (c.id || '')).trim().replace(/ — $/,'');
+      const caseFolder = await driveFindOrCreateFolder(parentId, caseFolderName);
+      c.driveFolderId = caseFolder.id;
+      c.driveFolderName = caseFolder.name;
+      save();
+      showToast('📁 Created ' + caseFolder.name + ' in hierarchy.');
+    }
+    renderCases();
+  } catch(e) {
+    alert('Reorganize failed: ' + e.message);
+  }
+}
+
+// ===== FIRMS & ATTORNEYS =====
+// Tiny id helper so we don't depend on the one scoped inside migrateFirmsAndAttorneys.
+function makeDirId(p) { return p + '-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,6); }
+
+// Build a readable one-line address from a firm record, skipping blank parts.
+function formatFirmAddress(f) {
+  if (!f) return '';
+  const line1 = (f.street || '').trim();
+  const cityStateZip = [
+    (f.city||'').trim(),
+    [(f.state||'').trim(), (f.zip||'').trim()].filter(Boolean).join(' ')
+  ].filter(Boolean).join(', ');
+  return [line1, cityStateZip].filter(Boolean).join(' • ');
+}
+
+function renderFirms() {
+  const container = document.getElementById('firms-list');
+  if (!container) return;
+  if (!state.firms.length) {
+    container.innerHTML = '<div class="card" style="text-align:center;padding:40px 16px;color:var(--gray-400);">No firms yet. Click <b>+ New Firm</b> above to add one.</div>';
+    return;
+  }
+  const firms = [...state.firms].sort((a,b) => (a.name||'').localeCompare(b.name||''));
+  container.innerHTML = firms.map(f => {
+    const attys = state.attorneys
+      .filter(a => a.firmId === f.id)
+      .sort((a,b) => ((a.lastName||'') + (a.firstName||'')).localeCompare((b.lastName||'') + (b.firstName||'')));
+    const caseCount = state.cases.filter(c => c.firmId === f.id).length;
+    const addr = formatFirmAddress(f);
+    const attyRows = attys.length ? attys.map(a => {
+      const fullName = ((a.firstName||'') + ' ' + (a.lastName||'')).trim() || '(unnamed)';
+      const bits = [];
+      if (a.title) bits.push(esc(a.title));
+      if (a.email) bits.push(`<a href="mailto:${esc(a.email)}" onclick="event.stopPropagation()">${esc(a.email)}</a>`);
+      if (a.directPhone) bits.push('☎ ' + esc(a.directPhone));
+      if (a.cellPhone) bits.push('📱 ' + esc(a.cellPhone));
+      const assistant = a.assistantName ? `<div style="font-size:11px;color:var(--gray-400);margin-top:2px;">Paralegal: ${esc(a.assistantName)}${a.assistantEmail ? ' · ' + esc(a.assistantEmail) : ''}${a.assistantPhone ? ' · ' + esc(a.assistantPhone) : ''}</div>` : '';
+      return `
+        <div class="attorney-row" onclick="openAttorneyModal('${a.id}')" style="padding:10px 12px;border-top:1px solid var(--gray-100);cursor:pointer;display:flex;justify-content:space-between;align-items:flex-start;gap:12px;">
+          <div style="flex:1;min-width:0;">
+            <div style="font-weight:500;">${esc(fullName)}</div>
+            <div style="font-size:12px;color:var(--gray-500);margin-top:2px;">${bits.join(' · ') || '<span style="color:var(--gray-400);">No contact info yet</span>'}</div>
+            ${assistant}
+          </div>
+          <button class="btn btn-outline btn-sm" onclick="event.stopPropagation();openAttorneyModal('${a.id}')">Edit</button>
+        </div>`;
+    }).join('') : `<div style="padding:12px;color:var(--gray-400);font-size:13px;border-top:1px solid var(--gray-100);">No attorneys yet for this firm.</div>`;
+
+    return `
+      <div class="card" style="padding:0;margin-bottom:14px;overflow:hidden;">
+        <div style="padding:14px 16px;display:flex;justify-content:space-between;align-items:flex-start;gap:12px;cursor:pointer;" onclick="openFirmModal('${f.id}')">
+          <div style="flex:1;min-width:0;">
+            <div style="font-weight:600;font-size:15px;">${esc(f.name || '(unnamed firm)')}</div>
+            ${addr ? `<div style="font-size:12px;color:var(--gray-500);margin-top:3px;">${esc(addr)}</div>` : ''}
+            <div style="font-size:11px;color:var(--gray-400);margin-top:4px;">
+              ${attys.length} attorney${attys.length === 1 ? '' : 's'} · ${caseCount} case${caseCount === 1 ? '' : 's'}
+              ${f.phone ? ' · ☎ ' + esc(f.phone) : ''}${f.email ? ' · ' + esc(f.email) : ''}
+            </div>
+          </div>
+          <div style="display:flex;gap:6px;">
+            <button class="btn btn-outline btn-sm" onclick="event.stopPropagation();openAttorneyModal(null, { firmId: '${f.id}' })">+ Attorney</button>
+            <button class="btn btn-outline btn-sm" onclick="event.stopPropagation();openFirmModal('${f.id}')">Edit</button>
+          </div>
+        </div>
+        ${attyRows}
+      </div>`;
+  }).join('');
+}
+
+// ---- Firm modal ----
+// opts.returnTo === 'case' tells us the modal was opened from the New Case dropdown,
+// and we should re-populate that dropdown (and auto-select the just-saved firm) on save.
+let firmModalContext = null;
+
+function openFirmModal(firmId, opts) {
+  firmModalContext = { firmId: firmId || null, returnTo: (opts && opts.returnTo) || null };
+  const f = firmId ? state.firms.find(x => x.id === firmId) : null;
+  document.getElementById('firm-modal-title').textContent = f ? 'Edit Firm' : 'New Firm';
+  document.getElementById('firm-id').value      = f ? f.id       : '';
+  document.getElementById('firm-name').value    = f ? (f.name    || '') : '';
+  document.getElementById('firm-street').value  = f ? (f.street  || '') : '';
+  document.getElementById('firm-city').value    = f ? (f.city    || '') : '';
+  document.getElementById('firm-state').value   = f ? (f.state   || '') : '';
+  document.getElementById('firm-zip').value     = f ? (f.zip     || '') : '';
+  document.getElementById('firm-phone').value   = f ? (f.phone   || '') : '';
+  document.getElementById('firm-fax').value     = f ? (f.fax     || '') : '';
+  document.getElementById('firm-email').value   = f ? (f.email   || '') : '';
+  document.getElementById('firm-website').value = f ? (f.website || '') : '';
+  document.getElementById('firm-notes').value   = f ? (f.notes   || '') : '';
+  document.getElementById('firm-delete-btn').style.display = f ? '' : 'none';
+  openModal('modal-firm');
+}
+
+function saveFirm() {
+  const name = document.getElementById('firm-name').value.trim();
+  if (!name) { alert('Firm name is required.'); return; }
+  const id = document.getElementById('firm-id').value || makeDirId('F');
+  const existing = state.firms.find(x => x.id === id);
+  const rec = existing || { id };
+  rec.name    = name;
+  rec.street  = document.getElementById('firm-street').value.trim();
+  rec.city    = document.getElementById('firm-city').value.trim();
+  rec.state   = document.getElementById('firm-state').value.trim().toUpperCase();
+  rec.zip     = document.getElementById('firm-zip').value.trim();
+  rec.phone   = document.getElementById('firm-phone').value.trim();
+  rec.fax     = document.getElementById('firm-fax').value.trim();
+  rec.email   = document.getElementById('firm-email').value.trim();
+  rec.website = document.getElementById('firm-website').value.trim();
+  rec.notes   = document.getElementById('firm-notes').value.trim();
+  if (!existing) state.firms.push(rec);
+  // Keep legacy free-text `firm` strings on cases in sync with the firm name
+  // (invoices, CSVs, letters, etc. still read these).
+  state.cases.forEach(c => { if (c.firmId === rec.id) c.firm = rec.name; });
+  save();
+  closeModal('modal-firm');
+  renderFirms();
+  renderCases();
+  const ctx = firmModalContext;
+  firmModalContext = null;
+  if (ctx && ctx.returnTo === 'case') {
+    // Jump back to the New Case modal with the new firm pre-selected.
+    populateCaseFirmDropdown(rec.id);
+  }
+}
+
+function deleteFirm() {
+  const id = document.getElementById('firm-id').value;
+  if (!id) return;
+  const attyCount = state.attorneys.filter(a => a.firmId === id).length;
+  const caseCount = state.cases.filter(c => c.firmId === id).length;
+  let msg = 'Delete this firm?';
+  if (attyCount || caseCount) {
+    msg += '\n\nThis firm has ' + attyCount + ' attorney(s) and is linked to ' + caseCount + ' case(s).';
+    msg += '\nThe firm and its attorneys will be removed. Cases will keep their historical firm/attorney text but lose the link.';
+  }
+  if (!confirm(msg)) return;
+  state.firms = state.firms.filter(f => f.id !== id);
+  state.attorneys = state.attorneys.filter(a => a.firmId !== id);
+  state.cases.forEach(c => { if (c.firmId === id) { c.firmId = ''; c.attorneyId = ''; } });
+  save();
+  closeModal('modal-firm');
+  renderFirms();
+  renderCases();
+}
+
+// ---- Attorney modal ----
+let attorneyModalContext = null;
+
+function populateAttorneyFirmSelect(selectedFirmId) {
+  const sel = document.getElementById('attorney-firmId');
+  if (!sel) return;
+  const firms = [...state.firms].sort((a,b) => (a.name||'').localeCompare(b.name||''));
+  sel.innerHTML = '<option value="">— Select firm —</option>' +
+    firms.map(f => `<option value="${f.id}">${esc(f.name || '(unnamed firm)')}</option>`).join('');
+  if (selectedFirmId) sel.value = selectedFirmId;
+}
+
+function openAttorneyModal(attorneyId, opts) {
+  attorneyModalContext = {
+    attorneyId: attorneyId || null,
+    returnTo: (opts && opts.returnTo) || null,
+    firmId: (opts && opts.firmId) || null
+  };
+  const a = attorneyId ? state.attorneys.find(x => x.id === attorneyId) : null;
+  if (!state.firms.length) {
+    alert('Add a firm first — every attorney lives under a firm.');
+    openFirmModal(null, opts && opts.returnTo ? { returnTo: opts.returnTo } : undefined);
+    return;
+  }
+  const preselectedFirm = a ? a.firmId : (opts && opts.firmId) || '';
+  populateAttorneyFirmSelect(preselectedFirm);
+  document.getElementById('attorney-modal-title').textContent = a ? 'Edit Attorney' : 'New Attorney';
+  document.getElementById('attorney-id').value             = a ? a.id              : '';
+  document.getElementById('attorney-firstName').value      = a ? (a.firstName      || '') : '';
+  document.getElementById('attorney-lastName').value       = a ? (a.lastName       || '') : '';
+  document.getElementById('attorney-title').value          = a ? (a.title          || '') : '';
+  document.getElementById('attorney-email').value          = a ? (a.email          || '') : '';
+  document.getElementById('attorney-directPhone').value    = a ? (a.directPhone    || '') : '';
+  document.getElementById('attorney-cellPhone').value      = a ? (a.cellPhone      || '') : '';
+  document.getElementById('attorney-fax').value            = a ? (a.fax            || '') : '';
+  document.getElementById('attorney-assistantName').value  = a ? (a.assistantName  || '') : '';
+  document.getElementById('attorney-assistantEmail').value = a ? (a.assistantEmail || '') : '';
+  document.getElementById('attorney-assistantPhone').value = a ? (a.assistantPhone || '') : '';
+  document.getElementById('attorney-notes').value          = a ? (a.notes          || '') : '';
+  document.getElementById('attorney-delete-btn').style.display = a ? '' : 'none';
+  openModal('modal-attorney');
+}
+
+function saveAttorney() {
+  const firstName = document.getElementById('attorney-firstName').value.trim();
+  const lastName  = document.getElementById('attorney-lastName').value.trim();
+  const firmId    = document.getElementById('attorney-firmId').value;
+  if (!firstName && !lastName) { alert('Attorney name is required.'); return; }
+  if (!firmId) { alert('Please choose the firm this attorney belongs to.'); return; }
+  const id = document.getElementById('attorney-id').value || makeDirId('A');
+  const existing = state.attorneys.find(x => x.id === id);
+  const rec = existing || { id };
+  rec.firmId          = firmId;
+  rec.firstName       = firstName;
+  rec.lastName        = lastName;
+  rec.title           = document.getElementById('attorney-title').value.trim();
+  rec.email           = document.getElementById('attorney-email').value.trim();
+  rec.directPhone     = document.getElementById('attorney-directPhone').value.trim();
+  rec.cellPhone       = document.getElementById('attorney-cellPhone').value.trim();
+  rec.fax             = document.getElementById('attorney-fax').value.trim();
+  rec.assistantName   = document.getElementById('attorney-assistantName').value.trim();
+  rec.assistantEmail  = document.getElementById('attorney-assistantEmail').value.trim();
+  rec.assistantPhone  = document.getElementById('attorney-assistantPhone').value.trim();
+  rec.notes           = document.getElementById('attorney-notes').value.trim();
+  if (!existing) state.attorneys.push(rec);
+  // Mirror the display name into legacy case.attorney strings.
+  const display = (rec.firstName + ' ' + rec.lastName).trim();
+  state.cases.forEach(c => { if (c.attorneyId === rec.id) c.attorney = display; });
+  save();
+  closeModal('modal-attorney');
+  renderFirms();
+  renderCases();
+  const ctx = attorneyModalContext;
+  attorneyModalContext = null;
+  if (ctx && ctx.returnTo === 'case') {
+    // Pick up where the New Case modal left off, pre-selecting this attorney.
+    populateCaseFirmDropdown(rec.firmId);
+    const asel = document.getElementById('new-attorneyId');
+    if (asel) asel.value = rec.id;
+  }
+}
+
+function deleteAttorney() {
+  const id = document.getElementById('attorney-id').value;
+  if (!id) return;
+  const caseCount = state.cases.filter(c => c.attorneyId === id).length;
+  let msg = 'Delete this attorney?';
+  if (caseCount) msg += '\n\nThis attorney is linked to ' + caseCount + ' case(s). Those cases will keep their historical attorney text but lose the link.';
+  if (!confirm(msg)) return;
+  state.attorneys = state.attorneys.filter(a => a.id !== id);
+  state.cases.forEach(c => { if (c.attorneyId === id) c.attorneyId = ''; });
+  save();
+  closeModal('modal-attorney');
+  renderFirms();
+  renderCases();
 }
 
 // ===== DASHBOARD =====
@@ -1881,6 +2666,23 @@ async function runRecordAnalysis() {
 
   // (1) Selected files from the case Drive folder
   const selectedDrive = driveFiles.filter(f => driveFilesChecked[f.id]);
+  // Set up the _processed cache for this case, if the case folder is linked. We lazily
+  // load the manifest on first use and flush it once at the end. If anything in this
+  // block fails (e.g. user doesn't have write access), we silently fall through to the
+  // no-cache path — analysis still works, it's just not as fast next time.
+  let processedFolderId = null;
+  let processedManifest = null;
+  let manifestDirty = false;
+  if (selectedDrive.length && caseInfo && caseInfo.driveFolderId) {
+    try {
+      processedFolderId = await ensureProcessedFolder(caseInfo.driveFolderId);
+      processedManifest = await loadProcessedManifest(processedFolderId);
+    } catch(e) {
+      console.warn('Processed cache unavailable:', e);
+      processedFolderId = null;
+      processedManifest = null;
+    }
+  }
   if (selectedDrive.length) {
     area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Fetching ' + selectedDrive.length + ' file(s) from Drive…</span></div>';
     for (let idx = 0; idx < selectedDrive.length; idx++) {
@@ -1889,29 +2691,109 @@ async function runRecordAnalysis() {
       try {
         const isHeic = /heic|heif/i.test(f.mimeType || '') || /\.(heic|heif)$/i.test(f.name);
         if (f.mimeType === 'application/pdf') {
-          // Fetch raw bytes. Large PDFs (> 20 MB) get split into page-range sub-PDFs that
-          // each satisfy Claude's 32MB/100-page per-document limit.
+          // Step A — cache check. If _processed holds chunks for this exact file version,
+          // pull them straight down instead of re-splitting the original.
+          let cached = null;
+          let sourceMeta = null;
+          if (processedManifest) {
+            try {
+              sourceMeta = await driveGetFileMeta(f.id);
+              const entry = processedManifest.entries[f.id];
+              if (entry && entry.kind === 'pdfChunks' && cacheEntryIsFresh(entry, sourceMeta)) cached = entry;
+            } catch (e) { console.warn('Cache freshness check failed for ' + f.name + ':', e); }
+          }
+          if (cached && Array.isArray(cached.chunks) && cached.chunks.length) {
+            area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Using cached chunks ('+(idx+1)+'/'+selectedDrive.length+'): ' + esc(f.name) + ' — ' + cached.chunks.length + ' part(s)…</span></div>';
+            for (let ci = 0; ci < cached.chunks.length; ci++) {
+              const ck = cached.chunks[ci];
+              area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Loading cached chunk ' + (ci+1) + '/' + cached.chunks.length + ' of ' + esc(f.name) + '…</span></div>';
+              const b64 = await driveGetFileBase64(ck.id);
+              const partTitle = (cached.chunks.length === 1)
+                ? f.name
+                : f.name.replace(/\.pdf$/i,'') + ' — pp. ' + ck.startPage + '-' + ck.endPage + ' of ' + (ck.totalPages || '?') + '.pdf';
+              contentBlocks.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: b64 }, title: partTitle });
+            }
+            continue;
+          }
+          // Step B — no cache hit (or no cache at all). Download, split, and — if we have
+          // a _processed folder to park them in — upload each chunk back and record it
+          // in the manifest for next time.
           area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Downloading PDF ('+(idx+1)+'/'+selectedDrive.length+'): ' + esc(f.name) + '…</span></div>';
           const blob = await driveGetFileBlob(f.id, 'application/pdf');
           const buf  = await blob.arrayBuffer();
-          if (buf.byteLength <= 20 * 1024 * 1024) {
-            contentBlocks.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: arrayBufferToBase64(buf) }, title: f.name });
-          } else {
-            area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Splitting large PDF: ' + esc(f.name) + ' (' + (buf.byteLength/(1024*1024)).toFixed(0) + ' MB)…</span></div>';
-            const parts = await splitPdfIntoChunks(buf);
-            for (const p of parts) {
-              const partTitle = f.name.replace(/\.pdf$/i,'') + ' — pp. ' + p.startPage + '-' + p.endPage + ' of ' + p.totalPages + '.pdf';
-              contentBlocks.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: arrayBufferToBase64(p.bytes.buffer || p.bytes) }, title: partTitle });
+          area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Processing PDF: ' + esc(f.name) + '…</span></div>';
+          const parts = await splitPdfIntoChunks(buf);
+          if (parts.length > 1) {
+            area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Split ' + esc(f.name) + ' into ' + parts.length + ' chunks.</span></div>';
+          }
+          const chunkMeta = [];
+          for (let pi = 0; pi < parts.length; pi++) {
+            const p = parts[pi];
+            const partTitle = (parts.length === 1)
+              ? f.name
+              : f.name.replace(/\.pdf$/i,'') + ' — pp. ' + p.startPage + '-' + p.endPage + ' of ' + p.totalPages + '.pdf';
+            contentBlocks.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: arrayBufferToBase64(p.bytes.buffer || p.bytes) }, title: partTitle });
+            if (processedFolderId && processedManifest) {
+              try {
+                area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Caching chunk '+(pi+1)+'/'+parts.length+' of ' + esc(f.name) + ' to _processed…</span></div>';
+                const up = await uploadPdfChunk(processedFolderId, f.name, p);
+                chunkMeta.push(up);
+              } catch(e) { console.warn('Failed to cache chunk:', e); }
+            }
+          }
+          if (processedFolderId && processedManifest && chunkMeta.length) {
+            if (!sourceMeta) { try { sourceMeta = await driveGetFileMeta(f.id); } catch(e) { sourceMeta = null; } }
+            if (sourceMeta) {
+              processedManifest.entries[f.id] = {
+                sourceName: f.name,
+                size: sourceMeta.size,
+                modifiedTime: sourceMeta.modifiedTime,
+                kind: 'pdfChunks',
+                chunks: chunkMeta
+              };
+              manifestDirty = true;
             }
           }
         } else if (isHeic) {
-          // Convert HEIC/HEIF → JPEG in the browser, downscale, then attach as an image block.
+          // HEIC cache check: a single converted JPEG per source, keyed by source id + mtime/size.
+          let cachedJpeg = null;
+          let sourceMeta = null;
+          if (processedManifest) {
+            try {
+              sourceMeta = await driveGetFileMeta(f.id);
+              const entry = processedManifest.entries[f.id];
+              if (entry && entry.kind === 'heicJpeg' && cacheEntryIsFresh(entry, sourceMeta)) cachedJpeg = entry;
+            } catch (e) { console.warn('HEIC cache freshness check failed:', e); }
+          }
+          if (cachedJpeg && cachedJpeg.jpegId) {
+            area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Using cached JPEG ('+(idx+1)+'/'+selectedDrive.length+'): ' + esc(f.name) + '…</span></div>';
+            const b64jpg = await driveGetFileBase64(cachedJpeg.jpegId);
+            contentBlocks.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: b64jpg } });
+            continue;
+          }
           area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Converting HEIC ('+(idx+1)+'/'+selectedDrive.length+'): ' + esc(f.name) + '…</span></div>';
           const heicBlob = await driveGetFileBlob(f.id, 'image/heic');
           let jpegBlob  = await heicToJpegBlob(heicBlob);
           jpegBlob      = await downscaleImageBlob(jpegBlob, 1600, 0.75);
           const b64jpg  = await blobToBase64(jpegBlob);
           contentBlocks.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: b64jpg } });
+          if (processedFolderId && processedManifest) {
+            try {
+              area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Caching JPEG for ' + esc(f.name) + '…</span></div>';
+              const up = await uploadConvertedJpeg(processedFolderId, f.name, jpegBlob);
+              if (!sourceMeta) { try { sourceMeta = await driveGetFileMeta(f.id); } catch(e) { sourceMeta = null; } }
+              if (sourceMeta) {
+                processedManifest.entries[f.id] = {
+                  sourceName: f.name,
+                  size: sourceMeta.size,
+                  modifiedTime: sourceMeta.modifiedTime,
+                  kind: 'heicJpeg',
+                  jpegId: up.id
+                };
+                manifestDirty = true;
+              }
+            } catch(e) { console.warn('Failed to cache converted JPEG:', e); }
+          }
         } else if (f.mimeType && f.mimeType.startsWith('image/')) {
           // Download, downscale, re-encode → JPEG base64. Keeps payload small for big photos.
           area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Processing image ('+(idx+1)+'/'+selectedDrive.length+'): ' + esc(f.name) + '…</span></div>';
@@ -1929,6 +2811,12 @@ async function runRecordAnalysis() {
         textAddendum += '\n\n[Could not read ' + f.name + ': ' + e.message + ']';
       }
     }
+    // Flush the processed-cache manifest once at the end of the Drive loop so we survive
+    // a mid-run refresh without losing the cache entries we just recorded.
+    if (manifestDirty && processedManifest) {
+      try { await saveProcessedManifest(processedManifest); }
+      catch(e) { console.warn('Cache manifest save failed:', e); }
+    }
   }
 
   // (2) Locally-uploaded files (kept as a fallback)
@@ -1937,14 +2825,12 @@ async function runRecordAnalysis() {
       const isHeic = /heic|heif/i.test(f.type || '') || /\.(heic|heif)$/i.test(f.name);
       if (f.type === 'application/pdf') {
         const buf = await f.arrayBuffer();
-        if (buf.byteLength <= 20 * 1024 * 1024) {
-          contentBlocks.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: arrayBufferToBase64(buf) }, title: f.name });
-        } else {
-          const parts = await splitPdfIntoChunks(buf);
-          for (const p of parts) {
-            const partTitle = f.name.replace(/\.pdf$/i,'') + ' — pp. ' + p.startPage + '-' + p.endPage + ' of ' + p.totalPages + '.pdf';
-            contentBlocks.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: arrayBufferToBase64(p.bytes.buffer || p.bytes) }, title: partTitle });
-          }
+        const parts = await splitPdfIntoChunks(buf);
+        for (const p of parts) {
+          const partTitle = (parts.length === 1)
+            ? f.name
+            : f.name.replace(/\.pdf$/i,'') + ' — pp. ' + p.startPage + '-' + p.endPage + ' of ' + p.totalPages + '.pdf';
+          contentBlocks.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: arrayBufferToBase64(p.bytes.buffer || p.bytes) }, title: partTitle });
         }
       } else if (isHeic) {
         let jpegBlob = await heicToJpegBlob(f);
@@ -2536,6 +3422,9 @@ function saveInvoice() {
     caseId, patient: caseInfo ? caseInfo.patient : '',
     attorney: caseInfo ? caseInfo.attorney : '',
     firm: caseInfo ? caseInfo.firm : '',
+    // Carry the directory IDs so printInvoice can pull the firm's current address block.
+    firmId: caseInfo ? (caseInfo.firmId || '') : '',
+    attorneyId: caseInfo ? (caseInfo.attorneyId || '') : '',
     date: document.getElementById('inv-date').value,
     dueDate: document.getElementById('inv-due').value,
     lineItems: [...invoiceLineItems],
@@ -2647,6 +3536,29 @@ function copyReminderEmail() {
 function printInvoice(id) {
   const inv = state.invoices.find(i => i.id === id);
   if (!inv) return;
+  // Prefer the linked firm record (so edits to the firm's address flow to invoices).
+  // Fall back to name match for older invoices written before firmId existed.
+  let firmRec = inv.firmId ? state.firms.find(f => f.id === inv.firmId) : null;
+  if (!firmRec && inv.firm) firmRec = state.firms.find(f => (f.name||'').trim().toLowerCase() === inv.firm.trim().toLowerCase());
+  const attyRec = inv.attorneyId ? state.attorneys.find(a => a.id === inv.attorneyId) : null;
+  const toLines = [];
+  if (attyRec) {
+    const name = ((attyRec.firstName||'') + ' ' + (attyRec.lastName||'')).trim();
+    toLines.push(esc(name + (attyRec.title ? ', ' + attyRec.title : '')));
+  } else if (inv.attorney) {
+    toLines.push(esc(inv.attorney));
+  }
+  if (firmRec) {
+    if (firmRec.name) toLines.push(esc(firmRec.name));
+    if (firmRec.street) toLines.push(esc(firmRec.street));
+    const cityLine = [firmRec.city, [firmRec.state, firmRec.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+    if (cityLine) toLines.push(esc(cityLine));
+    if (firmRec.phone) toLines.push('Phone: ' + esc(firmRec.phone));
+    if (firmRec.email) toLines.push('Email: ' + esc(firmRec.email));
+  } else if (inv.firm) {
+    toLines.push(esc(inv.firm));
+  }
+  const toBlock = toLines.length ? toLines.join('<br>') : '<em>(no recipient on file)</em>';
   const w = window.open('', '_blank');
   w.document.write(`<html><head><title>Invoice #${inv.num}</title><style>body{font-family:sans-serif;max-width:700px;margin:40px auto;color:#222;}h1{color:#1a2744;}table{width:100%;border-collapse:collapse;}th,td{padding:8px;border:1px solid #ddd;text-align:left;}th{background:#f5f5f5;}.total{font-size:18px;font-weight:bold;}.footer{margin-top:40px;font-size:12px;color:#999;}</style></head><body>
 <h1>Invoice #${inv.num}</h1>
@@ -2654,7 +3566,7 @@ function printInvoice(id) {
 <img src="data:image/png;base64,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" alt="Chart Detectives Legal Nurse Consulting" style="height:48px;width:auto;display:block;margin-bottom:10px;">
   </div>
   <p><strong>From:</strong> Deborah J Edmonds BSN, RN, LNHA, GERO-BC — Chart Detectives Legal Nurse Consulting, LLC</p>
-  <p><strong>To:</strong> ${esc(inv.attorney)}, ${esc(inv.firm)}</p>
+  <p><strong>To:</strong><br>${toBlock}</p>
   <p><strong>Re:</strong> ${esc(inv.patient)}</p>
   <p><strong>Date:</strong> ${inv.date} &nbsp;&nbsp; <strong>Due:</strong> ${inv.dueDate}</p>
   <hr>
@@ -2722,13 +3634,42 @@ async function callClaude(promptOrContent) {
     }
     throw e;
   }
-  const res = await fetch(PROXY_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'text/plain' },
-    body: payload
-  });
-  if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(err.error?.message || 'API error ' + res.status); }
-  const data = await res.json();
+  // Retry on transient network errors (Failed to fetch, 5xx, 408, 429). Three attempts
+  // with exponential backoff. Non-transient errors (4xx message-level, CORS) bail immediately.
+  let lastErr;
+  let data;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const res = await fetch(PROXY_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain' },
+        body: payload
+      });
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        const msg = errBody.error?.message || 'API error ' + res.status;
+        // Retry only transient HTTP statuses. Content-level errors (400 "max pages", etc.) shouldn't retry.
+        if ([408, 429, 500, 502, 503, 504].includes(res.status) && attempt < 3) {
+          lastErr = new Error(msg);
+          await new Promise(r => setTimeout(r, 1500 * attempt));
+          continue;
+        }
+        throw new Error(msg);
+      }
+      data = await res.json();
+      lastErr = null;
+      break;
+    } catch (e) {
+      lastErr = e;
+      // "Failed to fetch" is a TypeError from the network stack — almost always transient.
+      if (/Failed to fetch|NetworkError|timeout|load failed/i.test(e.message) && attempt < 3) {
+        await new Promise(r => setTimeout(r, 1500 * attempt));
+        continue;
+      }
+      throw e;
+    }
+  }
+  if (!data) throw lastErr || new Error('Unknown API failure');
   // Surface a warning if the model was cut off by the token cap so the user knows to regenerate / split.
   if (data.stop_reason === 'max_tokens') {
     showToast('⚠️ Output reached the token cap and may be truncated. Regenerate or split into sections.', true);
