@@ -2577,6 +2577,46 @@ function populateCaseDropdowns() {
 // ===== RECORD ANALYSIS =====
 let driveFiles = [];        // metadata for files loaded from the active case's Drive folder
 let driveFilesChecked = {}; // id → bool (true = include in analysis)
+// Wall-clock start of the in-flight analysis, captured at the top of runRecordAnalysis
+// so finishAnalysis can auto-log the elapsed time as a billable entry. null = idle.
+let _analysisStartedAt = null;
+
+// Map the internal analysis type to one of the existing activity categories used on
+// the Time Tracking page. Kept to the neutral LNC phrasing the client already sees on
+// invoices — do NOT introduce labels that reveal AI is being used.
+function activityForAnalysisType(type) {
+  if (type === 'chronology') return 'Chronology preparation';
+  return 'Record review';
+}
+
+// Create a billable time entry for a completed analysis run. Mirrors the exact shape
+// that stopTimer() and saveTimeEntry() produce so invoices render identically.
+// Rounds to the nearest 0.25 hour with a 0.25 hr floor (standard LNC minimum).
+function autoLogAnalysisTime(caseInfo, type, startedAtMs) {
+  if (!caseInfo || !caseInfo.id || !startedAtMs) return null;
+  const elapsedMs = Date.now() - startedAtMs;
+  if (elapsedMs <= 0) return null;
+  const rawHours = elapsedMs / 3600000;
+  // Round to nearest 0.25, with a 0.25 hr minimum.
+  const hours = Math.max(0.25, Math.round(rawHours * 4) / 4);
+  const entry = {
+    id: Date.now().toString(),
+    caseId: caseInfo.id,
+    patient: caseInfo.patient || caseInfo.id,
+    activity: activityForAnalysisType(type),
+    hours,
+    rate: (typeof caseInfo.rate === 'number' && caseInfo.rate > 0) ? caseInfo.rate : 150,
+    notes: 'Comprehensive review of medical records',
+    date: new Date().toISOString().split('T')[0]
+  };
+  state.timeEntries.push(entry);
+  save();
+  // Refresh UI surfaces that show time totals. These render targets are guarded so they
+  // no-op safely on pages where the time DOM isn't active.
+  try { if (document.getElementById('time-tbody')) renderTimeEntries(); } catch(e) {}
+  try { renderDashboard(); } catch(e) {}
+  return entry;
+}
 function handleFileUpload(event) {
   const files = Array.from(event.target.files);
   uploadedFiles = [...uploadedFiles, ...files];
@@ -2663,6 +2703,8 @@ function driveFileKindLabel(mime) {
 }
 
 async function runRecordAnalysis() {
+  // Capture wall-clock start so finishAnalysis can auto-log the billable time spent.
+  _analysisStartedAt = Date.now();
   const caseId = document.getElementById('rec-case-select').value;
   const type = document.getElementById('analysis-type').value;
   const instructions = document.getElementById('analysis-instructions').value;
@@ -2951,6 +2993,13 @@ Please produce a ${typeLabels[type] || type}. Format your response clearly with 
   { const s = document.getElementById('send-to-report-btn'); if (s) s.style.display = 'none'; }
 
   const batchOutputs = [];
+  // Cascade detection: if 3 batches in a row all fail (after callClaude has already
+  // exhausted its retries), the proxy is dead and we should stop hammering it. Better
+  // to fail fast and surface a clear message than to spend 20 minutes piling on a
+  // saturated Worker. Resets to 0 on any successful batch.
+  let consecutiveFailures = 0;
+  const CASCADE_THRESHOLD = 3;
+  let cascadeAborted = false;
   for (let bi = 0; bi < batches.length; bi++) {
     const batch = batches[bi];
     const batchMB = batch.reduce((n,b) => n + ((b.source && b.source.data) ? b.source.data.length : 0), 0) / (1024*1024);
@@ -2974,12 +3023,32 @@ Be thorough and factual. Cite the source record name/date for each fact. Do NOT 
     try {
       const r = await callClaude(batchContent);
       batchOutputs.push({ batch: bi+1, text: r });
+      consecutiveFailures = 0;
     } catch(e) {
       batchOutputs.push({ batch: bi+1, text: '[BATCH ' + (bi+1) + ' ERROR: ' + e.message + ']' });
+      consecutiveFailures++;
+      console.warn(`[batch ${bi+1}] failed (${consecutiveFailures} in a row): ${e.message}`);
+      if (consecutiveFailures >= CASCADE_THRESHOLD) {
+        cascadeAborted = true;
+        const remaining = batches.length - (bi + 1);
+        area.innerHTML = '<div class="alert alert-error">'
+          + '<strong>Analysis aborted:</strong> ' + CASCADE_THRESHOLD + ' batches in a row failed after retries. '
+          + 'The AI proxy appears overloaded or down. '
+          + (remaining > 0 ? remaining + ' batch' + (remaining>1?'es':'') + ' were skipped. ' : '')
+          + '<br><br>Wait 5–10 minutes for the service to recover, then re-run analysis. '
+          + 'Partial results from earlier batches were preserved and will still be synthesized.'
+          + '</div>';
+        // Mark the rest as skipped so the synthesis step still has a complete record.
+        for (let bj = bi + 1; bj < batches.length; bj++) {
+          batchOutputs.push({ batch: bj+1, text: '[BATCH ' + (bj+1) + ' SKIPPED: cascade abort after ' + CASCADE_THRESHOLD + ' consecutive failures]' });
+        }
+        break;
+      }
     }
-    // Brief pause between batches to ease rate-limiting and let the proxy's connection pool recover.
-    // Matters on runs with 20+ batches where the last few were prone to "Failed to fetch".
-    if (bi < batches.length - 1) await new Promise(r => setTimeout(r, 750));
+    // Pause between batches to ease rate-limiting and let the proxy's connection pool recover.
+    // 3000ms (was 750ms) — on long runs the Worker can saturate and the extra breathing
+    // room dramatically reduces 503 cascades.
+    if (bi < batches.length - 1) await new Promise(r => setTimeout(r, 3000));
   }
 
   // Synthesis pass. Text-only, but large runs can overflow the 200k-token context window:
@@ -3141,6 +3210,21 @@ async function finishAnalysis(res, caseInfo, type, typeLabels, area, pre) {
       c.lastAnalysisSummary = '';
       save();
     }
+  }
+  // Auto-log the analysis duration as a standard billable entry on this case. We show
+  // a neutral activity label ("Record review" / "Chronology preparation") — the same
+  // phrasing that already appears on invoices — so nothing AI-related leaks to clients.
+  try {
+    if (_analysisStartedAt && caseInfo && caseInfo.id) {
+      const entry = autoLogAnalysisTime(caseInfo, type, _analysisStartedAt);
+      if (entry) {
+        showToast('⏱ Logged ' + entry.hours.toFixed(2) + ' hr to ' + caseInfo.patient + ' — ' + entry.activity);
+      }
+    }
+  } catch(e) {
+    console.warn('Auto time log failed:', e);
+  } finally {
+    _analysisStartedAt = null;
   }
   if (caseInfo && caseInfo.driveFolderId) {
     try {
@@ -3848,10 +3932,19 @@ async function callClaude(promptOrContent) {
     }
     throw e;
   }
-  // Retry on transient network errors (Failed to fetch, 5xx, 408, 429). Five attempts
-  // with exponential backoff. Non-transient errors (4xx message-level, CORS) bail immediately.
-  // Five attempts (was 3) — on long batch runs the proxy's connection pool occasionally drops
-  // late-run requests and three retries wasn't enough to ride through a 30+ second outage.
+  // Retry on transient network errors (Failed to fetch, 5xx, 408, 429).
+  // Per-status backoff: overload signals (503/502/504/429) get AGGRESSIVE backoff
+  // because they almost always mean "back way off, we're saturated" — hammering the
+  // Worker every 2–8 seconds just keeps it pinned in the overloaded state. Generic
+  // transient errors (500, 408, network blips) get moderate backoff.
+  //
+  // Backoff tables (in ms):
+  //   Aggressive (503/502/504/429): 15s → 45s → 90s → 180s  (total ~5.5 min)
+  //   Moderate   (500/408/network): 5s  → 10s → 20s → 40s   (total ~75 sec)
+  const AGGRESSIVE_STATUSES = new Set([429, 502, 503, 504]);
+  const MODERATE_STATUSES   = new Set([408, 500]);
+  const AGGRESSIVE_DELAYS = [15000, 45000, 90000, 180000];
+  const MODERATE_DELAYS   = [5000, 10000, 20000, 40000];
   const MAX_ATTEMPTS = 5;
   let lastErr;
   let data;
@@ -3866,9 +3959,14 @@ async function callClaude(promptOrContent) {
         const errBody = await res.json().catch(() => ({}));
         const msg = errBody.error?.message || 'API error ' + res.status;
         // Retry only transient HTTP statuses. Content-level errors (400 "max pages", etc.) shouldn't retry.
-        if ([408, 429, 500, 502, 503, 504].includes(res.status) && attempt < MAX_ATTEMPTS) {
+        const isAggressive = AGGRESSIVE_STATUSES.has(res.status);
+        const isModerate   = MODERATE_STATUSES.has(res.status);
+        if ((isAggressive || isModerate) && attempt < MAX_ATTEMPTS) {
           lastErr = new Error(msg);
-          await new Promise(r => setTimeout(r, 2000 * attempt));  // 2s, 4s, 6s, 8s
+          const table = isAggressive ? AGGRESSIVE_DELAYS : MODERATE_DELAYS;
+          const delay = table[Math.min(attempt - 1, table.length - 1)];
+          console.warn(`[callClaude] HTTP ${res.status} — backing off ${Math.round(delay/1000)}s (attempt ${attempt}/${MAX_ATTEMPTS})`);
+          await new Promise(r => setTimeout(r, delay));
           continue;
         }
         throw new Error(msg);
@@ -3879,8 +3977,13 @@ async function callClaude(promptOrContent) {
     } catch (e) {
       lastErr = e;
       // "Failed to fetch" is a TypeError from the network stack — almost always transient.
+      // These look like network errors but are frequently the edge proxy dying under
+      // load (which strips CORS headers and presents as "Failed to fetch" in the browser),
+      // so treat them with moderate backoff rather than 2-second retries.
       if (/Failed to fetch|NetworkError|timeout|load failed|ECONNRESET|socket hang up/i.test(e.message) && attempt < MAX_ATTEMPTS) {
-        await new Promise(r => setTimeout(r, 2000 * attempt));
+        const delay = MODERATE_DELAYS[Math.min(attempt - 1, MODERATE_DELAYS.length - 1)];
+        console.warn(`[callClaude] Network error — backing off ${Math.round(delay/1000)}s (attempt ${attempt}/${MAX_ATTEMPTS}): ${e.message}`);
+        await new Promise(r => setTimeout(r, delay));
         continue;
       }
       throw e;
