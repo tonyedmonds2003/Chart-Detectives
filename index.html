@@ -4511,20 +4511,25 @@ function syncQuickBooks() {
 // ===== CLAUDE API =====
 // `promptOrContent` accepts either a plain string (Report Builder) or an array of content
 // blocks (Record Analysis with attached PDFs/images for multimodal review).
-async function callClaude(promptOrContent) {
+async function callClaude(promptOrContent, options) {
   if (!PROXY_URL || PROXY_URL === 'YOUR_CLOUDFLARE_WORKER_URL_HERE') {
     throw new Error('Proxy not configured.');
   }
-  // Use no-cors-friendly approach: send as text/plain to avoid preflight
-  // max_tokens set to 32000 — Haiku 4.5 supports up to 64k, 32k is enough for a 70+ page LNC report.
-  // The prior cap of 8000 was the cause of report truncation.
+  // Use no-cors-friendly approach: send as text/plain to avoid preflight.
+  // max_tokens default of 12000: originally 32000, which allows long LNC reports but meant a single
+  // generation could take 2-3 minutes — past Cloudflare's 100s subrequest timeout → 524 errors.
+  // Haiku 4.5 generates ~150-250 tokens/sec, so 12000 tokens finishes in ~50-80s, comfortably under
+  // the 100s limit. Callers that genuinely need longer outputs (final LNC reports) can pass
+  // options.maxTokens to override; they should, however, only do so when the proxy supports it
+  // without timing out (i.e. not in hierarchical reducer passes).
+  const maxTokens = (options && options.maxTokens) || 12000;
   let payload;
   try {
     payload = JSON.stringify({
       auth: 'Anthony51',
       payload: {
         model: CLAUDE_MODEL,
-        max_tokens: 32000,
+        max_tokens: maxTokens,
         system: 'You are Deborah J Edmonds BSN, RN, LNHA, GERO-BC, a legal nurse consultant with Chart Detectives Legal Nurse Consulting, LLC. You have over 35 years of healthcare experience and deep knowledge of medical standards, nursing practice, federal long-term care regulations (42 CFR), and legal documentation. Provide thorough, professional, and accurate responses appropriate for use in legal proceedings.',
         messages: [{ role: 'user', content: promptOrContent }]
       }
@@ -4545,8 +4550,12 @@ async function callClaude(promptOrContent) {
   // Backoff tables (in ms):
   //   Aggressive (503/502/504/429): 15s → 45s → 90s → 180s  (total ~5.5 min)
   //   Moderate   (500/408/network): 5s  → 10s → 20s → 40s   (total ~75 sec)
+  // 524 = Cloudflare's "origin did not respond in 100s" for the proxy Worker. Retry is moderate
+  // because the error can come from a genuinely slow generation OR a transient edge-node hiccup;
+  // the shorter backoff gives the second attempt a fighting chance while not hammering on persistent
+  // slowness. If 524s persist across retries the caller should reduce max_tokens.
   const AGGRESSIVE_STATUSES = new Set([429, 502, 503, 504]);
-  const MODERATE_STATUSES   = new Set([408, 500]);
+  const MODERATE_STATUSES   = new Set([408, 500, 524]);
   const AGGRESSIVE_DELAYS = [15000, 45000, 90000, 180000];
   const MODERATE_DELAYS   = [5000, 10000, 20000, 40000];
   const MAX_ATTEMPTS = 5;
