@@ -1900,6 +1900,138 @@ function showToast(msg, isError) {
 // After setting up your Cloudflare Worker, paste your Worker URL below
 const PROXY_URL = 'https://lnc-api.tonyedmonds2003.workers.dev';
 
+// Shared-secret header for the /v1/* endpoints on the new Worker. Must match LNC_AUTH
+// (or DEFAULT_AUTH fallback) on the Worker side. Not a strong auth mechanism — just a
+// gate against random traffic. Keep the same value as the legacy envelope `auth` field.
+const LNC_AUTH = 'Anthony51';
+
+// ===== ASYNC FLOW FEATURE FLAG =====
+// When true, large cases (anything that doesn't fit in a single call) route through the
+// async path: upload PDFs once via Files API, submit as a single Batch, track state in
+// Worker KV, poll for completion. Small cases still go through the immediate sync path.
+//
+// Default is OFF so deploying updated Worker + client is a no-op for Debbie. To opt in:
+//   localStorage.setItem('lnc_use_async', '1')   // enable
+//   localStorage.setItem('lnc_use_async', '0')   // force off
+//   localStorage.removeItem('lnc_use_async')     // back to default
+const USE_ASYNC_FLOW_DEFAULT = false;
+function isAsyncFlowEnabled() {
+  try {
+    const v = localStorage.getItem('lnc_use_async');
+    if (v === '1') return true;
+    if (v === '0') return false;
+  } catch (e) {}
+  return USE_ASYNC_FLOW_DEFAULT;
+}
+
+// ===== ASYNC FLOW HELPERS =====
+// Thin clients for the new Worker endpoints. All of them include the x-lnc-auth header.
+
+// Convert a base64 string (no data: prefix) back into a Blob for multipart upload.
+function base64ToBlob(b64, mime) {
+  const binary = atob(b64);
+  const len = binary.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
+  return new Blob([bytes], { type: mime || 'application/octet-stream' });
+}
+
+// Upload a PDF or image to Anthropic via the Worker. Returns the file_id.
+async function uploadFileToAnthropic(blob, filename) {
+  const fd = new FormData();
+  fd.append('file', blob, filename || 'document');
+  const res = await fetch(`${PROXY_URL}/v1/files`, {
+    method: 'POST',
+    headers: { 'x-lnc-auth': LNC_AUTH },
+    body: fd
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(`File upload failed: HTTP ${res.status} ${txt.slice(0, 200)}`);
+  }
+  const data = await res.json();
+  if (!data.id) throw new Error('File upload returned no id');
+  return data.id;
+}
+
+// Best-effort cleanup. Silent on failure.
+async function deleteUploadedFile(fileId) {
+  try {
+    await fetch(`${PROXY_URL}/v1/files/${encodeURIComponent(fileId)}`, {
+      method: 'DELETE',
+      headers: { 'x-lnc-auth': LNC_AUTH }
+    });
+  } catch (e) { /* ignore */ }
+}
+
+// Submit a batch of Messages requests. `batchRequests` is an array of { custom_id, params }.
+async function submitBatch(batchRequests) {
+  const res = await fetch(`${PROXY_URL}/v1/messages/batches`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-lnc-auth': LNC_AUTH },
+    body: JSON.stringify({ requests: batchRequests })
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(`Batch submit failed: HTTP ${res.status} ${txt.slice(0, 200)}`);
+  }
+  return res.json();
+}
+
+// Returns the current processing_status and request_counts for a batch.
+async function getBatchStatus(batchId) {
+  const res = await fetch(`${PROXY_URL}/v1/messages/batches/${encodeURIComponent(batchId)}`, {
+    headers: { 'x-lnc-auth': LNC_AUTH }
+  });
+  if (!res.ok) throw new Error(`Batch status fetch failed: HTTP ${res.status}`);
+  return res.json();
+}
+
+// Returns parsed JSONL results array when batch is ended; returns null if still processing.
+async function getBatchResults(batchId) {
+  const res = await fetch(`${PROXY_URL}/v1/messages/batches/${encodeURIComponent(batchId)}/results`, {
+    headers: { 'x-lnc-auth': LNC_AUTH }
+  });
+  if (res.status === 409) return null; // not ready
+  if (!res.ok) throw new Error(`Batch results fetch failed: HTTP ${res.status}`);
+  const text = await res.text();
+  return text.trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
+}
+
+// Create, read, and patch job state records in Worker KV.
+async function createJob(payload) {
+  const res = await fetch(`${PROXY_URL}/v1/jobs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-lnc-auth': LNC_AUTH },
+    body: JSON.stringify(payload || {})
+  });
+  if (!res.ok) throw new Error(`createJob failed: HTTP ${res.status}`);
+  return res.json();
+}
+async function patchJob(jobId, patch) {
+  const res = await fetch(`${PROXY_URL}/v1/jobs/${encodeURIComponent(jobId)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', 'x-lnc-auth': LNC_AUTH },
+    body: JSON.stringify(patch || {})
+  });
+  if (!res.ok) throw new Error(`patchJob failed: HTTP ${res.status}`);
+  return res.json();
+}
+async function getJob(jobId) {
+  const res = await fetch(`${PROXY_URL}/v1/jobs/${encodeURIComponent(jobId)}`, {
+    headers: { 'x-lnc-auth': LNC_AUTH }
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`getJob failed: HTTP ${res.status}`);
+  return res.json();
+}
+
+// Extract the text payload from an Anthropic Messages response object.
+function extractTextFromMessage(msg) {
+  if (!msg || !Array.isArray(msg.content)) return '';
+  return msg.content.filter(c => c && c.type === 'text').map(c => c.text || '').join('\n\n');
+}
+
 // ===== STATE =====
 let state = {
   cases: [],
@@ -2639,6 +2771,14 @@ async function onRecCaseSelectChanged() {
   const caseId = document.getElementById('rec-case-select').value;
   if (!caseId) return;
   const c = state.cases.find(x => x.id === caseId);
+
+  // If async flow is on and this case has an in-flight job, reconnect to it. The poll loop
+  // renders status into the result area and finishes by calling finishAnalysis. Fire-and-forget
+  // so Drive listing still loads in parallel.
+  if (c && c.activeJobId && isAsyncFlowEnabled()) {
+    resumeAsyncJobForCase(c).catch(e => console.warn('resumeAsyncJobForCase failed:', e));
+  }
+
   if (!c || !c.driveFolderId) {
     if (listEl) listEl.innerHTML = '<div style="padding:8px;color:var(--gray-400);font-size:12px;">No Drive folder linked to this case yet. Click <b>📁 Load files from case folder</b> to pick one, or go to Cases and use the 📁 Connect button.</div>';
     return;
@@ -2700,6 +2840,342 @@ function driveFileKindLabel(mime) {
   if (mime && mime.startsWith('image/')) return mime.split('/')[1].toUpperCase();
   if (mime && mime.startsWith('text/')) return 'TEXT';
   return 'FILE';
+}
+
+// ===== ASYNC ANALYSIS (Files API + Batches API + KV job state) =====
+// Called from runRecordAnalysis when isAsyncFlowEnabled() is true AND the case doesn't
+// fit in a single synchronous call. This path is robust to the browser being closed mid-run
+// — the batch continues on Anthropic's side, job state lives in Worker KV, and reopening
+// the case picks up where it left off.
+async function runAsyncRecordAnalysis(params) {
+  const {
+    contentBlocks, textAddendum, caseInfo, type, typeLabels,
+    instructions, caseContext, area, pre,
+    maxPages, maxTokens
+  } = params;
+
+  // --- 1) Upload every chunk to Anthropic Files API ---
+  area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Uploading ' + contentBlocks.length + ' file(s) to Claude (one-time per case)…</span></div>';
+  const fileIdBlocks = [];
+  const uploadedFileIds = [];
+  try {
+    for (let i = 0; i < contentBlocks.length; i++) {
+      const b = contentBlocks[i];
+      area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Uploading ' + (i + 1) + ' / ' + contentBlocks.length + ': ' + esc(b.title || ('attachment ' + (i + 1))) + '…</span></div>';
+      const mime = (b.source && b.source.media_type) || (b.type === 'document' ? 'application/pdf' : 'image/jpeg');
+      const blob = base64ToBlob(b.source.data, mime);
+      const extGuess = mime.includes('pdf') ? 'pdf' : (mime.split('/')[1] || 'bin');
+      const filename = b.title || ('attachment-' + (i + 1) + '.' + extGuess);
+      const fileId = await uploadFileToAnthropic(blob, filename);
+      uploadedFileIds.push(fileId);
+      fileIdBlocks.push({
+        type: b.type,
+        source: { type: 'file', file_id: fileId },
+        ...(b.title ? { title: b.title } : {}),
+        _pageCount: b._pageCount
+      });
+    }
+  } catch (e) {
+    area.innerHTML = `<div class="alert alert-danger">Upload failed: ${esc(e.message)}<br><br>No batch was submitted. You can retry immediately.</div>`;
+    // Clean up whatever we already uploaded.
+    for (const fid of uploadedFileIds) await deleteUploadedFile(fid);
+    return;
+  }
+
+  // --- 2) Chunk into batches. Byte budget effectively unlimited (files hosted server-side). ---
+  const batches = chunkContentBlocks(
+    fileIdBlocks,
+    Number.POSITIVE_INFINITY,
+    maxPages,
+    maxTokens
+  );
+
+  // --- 3) Build batch requests ---
+  const batchRequests = batches.map((batch, bi) => {
+    const promptText = `You are an expert Legal Nurse Consultant reviewing medical records.
+${caseContext ? 'Case context: ' + caseContext : ''}
+${instructions ? 'Special instructions: ' + instructions : ''}
+${bi === 0 && textAddendum ? '\nAdditional text records (provided only in this first batch):' + textAddendum : ''}
+
+This is BATCH ${bi + 1} of ${batches.length} for a large case. From the records attached to THIS batch, extract:
+• All dates and events (admissions, discharges, assessments, falls, injuries, ER visits)
+• Providers, facilities, and locations
+• Medications (start/stop dates, dose changes, PRN use, errors)
+• Diagnoses, vitals, labs, imaging findings
+• Nursing care decisions, interventions, and any deviations from standard of care
+• Any photos/images: describe what is visible and cite the source filename
+
+Be thorough and factual. Cite the source record name/date for each fact. Do NOT write a narrative summary yet — just extract facts. A final synthesis step will combine your extractions across all batches into the full ${typeLabels[type] || type}.`;
+    const content = [{ type: 'text', text: promptText }, ...stripInternalFields(batch)];
+    return {
+      custom_id: 'batch-' + bi,
+      params: {
+        model: CLAUDE_MODEL,
+        max_tokens: 32000,
+        system: 'You are Deborah J Edmonds BSN, RN, LNHA, GERO-BC, a legal nurse consultant with Chart Detectives Legal Nurse Consulting, LLC. You have over 35 years of healthcare experience and deep knowledge of medical standards, nursing practice, federal long-term care regulations (42 CFR), and legal documentation. Provide thorough, professional, and accurate responses appropriate for use in legal proceedings.',
+        messages: [{ role: 'user', content }]
+      }
+    };
+  });
+
+  // --- 4) Create the job record in KV ---
+  let job;
+  try {
+    job = await createJob({
+      case_id: caseInfo ? caseInfo.id : null,
+      file_ids: uploadedFileIds,
+      status: 'submitting',
+      metadata: {
+        analysis_type: type,
+        num_batches: batches.length,
+        instructions: instructions || '',
+        case_context: caseContext || '',
+        started_at: Date.now(),
+        // Preserve enough context to resume synthesis on a different device.
+        typeLabel: typeLabels[type] || type
+      }
+    });
+  } catch (e) {
+    area.innerHTML = `<div class="alert alert-danger">Could not create job record: ${esc(e.message)}<br><br>(This usually means the KV namespace isn't bound on the Worker. See worker/MIGRATION_PLAN.md.)</div>`;
+    for (const fid of uploadedFileIds) await deleteUploadedFile(fid);
+    return;
+  }
+
+  // --- 5) Stash job_id on the case so case-reopen can resume ---
+  if (caseInfo && caseInfo.id) {
+    const c = state.cases.find(x => x.id === caseInfo.id);
+    if (c) { c.activeJobId = job.job_id; save(); }
+  }
+
+  // --- 6) Submit the batch ---
+  let submitted;
+  try {
+    submitted = await submitBatch(batchRequests);
+  } catch (e) {
+    await patchJob(job.job_id, { status: 'failed', error: 'Batch submit failed: ' + e.message }).catch(() => {});
+    if (caseInfo && caseInfo.id) {
+      const c = state.cases.find(x => x.id === caseInfo.id);
+      if (c) { c.activeJobId = null; save(); }
+    }
+    area.innerHTML = `<div class="alert alert-danger">Batch submit failed: ${esc(e.message)}</div>`;
+    return;
+  }
+  await patchJob(job.job_id, { status: 'processing', batch_id: submitted.id }).catch(() => {});
+
+  // --- 7) Poll + fetch + synthesize ---
+  await pollBatchAndFinish({
+    jobId: job.job_id,
+    batchId: submitted.id,
+    numBatches: batches.length,
+    caseInfo, type, typeLabels, instructions, caseContext, textAddendum,
+    area, pre
+  });
+}
+
+// Polls the batch until done, fetches results, runs synthesis, calls finishAnalysis,
+// and updates job state at each step. Shared by the fresh-run and resume paths.
+async function pollBatchAndFinish(ctx) {
+  const { jobId, batchId, numBatches, caseInfo, type, typeLabels, instructions, caseContext, textAddendum, area, pre } = ctx;
+  const POLL_INTERVAL_MS = 30000;
+
+  // --- Poll loop ---
+  while (true) {
+    let status;
+    try {
+      status = await getBatchStatus(batchId);
+    } catch (e) {
+      // Transient fetch failure — keep polling, don't abort. Surface warning in UI.
+      area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Network hiccup while checking batch — retrying in 30s…</span></div>';
+      await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+      continue;
+    }
+    const counts = status.request_counts || {};
+    const done = (counts.succeeded || 0) + (counts.errored || 0) + (counts.canceled || 0) + (counts.expired || 0);
+    if (status.processing_status === 'ended' || counts.processing === 0) break;
+    area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Batch in progress — ' + done + ' / ' + numBatches + ' complete. You can close this tab; it will resume when you reopen the case.</span></div>';
+    await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+  }
+
+  // --- Fetch results ---
+  area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Fetching batch results…</span></div>';
+  let rawResults;
+  try {
+    rawResults = await getBatchResults(batchId);
+  } catch (e) {
+    await patchJob(jobId, { status: 'failed', error: 'Results fetch failed: ' + e.message }).catch(() => {});
+    area.innerHTML = `<div class="alert alert-danger">Could not fetch batch results: ${esc(e.message)}</div>`;
+    return;
+  }
+  if (!rawResults) {
+    area.innerHTML = `<div class="alert alert-danger">Batch ended but results not yet available. Try again in a minute.</div>`;
+    return;
+  }
+
+  // Map results back into batch order by custom_id.
+  const byId = Object.fromEntries(rawResults.map(r => [r.custom_id, r]));
+  const batchOutputs = [];
+  for (let bi = 0; bi < numBatches; bi++) {
+    const r = byId['batch-' + bi];
+    if (!r) {
+      batchOutputs.push({ batch: bi + 1, text: '[BATCH ' + (bi + 1) + ' MISSING from results]' });
+      continue;
+    }
+    if (r.result && r.result.type === 'succeeded') {
+      batchOutputs.push({ batch: bi + 1, text: extractTextFromMessage(r.result.message) });
+    } else if (r.result && r.result.type === 'errored') {
+      const msg = (r.result.error && (r.result.error.message || r.result.error.type)) || 'unknown error';
+      batchOutputs.push({ batch: bi + 1, text: '[BATCH ' + (bi + 1) + ' ERROR: ' + msg + ']' });
+    } else {
+      batchOutputs.push({ batch: bi + 1, text: '[BATCH ' + (bi + 1) + ' — unexpected result type]' });
+    }
+  }
+
+  // --- Synthesize (hierarchical if too large) ---
+  await patchJob(jobId, { status: 'synthesizing' }).catch(() => {});
+  const SYNTH_TOKEN_BUDGET = 150000;
+  const SYNTH_CHAR_BUDGET = SYNTH_TOKEN_BUDGET * 4;
+  const PROMPT_PREAMBLE_CHARS = 2000;
+  const typeLabel = typeLabels[type] || type;
+
+  const buildSynthPrompt = (intro, items) =>
+`You are an expert Legal Nurse Consultant.
+${caseContext ? 'Case context: ' + caseContext : ''}
+${instructions ? 'Special instructions: ' + instructions : ''}
+
+${intro}
+
+Rules:
+• Deduplicate repeated facts.
+• Order events chronologically by date.
+• Preserve all source citations (record names/dates).
+• Use professional LNC terminology and clear section headings.
+• Do NOT mention "batches", "groups", or the batching process in the output — produce a unified document.
+• Be comprehensive; this is the final deliverable.
+
+${items.join('\n\n')}`;
+
+  const flatItems = batchOutputs.map(br => '===== BATCH ' + br.batch + ' EXTRACTION =====\n' + br.text);
+  const flatChars = flatItems.reduce((n, s) => n + s.length, 0) + PROMPT_PREAMBLE_CHARS;
+
+  area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Synthesizing final ' + typeLabel + ' from ' + numBatches + ' batches…</span></div>';
+
+  let finalText = '';
+  try {
+    let synthPrompt;
+    if (flatChars <= SYNTH_CHAR_BUDGET) {
+      synthPrompt = buildSynthPrompt(
+        'Below are fact extractions from ' + numBatches + ' batches of medical records for this case. Combine them into a single ' + typeLabel + '.',
+        flatItems
+      );
+    } else {
+      // Hierarchical synthesis.
+      const groups = [];
+      let g = []; let gChars = PROMPT_PREAMBLE_CHARS;
+      for (const item of flatItems) {
+        if (gChars + item.length > SYNTH_CHAR_BUDGET && g.length) {
+          groups.push(g); g = [item]; gChars = PROMPT_PREAMBLE_CHARS + item.length;
+        } else {
+          g.push(item); gChars += item.length;
+        }
+      }
+      if (g.length) groups.push(g);
+      area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Large case — running 2-level synthesis across ' + groups.length + ' groups…</span></div>';
+      const midLevelSummaries = [];
+      for (let gi = 0; gi < groups.length; gi++) {
+        area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Synthesizing group ' + (gi + 1) + ' of ' + groups.length + '…</span></div>';
+        const groupPrompt = buildSynthPrompt(
+          'Below are fact extractions from a subset of this case\'s records. Produce a consolidated, deduplicated fact extraction covering this subset only — preserve every date, source citation, medication, provider, diagnosis, and deviation. This will be combined with other subsets in a final step.',
+          groups[gi]
+        );
+        try {
+          const r = await callClaude(groupPrompt);
+          midLevelSummaries.push('===== GROUP ' + (gi + 1) + ' CONSOLIDATED EXTRACTION =====\n' + r);
+        } catch (e) {
+          midLevelSummaries.push('===== GROUP ' + (gi + 1) + ' ERROR =====\n[Group synthesis failed: ' + e.message + ']\n\nRaw batch extractions for this group follow:\n\n' + groups[gi].join('\n\n'));
+        }
+        if (gi < groups.length - 1) await new Promise(r => setTimeout(r, 750));
+      }
+      area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Combining group summaries into final ' + typeLabel + '…</span></div>';
+      synthPrompt = buildSynthPrompt(
+        'Below are consolidated fact extractions from ' + groups.length + ' subsets of this case. Combine them into a single ' + typeLabel + '.',
+        midLevelSummaries
+      );
+    }
+    finalText = await callClaude(synthPrompt);
+  } catch (e) {
+    await patchJob(jobId, { status: 'failed', error: 'Synthesis failed: ' + e.message }).catch(() => {});
+    area.innerHTML = `<div class="alert alert-danger">Synthesis error: ${esc(e.message)}<br><br>Batch extractions were completed but could not be merged. You can still review them below.</div>`;
+    pre.textContent = batchOutputs.map(br => '===== BATCH ' + br.batch + ' =====\n' + br.text).join('\n\n');
+    pre.style.display = 'block';
+    document.getElementById('copy-rec-btn').style.display = '';
+    return;
+  }
+
+  // --- Done ---
+  await patchJob(jobId, { status: 'done', result: finalText }).catch(() => {});
+  if (caseInfo && caseInfo.id) {
+    const c = state.cases.find(x => x.id === caseInfo.id);
+    if (c) { c.activeJobId = null; save(); }
+  }
+  await finishAnalysis(finalText, caseInfo, type, typeLabels, area, pre);
+}
+
+// Called from onRecCaseSelectChanged when the selected case has an activeJobId. Reconnects
+// the UI to the in-flight job and runs it to completion, even if another device started it.
+async function resumeAsyncJobForCase(caseInfo) {
+  if (!caseInfo || !caseInfo.activeJobId) return;
+  const area = document.getElementById('rec-result-area');
+  const pre = document.getElementById('rec-result');
+  if (!area || !pre) return;
+
+  area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Reconnecting to in-flight analysis for this case…</span></div>';
+  pre.style.display = 'none';
+
+  let job;
+  try {
+    job = await getJob(caseInfo.activeJobId);
+  } catch (e) {
+    area.innerHTML = `<div class="alert alert-warning">Could not reconnect to previous analysis: ${esc(e.message)}. Clearing stuck job marker.</div>`;
+    const c = state.cases.find(x => x.id === caseInfo.id);
+    if (c) { c.activeJobId = null; save(); }
+    return;
+  }
+  if (!job) {
+    // Job expired from KV or never existed — clear and bail quietly.
+    const c = state.cases.find(x => x.id === caseInfo.id);
+    if (c) { c.activeJobId = null; save(); }
+    return;
+  }
+
+  // Already done — render result and clear marker.
+  if (job.status === 'done' && job.result) {
+    const c = state.cases.find(x => x.id === caseInfo.id);
+    if (c) { c.activeJobId = null; save(); }
+    await finishAnalysis(job.result, caseInfo, job.metadata?.analysis_type, { chronology:'detailed medical chronology', summary:'comprehensive narrative summary', gaps:'analysis of care gaps and inconsistencies', providers:'list of all providers, diagnoses, and medications', full:'full comprehensive LNC analysis' }, area, pre);
+    return;
+  }
+  if (job.status === 'failed') {
+    area.innerHTML = `<div class="alert alert-danger">Previous analysis failed: ${esc(job.error || 'unknown error')}. <br><br>Click "Start AI Analysis" to try again.</div>`;
+    const c = state.cases.find(x => x.id === caseInfo.id);
+    if (c) { c.activeJobId = null; save(); }
+    return;
+  }
+
+  // Still in flight — resume polling. We need typeLabels for the synthesis path.
+  const typeLabels = { chronology: 'detailed medical chronology', summary: 'comprehensive narrative summary', gaps: 'analysis of care gaps and inconsistencies', providers: 'list of all providers, diagnoses, and medications', full: 'full comprehensive LNC analysis including chronology, summary, gaps, providers, and nursing care assessment' };
+  const md = job.metadata || {};
+  await pollBatchAndFinish({
+    jobId: job.job_id,
+    batchId: job.batch_id,
+    numBatches: md.num_batches || 1,
+    caseInfo,
+    type: md.analysis_type || 'summary',
+    typeLabels,
+    instructions: md.instructions || '',
+    caseContext: md.case_context || '',
+    textAddendum: '',
+    area, pre
+  });
 }
 
 async function runRecordAnalysis() {
@@ -2967,6 +3443,30 @@ Please produce a ${typeLabels[type] || type}. Format your response clearly with 
     } catch(e) {
       area.innerHTML = `<div class="alert alert-danger">Error: ${esc(e.message)}</div>`;
     }
+    return;
+  }
+
+  // Branch B' — async path. Feature-flagged. Uploads PDFs once via Files API, submits
+  // the whole thing as a single Anthropic Batch, tracks state in Worker KV. The browser
+  // can close and reopen; resumeAsyncJobForCase() picks it back up on case reselect.
+  // Toggle with: localStorage.setItem('lnc_use_async', '1')
+  if (isAsyncFlowEnabled()) {
+    pre.style.display = 'none';
+    document.getElementById('copy-rec-btn').style.display = 'none';
+    { const s = document.getElementById('send-to-report-btn'); if (s) s.style.display = 'none'; }
+    const proceed = confirm(
+      'This case has ' + contentBlocks.length + ' file(s) totaling ~' + totalMB.toFixed(0) + ' MB (~' + totalPages + ' pages).\n\n' +
+      'Submit as a background batch? You can close this tab and come back later — the report will be waiting when you reopen the case. Expected completion: 15–60 minutes.'
+    );
+    if (!proceed) {
+      area.innerHTML = '<div class="alert alert-warning">Analysis cancelled.</div>';
+      return;
+    }
+    await runAsyncRecordAnalysis({
+      contentBlocks, textAddendum, caseInfo, type, typeLabels,
+      instructions, caseContext, area, pre,
+      maxPages: SAFE_SINGLE_CALL_PAGES, maxTokens: SAFE_SINGLE_CALL_TOKENS
+    });
     return;
   }
 
