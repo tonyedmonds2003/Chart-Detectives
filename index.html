@@ -2968,7 +2968,11 @@ Be thorough and factual. Cite the source record name/date for each fact. Do NOT 
     batchId: submitted.id,
     numBatches: batches.length,
     caseInfo, type, typeLabels, instructions, caseContext, textAddendum,
-    area, pre
+    area, pre,
+    // Original per-batch requests — pollBatchAndFinish uses these to retry any
+    // batches that error out (overloaded_error etc.) via the sync API without
+    // a second round-trip through the batches queue.
+    batchRequests
   });
 }
 
@@ -3026,8 +3030,15 @@ async function pollBatchAndFinish(ctx) {
       batchOutputs.push({ batch: bi + 1, text: extractTextFromMessage(r.result.message) });
       succeeded++;
     } else if (r.result && r.result.type === 'errored') {
-      const msg = (r.result.error && (r.result.error.message || r.result.error.type)) || 'unknown error';
-      batchOutputs.push({ batch: bi + 1, text: '[BATCH ' + (bi + 1) + ' ERROR: ' + msg + ']' });
+      // Anthropic batch error envelope: r.result.error = { type: 'error', error: { type, message } }.
+      // Older code read the outer wrapper's type ("error"), giving useless "[BATCH N ERROR: error]".
+      // Drill into the inner error for the real type + message.
+      const outer = r.result.error || {};
+      const inner = outer.error || outer;
+      const errType = inner.type || outer.type || 'unknown';
+      const errMsg = inner.message || outer.message || '';
+      const msg = errMsg ? (errType + ': ' + errMsg) : errType;
+      batchOutputs.push({ batch: bi + 1, text: '[BATCH ' + (bi + 1) + ' ERROR: ' + msg + ']', errored: true, errType: errType, errMsg: errMsg });
       errored++;
       if (!firstErrorDetail) firstErrorDetail = { batch: bi + 1, error: r.result.error, fullResult: r };
     } else {
@@ -3039,11 +3050,66 @@ async function pollBatchAndFinish(ctx) {
     console.warn('[first batch error — paste this to Claude if debugging]', firstErrorDetail);
   }
 
-  // --- Synthesize (hierarchical if too large) ---
+  // --- Auto-retry errored batches via the sync API ---
+  // Batches API sometimes returns overloaded_error / rate_limit_error / generic errors for
+  // a chunk of requests under load. Those come back in the results.jsonl mixed with the
+  // successes. Rather than fail the whole case and ask the user to re-run everything, we
+  // retry just the errored items via the same proxy used for sync analysis. The file_ids
+  // stay valid on Anthropic's side, so we can reuse the exact same content array.
+  if (errored > 0 && Array.isArray(ctx.batchRequests) && ctx.batchRequests.length === numBatches) {
+    const toRetry = [];
+    for (let i = 0; i < batchOutputs.length; i++) {
+      if (batchOutputs[i].errored) toRetry.push(i);
+    }
+    if (toRetry.length) {
+      console.log(`[batch retry] attempting sync retry for ${toRetry.length} errored batches`);
+      let retried = 0, recovered = 0;
+      for (const i of toRetry) {
+        retried++;
+        area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Retrying errored batch ' + (i + 1) + ' via sync API (' + retried + ' / ' + toRetry.length + ')…</span></div>';
+        try {
+          const req = ctx.batchRequests[i];
+          const content = req && req.params && req.params.messages && req.params.messages[0] && req.params.messages[0].content;
+          if (!content) throw new Error('retry payload unavailable');
+          const r = await callClaude(content);
+          batchOutputs[i] = { batch: i + 1, text: r };
+          recovered++;
+          succeeded++;
+          errored--;
+        } catch (e) {
+          // Preserve the original error context but annotate that retry was attempted.
+          const origType = batchOutputs[i].errType || 'error';
+          const origMsg = batchOutputs[i].errMsg || '';
+          batchOutputs[i] = {
+            batch: i + 1,
+            text: '[BATCH ' + (i + 1) + ' ERROR: ' + origType + (origMsg ? ': ' + origMsg : '') + '; retry also failed: ' + e.message + ']',
+            errored: true
+          };
+        }
+        if (retried < toRetry.length) await new Promise(r => setTimeout(r, 3000));
+      }
+      console.log(`[batch retry] recovered ${recovered} / ${toRetry.length} errored batches`);
+      if (recovered > 0) {
+        // Surface the recovery count in the UI transiently — nice for the user to know.
+        area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Recovered ' + recovered + ' of ' + toRetry.length + ' errored batches via retry. Moving to synthesis…</span></div>';
+      }
+    }
+  } else if (errored > 0) {
+    console.warn('[batch retry] errored items present but no batchRequests in ctx (resume path?) — skipping auto-retry');
+  }
+
+  // --- Synthesize (hierarchical if too large — recursively reduces until it fits) ---
   await patchJob(jobId, { status: 'synthesizing' }).catch(() => {});
-  const SYNTH_TOKEN_BUDGET = 150000;
-  const SYNTH_CHAR_BUDGET = SYNTH_TOKEN_BUDGET * 4;
-  const PROMPT_PREAMBLE_CHARS = 2000;
+  // Previous tuning (150k tokens * 4 chars/token = 600k chars) overflowed in the wild:
+  // 44 batches of dense medical extractions produced ~2.9 chars/token, so 600k chars
+  // clocked in at 206k actual tokens — over the 200k input limit. Lowering both the
+  // token budget AND the chars-per-token ratio gives durable headroom. At worst case
+  // (2.5 chars/token for very dense content), 400k chars = 160k tokens, leaving room
+  // for system prompt + preamble + response reservation under 200k.
+  const SYNTH_TOKEN_BUDGET = 120000;
+  const SYNTH_CHAR_BUDGET = 400000;
+  const PROMPT_PREAMBLE_CHARS = 3000;
+  const MAX_HIERARCHY_LEVELS = 4;
   const typeLabel = typeLabels[type] || type;
 
   const buildSynthPrompt = (intro, items) =>
@@ -3063,53 +3129,65 @@ Rules:
 
 ${items.join('\n\n')}`;
 
-  const flatItems = batchOutputs.map(br => '===== BATCH ' + br.batch + ' EXTRACTION =====\n' + br.text);
-  const flatChars = flatItems.reduce((n, s) => n + s.length, 0) + PROMPT_PREAMBLE_CHARS;
+  const totalChars = (items) => items.reduce((n, s) => n + s.length, 0) + PROMPT_PREAMBLE_CHARS;
+
+  let items = batchOutputs.map(br => '===== BATCH ' + br.batch + ' EXTRACTION =====\n' + br.text);
 
   area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Synthesizing final ' + typeLabel + ' from ' + numBatches + ' batches…</span></div>';
 
   let finalText = '';
   try {
-    let synthPrompt;
-    if (flatChars <= SYNTH_CHAR_BUDGET) {
-      synthPrompt = buildSynthPrompt(
-        'Below are fact extractions from ' + numBatches + ' batches of medical records for this case. Combine them into a single ' + typeLabel + '.',
-        flatItems
-      );
-    } else {
-      // Hierarchical synthesis.
+    // Recursively reduce until the combined input fits under budget. Each reduction pass
+    // groups the current items so every group fits under budget on its own, calls Claude
+    // once per group to consolidate, then the consolidated summaries become the new items.
+    let level = 0;
+    while (totalChars(items) > SYNTH_CHAR_BUDGET && level < MAX_HIERARCHY_LEVELS) {
+      level++;
       const groups = [];
-      let g = []; let gChars = PROMPT_PREAMBLE_CHARS;
-      for (const item of flatItems) {
+      let g = [];
+      let gChars = PROMPT_PREAMBLE_CHARS;
+      for (const item of items) {
         if (gChars + item.length > SYNTH_CHAR_BUDGET && g.length) {
-          groups.push(g); g = [item]; gChars = PROMPT_PREAMBLE_CHARS + item.length;
+          groups.push(g);
+          g = [item];
+          gChars = PROMPT_PREAMBLE_CHARS + item.length;
         } else {
-          g.push(item); gChars += item.length;
+          g.push(item);
+          gChars += item.length;
         }
       }
       if (g.length) groups.push(g);
-      area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Large case — running 2-level synthesis across ' + groups.length + ' groups…</span></div>';
-      const midLevelSummaries = [];
+
+      area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Large case — L' + level + ' reducing ' + items.length + ' items into ' + groups.length + ' groups…</span></div>';
+
+      const newItems = [];
       for (let gi = 0; gi < groups.length; gi++) {
-        area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Synthesizing group ' + (gi + 1) + ' of ' + groups.length + '…</span></div>';
+        area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>L' + level + ': synthesizing group ' + (gi + 1) + ' of ' + groups.length + '…</span></div>';
         const groupPrompt = buildSynthPrompt(
           'Below are fact extractions from a subset of this case\'s records. Produce a consolidated, deduplicated fact extraction covering this subset only — preserve every date, source citation, medication, provider, diagnosis, and deviation. This will be combined with other subsets in a final step.',
           groups[gi]
         );
         try {
           const r = await callClaude(groupPrompt);
-          midLevelSummaries.push('===== GROUP ' + (gi + 1) + ' CONSOLIDATED EXTRACTION =====\n' + r);
+          newItems.push('===== L' + level + ' GROUP ' + (gi + 1) + ' CONSOLIDATED =====\n' + r);
         } catch (e) {
-          midLevelSummaries.push('===== GROUP ' + (gi + 1) + ' ERROR =====\n[Group synthesis failed: ' + e.message + ']\n\nRaw batch extractions for this group follow:\n\n' + groups[gi].join('\n\n'));
+          // Fall through with the raw group contents so no facts are lost even if one
+          // group's synth call fails.
+          newItems.push('===== L' + level + ' GROUP ' + (gi + 1) + ' ERROR =====\n[Group synthesis failed: ' + e.message + ']\n\nRaw items for this group follow:\n\n' + groups[gi].join('\n\n'));
         }
         if (gi < groups.length - 1) await new Promise(r => setTimeout(r, 750));
       }
-      area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Combining group summaries into final ' + typeLabel + '…</span></div>';
-      synthPrompt = buildSynthPrompt(
-        'Below are consolidated fact extractions from ' + groups.length + ' subsets of this case. Combine them into a single ' + typeLabel + '.',
-        midLevelSummaries
-      );
+      items = newItems;
+      // Safety: if a reduction pass didn't meaningfully shrink the total, bail out of the
+      // loop so we don't spin forever. The final call below will throw if still too big.
+      if (items.length >= groups.length && groups.length === 1) break;
     }
+
+    area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Combining into final ' + typeLabel + '…</span></div>';
+    const intro = level === 0
+      ? 'Below are fact extractions from ' + numBatches + ' batches of medical records for this case. Combine them into a single ' + typeLabel + '.'
+      : 'Below are ' + items.length + ' consolidated fact extraction(s) covering this case. Combine them into a single ' + typeLabel + '.';
+    const synthPrompt = buildSynthPrompt(intro, items);
     finalText = await callClaude(synthPrompt);
   } catch (e) {
     await patchJob(jobId, { status: 'failed', error: 'Synthesis failed: ' + e.message }).catch(() => {});
@@ -3560,13 +3638,16 @@ Be thorough and factual. Cite the source record name/date for each fact. Do NOT 
     if (bi < batches.length - 1) await new Promise(r => setTimeout(r, 3000));
   }
 
-  // Synthesis pass. Text-only, but large runs can overflow the 200k-token context window:
-  // if 40 batches each produce ~5-10k tokens of extraction, concatenation can push 300k+ tokens.
-  // Guard with a rough estimate (~4 chars/token) and fall into a two-level hierarchical synthesis
-  // when the flat prompt would be too big.
-  const SYNTH_TOKEN_BUDGET = 150000;                 // leave ~50k for system prompt + response
-  const SYNTH_CHAR_BUDGET  = SYNTH_TOKEN_BUDGET * 4; // rough chars-per-token estimate
-  const PROMPT_PREAMBLE_CHARS = 2000;                // instructions + case context overhead
+  // Synthesis pass — text-only, but large runs overflow the 200k-token context window.
+  // Previous constants (150k * 4 chars/token = 600k chars) overflowed in production:
+  // 44 batches of dense medical extractions clocked in at ~2.9 chars/token, so 600k chars
+  // = 206k actual tokens — over the 200k limit. Tightened below + made the hierarchy
+  // recursive so a single reduction pass isn't the only safety net.
+  const SYNTH_TOKEN_BUDGET = 120000;
+  const SYNTH_CHAR_BUDGET  = 400000;
+  const PROMPT_PREAMBLE_CHARS = 3000;
+  const MAX_HIERARCHY_LEVELS = 4;
+  const typeLabel = typeLabels[type] || type;
 
   const buildSynthPrompt = (intro, items) =>
 `You are an expert Legal Nurse Consultant.
@@ -3585,55 +3666,52 @@ Rules:
 
 ${items.join('\n\n')}`;
 
-  const flatItems = batchOutputs.map(br => '===== BATCH ' + br.batch + ' EXTRACTION =====\n' + br.text);
-  const flatChars = flatItems.reduce((n, s) => n + s.length, 0) + PROMPT_PREAMBLE_CHARS;
+  const totalChars = (arr) => arr.reduce((n, s) => n + s.length, 0) + PROMPT_PREAMBLE_CHARS;
+  let items = batchOutputs.map(br => '===== BATCH ' + br.batch + ' EXTRACTION =====\n' + br.text);
 
-  area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Synthesizing final ' + (typeLabels[type] || type) + ' from ' + batches.length + ' batches…</span></div>';
-
-  let synthPrompt;
-  if (flatChars <= SYNTH_CHAR_BUDGET) {
-    // Fast path — everything fits.
-    synthPrompt = buildSynthPrompt(
-      'Below are fact extractions from ' + batches.length + ' batches of medical records for this case. Combine them into a single ' + (typeLabels[type] || type) + '.',
-      flatItems
-    );
-  } else {
-    // Hierarchical path — group batch outputs, synthesize each group, then combine.
-    // Split into groups that each fit under the budget.
-    const groups = [];
-    let g = []; let gChars = PROMPT_PREAMBLE_CHARS;
-    for (const item of flatItems) {
-      if (gChars + item.length > SYNTH_CHAR_BUDGET && g.length) {
-        groups.push(g); g = [item]; gChars = PROMPT_PREAMBLE_CHARS + item.length;
-      } else {
-        g.push(item); gChars += item.length;
-      }
-    }
-    if (g.length) groups.push(g);
-    area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Large case — running 2-level synthesis across ' + groups.length + ' groups…</span></div>';
-    const midLevelSummaries = [];
-    for (let gi = 0; gi < groups.length; gi++) {
-      area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Synthesizing group ' + (gi+1) + ' of ' + groups.length + '…</span></div>';
-      const groupPrompt = buildSynthPrompt(
-        'Below are fact extractions from a subset of this case\'s records. Produce a consolidated, deduplicated fact extraction covering this subset only — preserve every date, source citation, medication, provider, diagnosis, and deviation. This will be combined with other subsets in a final step.',
-        groups[gi]
-      );
-      try {
-        const r = await callClaude(groupPrompt);
-        midLevelSummaries.push('===== GROUP ' + (gi+1) + ' CONSOLIDATED EXTRACTION =====\n' + r);
-      } catch(e) {
-        midLevelSummaries.push('===== GROUP ' + (gi+1) + ' ERROR =====\n[Group synthesis failed: ' + e.message + ']\n\nRaw batch extractions for this group follow:\n\n' + groups[gi].join('\n\n'));
-      }
-      if (gi < groups.length - 1) await new Promise(r => setTimeout(r, 750));
-    }
-    area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Combining group summaries into final ' + (typeLabels[type] || type) + '…</span></div>';
-    synthPrompt = buildSynthPrompt(
-      'Below are consolidated fact extractions from ' + groups.length + ' subsets of this case. Combine them into a single ' + (typeLabels[type] || type) + '.',
-      midLevelSummaries
-    );
-  }
+  area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Synthesizing final ' + typeLabel + ' from ' + batches.length + ' batches…</span></div>';
 
   try {
+    // Recursively reduce until the combined input fits under budget.
+    let level = 0;
+    while (totalChars(items) > SYNTH_CHAR_BUDGET && level < MAX_HIERARCHY_LEVELS) {
+      level++;
+      const groups = [];
+      let g = []; let gChars = PROMPT_PREAMBLE_CHARS;
+      for (const item of items) {
+        if (gChars + item.length > SYNTH_CHAR_BUDGET && g.length) {
+          groups.push(g); g = [item]; gChars = PROMPT_PREAMBLE_CHARS + item.length;
+        } else {
+          g.push(item); gChars += item.length;
+        }
+      }
+      if (g.length) groups.push(g);
+
+      area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Large case — L' + level + ' reducing ' + items.length + ' items into ' + groups.length + ' groups…</span></div>';
+      const newItems = [];
+      for (let gi = 0; gi < groups.length; gi++) {
+        area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>L' + level + ': synthesizing group ' + (gi+1) + ' of ' + groups.length + '…</span></div>';
+        const groupPrompt = buildSynthPrompt(
+          'Below are fact extractions from a subset of this case\'s records. Produce a consolidated, deduplicated fact extraction covering this subset only — preserve every date, source citation, medication, provider, diagnosis, and deviation. This will be combined with other subsets in a final step.',
+          groups[gi]
+        );
+        try {
+          const r = await callClaude(groupPrompt);
+          newItems.push('===== L' + level + ' GROUP ' + (gi+1) + ' CONSOLIDATED =====\n' + r);
+        } catch(e) {
+          newItems.push('===== L' + level + ' GROUP ' + (gi+1) + ' ERROR =====\n[Group synthesis failed: ' + e.message + ']\n\nRaw items follow:\n\n' + groups[gi].join('\n\n'));
+        }
+        if (gi < groups.length - 1) await new Promise(r => setTimeout(r, 750));
+      }
+      items = newItems;
+      if (items.length >= groups.length && groups.length === 1) break;
+    }
+
+    area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Combining into final ' + typeLabel + '…</span></div>';
+    const intro = level === 0
+      ? 'Below are fact extractions from ' + batches.length + ' batches of medical records for this case. Combine them into a single ' + typeLabel + '.'
+      : 'Below are ' + items.length + ' consolidated fact extraction(s) covering this case. Combine them into a single ' + typeLabel + '.';
+    const synthPrompt = buildSynthPrompt(intro, items);
     const res = await callClaude(synthPrompt);
     await finishAnalysis(res, caseInfo, type, typeLabels, area, pre);
   } catch(e) {
