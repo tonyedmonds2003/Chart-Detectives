@@ -2919,7 +2919,7 @@ async function runRecordAnalysis() {
   const totalMB = totalBase64Bytes / (1024 * 1024);
   const SAFE_SINGLE_CALL_MB    = 25;      // was 40 — empirically too large
   const SAFE_SINGLE_CALL_PAGES = 90;      // 100 is Claude's hard cap; leave 10-page cushion
-  const SAFE_SINGLE_CALL_TOKENS = 150000; // leave ~50k of 200k window for prompt + response
+  const SAFE_SINGLE_CALL_TOKENS = 130000; // real-world PDF pages cost 2500-3500 tokens each; 130k leaves room for the 32k response + prompt overhead without blowing the 200k window
 
   // Safety net: flag any single content block that's still oversize after PDF splitting
   // (shouldn't normally trigger, but protects against the rare case of a giant image).
@@ -3147,11 +3147,14 @@ ${items.join('\n\n')}`;
 function chunkContentBlocks(blocks, maxBytes, maxPages, maxTokens) {
   maxBytes  = maxBytes  || 25 * 1024 * 1024;
   maxPages  = maxPages  || 90;
-  maxTokens = maxTokens || 150000;
+  maxTokens = maxTokens || 130000;
   const pagesFor  = b => (b.type === 'document') ? (b._pageCount || 1) : 1;
-  // Claude PDF token cost runs ~1500-3000 per page depending on layout. Use 2200 as a middle estimate
-  // and 1500 per image. This is rough but keeps us well inside the 200k window.
-  const tokensFor = b => (b.type === 'document') ? (pagesFor(b) * 2200) : 1500;
+  // Claude PDF token cost is highly layout-dependent. Empirical observation on real
+  // medical records (nurse's notes, dense forms, fax artifacts): we've seen batches
+  // estimated at 150k tokens (2200/page) come back as 210k+ actual — ~3100/page.
+  // Using 3000/page here + the 130k budget caps worst-case input at ~130k with headroom
+  // for the prompt (~2k) and the 32k response target, comfortably under the 200k window.
+  const tokensFor = b => (b.type === 'document') ? (pagesFor(b) * 3000) : 2000;
 
   const batches = [];
   let cur = [];
