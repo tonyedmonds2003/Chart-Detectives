@@ -1282,7 +1282,12 @@ async function splitPdfIntoChunks(pdfBytes, maxBytes, maxPages) {
   // 18 MB raw → ~24 MB base64 (safely under the downstream 25 MB per-attachment cap).
   // Earlier value of 20 MB produced ~27 MB base64 chunks, which tripped the oversize guard.
   maxBytes = maxBytes || 18 * 1024 * 1024;
-  maxPages = maxPages || 90;                // safe under Claude's 100-page per-doc limit
+  // Default to 35 pages per sub-PDF. Previously 90 (Claude's hard per-doc cap), but on the
+  // Mimms case we measured ~5000-5300 actual tokens per page for dense medical records —
+  // 90 pages = 450k-480k tokens, impossible to fit in the 200k context window. At 35 pages
+  // × 5500 tokens (conservative estimate) = ~192k tokens per chunk, which lets the per-batch
+  // packer downstream actually combine or isolate chunks under the 100k-token batch budget.
+  maxPages = maxPages || 35;
   if (!window.PDFLib) throw new Error('PDF splitter (pdf-lib) not loaded — refresh and try again.');
   const { PDFDocument } = window.PDFLib;
   const source = await PDFDocument.load(pdfBytes, { ignoreEncryption: true, updateMetadata: false });
@@ -1477,7 +1482,10 @@ const PROCESSED_MANIFEST_NAME = '_cache-manifest.json';
 // so we force a one-time re-split of stale cached chunks rather than re-using oversize output.
 //   v1: splitter maxBytes = 20 MB raw (→ ~27 MB base64, failed downstream 25 MB cap)
 //   v2: splitter maxBytes = 18 MB raw (→ ~24 MB base64, fits under 25 MB cap)
-const CHUNKER_VERSION = 2;
+//   v3: splitter maxPages = 35 (was 90). 90-page chunks averaged 5000+ tokens/page on dense
+//       medical scans → 450k+ actual tokens per chunk, impossible under the 200k context window.
+//       35 pages lands around 192k at the observed worst case, leaves headroom for per-batch packing.
+const CHUNKER_VERSION = 3;
 
 async function loadProcessedManifest(processedFolderId) {
   if (!_driveToken) await driveSignIn(false);
