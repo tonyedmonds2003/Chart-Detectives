@@ -4523,16 +4523,26 @@ async function callClaude(promptOrContent, options) {
   // options.maxTokens to override; they should, however, only do so when the proxy supports it
   // without timing out (i.e. not in hierarchical reducer passes).
   const maxTokens = (options && options.maxTokens) || 12000;
+  // Stream by default. The legacy callClaude ran in non-streaming mode and hit Cloudflare's
+  // 100s subrequest timeout whenever Haiku took longer than that to finish generating
+  // (common on synthesis calls with ~400k-char prompts → 32k output). Streaming sidesteps
+  // the timeout entirely: the upstream starts emitting SSE events within ~1 second and the
+  // connection stays alive throughout generation. The Worker's proxyResponse() already
+  // passes upstream.body (a ReadableStream) through untouched, so the server side needs
+  // no changes. Callers can opt out via options.stream = false — not recommended.
+  const useStream = options && options.stream === false ? false : true;
   let payload;
   try {
+    const inner = {
+      model: CLAUDE_MODEL,
+      max_tokens: maxTokens,
+      system: 'You are Deborah J Edmonds BSN, RN, LNHA, GERO-BC, a legal nurse consultant with Chart Detectives Legal Nurse Consulting, LLC. You have over 35 years of healthcare experience and deep knowledge of medical standards, nursing practice, federal long-term care regulations (42 CFR), and legal documentation. Provide thorough, professional, and accurate responses appropriate for use in legal proceedings.',
+      messages: [{ role: 'user', content: promptOrContent }]
+    };
+    if (useStream) inner.stream = true;
     payload = JSON.stringify({
       auth: 'Anthony51',
-      payload: {
-        model: CLAUDE_MODEL,
-        max_tokens: maxTokens,
-        system: 'You are Deborah J Edmonds BSN, RN, LNHA, GERO-BC, a legal nurse consultant with Chart Detectives Legal Nurse Consulting, LLC. You have over 35 years of healthcare experience and deep knowledge of medical standards, nursing practice, federal long-term care regulations (42 CFR), and legal documentation. Provide thorough, professional, and accurate responses appropriate for use in legal proceedings.',
-        messages: [{ role: 'user', content: promptOrContent }]
-      }
+      payload: inner
     });
   } catch(e) {
     // RangeError: Invalid string length — combined base64 + JSON wrapping blew past V8's ~512MB string cap.
@@ -4560,7 +4570,7 @@ async function callClaude(promptOrContent, options) {
   const MODERATE_DELAYS   = [5000, 10000, 20000, 40000];
   const MAX_ATTEMPTS = 5;
   let lastErr;
-  let data;
+  let result = null; // { text, stop_reason }
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
       const res = await fetch(PROXY_URL, {
@@ -4584,7 +4594,15 @@ async function callClaude(promptOrContent, options) {
         }
         throw new Error(msg);
       }
-      data = await res.json();
+      if (useStream) {
+        result = await readAnthropicSSE(res);
+      } else {
+        const data = await res.json();
+        result = {
+          text: (data.content || []).map(b => b.text || '').join(''),
+          stop_reason: data.stop_reason || null
+        };
+      }
       lastErr = null;
       break;
     } catch (e) {
@@ -4593,21 +4611,112 @@ async function callClaude(promptOrContent, options) {
       // These look like network errors but are frequently the edge proxy dying under
       // load (which strips CORS headers and presents as "Failed to fetch" in the browser),
       // so treat them with moderate backoff rather than 2-second retries.
-      if (/Failed to fetch|NetworkError|timeout|load failed|ECONNRESET|socket hang up/i.test(e.message) && attempt < MAX_ATTEMPTS) {
+      // Also treat SSE-layer errors the same way: mid-stream disconnects look identical to
+      // transient network blips from the client's perspective and benefit from the same backoff.
+      const transientMsg = /Failed to fetch|NetworkError|timeout|load failed|ECONNRESET|socket hang up|stream (?:ended|closed|aborted)|SSE overloaded|SSE api_error/i;
+      if (transientMsg.test(e.message) && attempt < MAX_ATTEMPTS) {
         const delay = MODERATE_DELAYS[Math.min(attempt - 1, MODERATE_DELAYS.length - 1)];
-        console.warn(`[callClaude] Network error — backing off ${Math.round(delay/1000)}s (attempt ${attempt}/${MAX_ATTEMPTS}): ${e.message}`);
+        console.warn(`[callClaude] Network/stream error — backing off ${Math.round(delay/1000)}s (attempt ${attempt}/${MAX_ATTEMPTS}): ${e.message}`);
         await new Promise(r => setTimeout(r, delay));
         continue;
       }
       throw e;
     }
   }
-  if (!data) throw lastErr || new Error('Unknown API failure');
+  if (!result) throw lastErr || new Error('Unknown API failure');
   // Surface a warning if the model was cut off by the token cap so the user knows to regenerate / split.
-  if (data.stop_reason === 'max_tokens') {
+  if (result.stop_reason === 'max_tokens') {
     showToast('⚠️ Output reached the token cap and may be truncated. Regenerate or split into sections.', true);
   }
-  return data.content.map(b => b.text || '').join('');
+  return result.text;
+}
+
+// Read an Anthropic Messages API Server-Sent Events stream.
+// Returns { text, stop_reason } once the `message_stop` event (or end-of-stream) is received.
+// Accumulates `content_block_delta.delta.text` events across all text content blocks and
+// captures `stop_reason` from the terminating `message_delta` event.
+//
+// Why streaming matters here: Cloudflare Workers have a 100-second subrequest timeout.
+// Claude Haiku 4.5 can take 2-3 minutes to generate a 32k-token synthesis response,
+// which would trip the timeout and bubble up as HTTP 524 to the browser. With streaming,
+// bytes start flowing within ~1 second and the connection stays alive throughout.
+async function readAnthropicSSE(res) {
+  if (!res.body) throw new Error('Stream ended: no response body');
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
+  let text = '';
+  let stop_reason = null;
+  let sawMessageStop = false;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      // SSE events are separated by a blank line. Each event may span multiple "data:" lines.
+      let sepIdx;
+      while ((sepIdx = buffer.indexOf('\n\n')) !== -1) {
+        const rawEvent = buffer.slice(0, sepIdx);
+        buffer = buffer.slice(sepIdx + 2);
+        const dataLines = [];
+        for (const line of rawEvent.split('\n')) {
+          // We only need the `data:` payload; Anthropic's `event:` line is redundant with
+          // the `type` field inside the JSON payload.
+          if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
+        }
+        if (!dataLines.length) continue;
+        const raw = dataLines.join('\n');
+        if (!raw || raw === '[DONE]') continue;
+        let evt;
+        try { evt = JSON.parse(raw); } catch { continue; }
+        switch (evt.type) {
+          case 'content_block_delta':
+            if (evt.delta && evt.delta.type === 'text_delta' && typeof evt.delta.text === 'string') {
+              text += evt.delta.text;
+            }
+            break;
+          case 'message_delta':
+            if (evt.delta && evt.delta.stop_reason) stop_reason = evt.delta.stop_reason;
+            break;
+          case 'message_stop':
+            sawMessageStop = true;
+            break;
+          case 'error': {
+            // Mid-stream errors: overloaded_error / api_error / etc. Re-throw so the retry
+            // loop can handle them the same way it handles transient HTTP errors.
+            const errType = (evt.error && evt.error.type) || 'error';
+            const errMsg  = (evt.error && evt.error.message) || 'stream error';
+            // Tag with a stable marker so the transient-matcher recognises it.
+            const tag = /overloaded/i.test(errType) ? 'SSE overloaded' : 'SSE api_error';
+            throw new Error(`${tag}: ${errType}: ${errMsg}`);
+          }
+          // message_start / content_block_start / content_block_stop / ping — ignore.
+        }
+      }
+    }
+  } finally {
+    try { reader.releaseLock(); } catch {}
+  }
+  // Flush any trailing event that didn't end with a blank line.
+  if (buffer.trim()) {
+    const trailing = buffer.split('\n').filter(l => l.startsWith('data:')).map(l => l.slice(5).trim()).join('\n');
+    if (trailing && trailing !== '[DONE]') {
+      try {
+        const evt = JSON.parse(trailing);
+        if (evt.type === 'content_block_delta' && evt.delta && evt.delta.type === 'text_delta') {
+          text += evt.delta.text || '';
+        } else if (evt.type === 'message_delta' && evt.delta && evt.delta.stop_reason) {
+          stop_reason = evt.delta.stop_reason;
+        } else if (evt.type === 'message_stop') {
+          sawMessageStop = true;
+        }
+      } catch {}
+    }
+  }
+  if (!sawMessageStop && !text) {
+    throw new Error('Stream ended before any content was received');
+  }
+  return { text, stop_reason };
 }
 
 // ===== HELPERS =====
