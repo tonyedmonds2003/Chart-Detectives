@@ -3014,6 +3014,8 @@ async function pollBatchAndFinish(ctx) {
   // Map results back into batch order by custom_id.
   const byId = Object.fromEntries(rawResults.map(r => [r.custom_id, r]));
   const batchOutputs = [];
+  let succeeded = 0, errored = 0;
+  let firstErrorDetail = null;
   for (let bi = 0; bi < numBatches; bi++) {
     const r = byId['batch-' + bi];
     if (!r) {
@@ -3022,12 +3024,19 @@ async function pollBatchAndFinish(ctx) {
     }
     if (r.result && r.result.type === 'succeeded') {
       batchOutputs.push({ batch: bi + 1, text: extractTextFromMessage(r.result.message) });
+      succeeded++;
     } else if (r.result && r.result.type === 'errored') {
       const msg = (r.result.error && (r.result.error.message || r.result.error.type)) || 'unknown error';
       batchOutputs.push({ batch: bi + 1, text: '[BATCH ' + (bi + 1) + ' ERROR: ' + msg + ']' });
+      errored++;
+      if (!firstErrorDetail) firstErrorDetail = { batch: bi + 1, error: r.result.error, fullResult: r };
     } else {
       batchOutputs.push({ batch: bi + 1, text: '[BATCH ' + (bi + 1) + ' — unexpected result type]' });
     }
+  }
+  console.log(`[batch results] ${succeeded} succeeded, ${errored} errored out of ${numBatches}`);
+  if (firstErrorDetail) {
+    console.warn('[first batch error — paste this to Claude if debugging]', firstErrorDetail);
   }
 
   // --- Synthesize (hierarchical if too large) ---
