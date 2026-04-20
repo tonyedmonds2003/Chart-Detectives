@@ -2927,21 +2927,25 @@ Be thorough and factual. Cite the source record name/date for each fact. Do NOT 
   });
 
   // --- 4) Create the job record in KV ---
+  // Lift metadata so we can reuse it when patching in batch_requests after submit
+  // (the worker's PATCH does a shallow top-level merge, so any `metadata` in a patch
+  // replaces the whole object — we must resend the full metadata each time).
+  const jobMetadata = {
+    analysis_type: type,
+    num_batches: batches.length,
+    instructions: instructions || '',
+    case_context: caseContext || '',
+    started_at: Date.now(),
+    // Preserve enough context to resume synthesis on a different device.
+    typeLabel: typeLabels[type] || type
+  };
   let job;
   try {
     job = await createJob({
       case_id: caseInfo ? caseInfo.id : null,
       file_ids: uploadedFileIds,
       status: 'submitting',
-      metadata: {
-        analysis_type: type,
-        num_batches: batches.length,
-        instructions: instructions || '',
-        case_context: caseContext || '',
-        started_at: Date.now(),
-        // Preserve enough context to resume synthesis on a different device.
-        typeLabel: typeLabels[type] || type
-      }
+      metadata: jobMetadata
     });
   } catch (e) {
     area.innerHTML = `<div class="alert alert-danger">Could not create job record: ${esc(e.message)}<br><br>(This usually means the KV namespace isn't bound on the Worker. See worker/MIGRATION_PLAN.md.)</div>`;
@@ -2968,7 +2972,21 @@ Be thorough and factual. Cite the source record name/date for each fact. Do NOT 
     area.innerHTML = `<div class="alert alert-danger">Batch submit failed: ${esc(e.message)}</div>`;
     return;
   }
-  await patchJob(job.job_id, { status: 'processing', batch_id: submitted.id }).catch(() => {});
+  // Persist a trimmed copy of batchRequests into job metadata so the resume path can
+  // drive the auto-retry for any errored items. The retry only reads
+  // `params.messages[0].content`, so we drop anything bulkier. Worst-case size is roughly
+  // 1 KB per batch (prompt text + file_id refs), comfortably under KV's 25 MB value cap.
+  // We swallow errors here because failing to persist shouldn't abort the run — the
+  // in-memory ctx.batchRequests still works for the current session.
+  const persistableBatchRequests = batchRequests.map(br => ({
+    custom_id: br.custom_id,
+    params: { messages: [{ role: 'user', content: br.params.messages[0].content }] }
+  }));
+  await patchJob(job.job_id, {
+    status: 'processing',
+    batch_id: submitted.id,
+    metadata: { ...jobMetadata, batch_requests: persistableBatchRequests }
+  }).catch(() => {});
 
   // --- 7) Poll + fetch + synthesize ---
   await pollBatchAndFinish({
@@ -3259,6 +3277,17 @@ async function resumeAsyncJobForCase(caseInfo) {
   // Still in flight — resume polling. We need typeLabels for the synthesis path.
   const typeLabels = { chronology: 'detailed medical chronology', summary: 'comprehensive narrative summary', gaps: 'analysis of care gaps and inconsistencies', providers: 'list of all providers, diagnoses, and medications', full: 'full comprehensive LNC analysis including chronology, summary, gaps, providers, and nursing care assessment' };
   const md = job.metadata || {};
+  // Hydrate batch_requests if they were persisted at submit time. Without this, any
+  // errored batches during a resumed run can't be auto-retried (the original in-memory
+  // array is gone). We defensively check array-ness + length against num_batches so a
+  // partial/corrupt persistence doesn't feed the retry loop a mismatched array.
+  let resumedBatchRequests = null;
+  if (Array.isArray(md.batch_requests) && md.batch_requests.length === (md.num_batches || 1)) {
+    resumedBatchRequests = md.batch_requests;
+    console.log(`[resume] hydrated ${resumedBatchRequests.length} batch_requests from job metadata — auto-retry available`);
+  } else if (md.batch_requests) {
+    console.warn(`[resume] job.metadata.batch_requests shape mismatch (got ${Array.isArray(md.batch_requests) ? md.batch_requests.length : typeof md.batch_requests}, expected ${md.num_batches}) — auto-retry disabled`);
+  }
   await pollBatchAndFinish({
     jobId: job.job_id,
     batchId: job.batch_id,
@@ -3269,7 +3298,8 @@ async function resumeAsyncJobForCase(caseInfo) {
     instructions: md.instructions || '',
     caseContext: md.case_context || '',
     textAddendum: '',
-    area, pre
+    area, pre,
+    batchRequests: resumedBatchRequests
   });
 }
 
