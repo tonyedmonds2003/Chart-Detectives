@@ -3481,8 +3481,12 @@ async function runRecordAnalysis() {
   const totalPages = contentBlocks.reduce((n, b) => n + (b.type === 'document' ? (b._pageCount || 1) : 1), 0);
   const totalMB = totalBase64Bytes / (1024 * 1024);
   const SAFE_SINGLE_CALL_MB    = 25;      // was 40 — empirically too large
-  const SAFE_SINGLE_CALL_PAGES = 90;      // 100 is Claude's hard cap; leave 10-page cushion
-  const SAFE_SINGLE_CALL_TOKENS = 130000; // real-world PDF pages cost 2500-3500 tokens each; 130k leaves room for the 32k response + prompt overhead without blowing the 200k window
+  const SAFE_SINGLE_CALL_PAGES = 40;      // was 90. Post-mortem on the Mimms batch run showed dense medical pages can
+                                          // cost ~5000-5300 tokens each — a 40-page batch at that rate is already ~200k
+                                          // tokens. Anything above 40 risks the 200k-input limit on worst-case pages.
+  const SAFE_SINGLE_CALL_TOKENS = 100000; // was 130000. Drop the total-token budget too so estimator
+                                          // underestimates (which still happen on noisy fax/scan PDFs) don't push a
+                                          // single batch past 200k actual tokens.
 
   // Safety net: flag any single content block that's still oversize after PDF splitting
   // (shouldn't normally trigger, but protects against the rare case of a giant image).
@@ -3726,22 +3730,24 @@ ${items.join('\n\n')}`;
 // THREE budgets simultaneously:
 //   • combined base64 byte count ≤ maxBytes (default ~25 MB — Anthropic's practical per-request ceiling
 //     once JSON wrapping and headers are included)
-//   • combined PDF page count ≤ maxPages (default 90 — Claude caps at 100 pages per request)
-//   • combined token estimate ≤ maxTokens (default ~150k — leaves headroom under the 200k context window
+//   • combined PDF page count ≤ maxPages (default 40 — defense in depth for dense pages)
+//   • combined token estimate ≤ maxTokens (default 100k — leaves headroom under the 200k context window
 //     for the system prompt, user prompt text, and the response itself)
 // PDF blocks may carry a `_pageCount` sidecar field (stripped before sending) so we can budget them
-// accurately. Images are assumed to be ~1 page / ~1.5k tokens.
+// accurately. Images are assumed to be ~1 page / ~2k tokens.
 function chunkContentBlocks(blocks, maxBytes, maxPages, maxTokens) {
   maxBytes  = maxBytes  || 25 * 1024 * 1024;
-  maxPages  = maxPages  || 90;
-  maxTokens = maxTokens || 130000;
+  maxPages  = maxPages  || 40;
+  maxTokens = maxTokens || 100000;
   const pagesFor  = b => (b.type === 'document') ? (b._pageCount || 1) : 1;
-  // Claude PDF token cost is highly layout-dependent. Empirical observation on real
-  // medical records (nurse's notes, dense forms, fax artifacts): we've seen batches
-  // estimated at 150k tokens (2200/page) come back as 210k+ actual — ~3100/page.
-  // Using 3000/page here + the 130k budget caps worst-case input at ~130k with headroom
-  // for the prompt (~2k) and the 32k response target, comfortably under the 200k window.
-  const tokensFor = b => (b.type === 'document') ? (pagesFor(b) * 3000) : 2000;
+  // Claude PDF token cost is highly layout-dependent. Post-mortem on the Mimms 44-batch
+  // run showed pages costing up to 5272 tokens each (nurse's notes + fax artifacts +
+  // multi-column forms), a 1.76× miss over the previous 3000/page estimate. 23 of 44
+  // batches came back as "prompt is too long: 200000-228000 tokens". Raised to 5500/page
+  // with a 10% safety margin on top of the observed worst case, paired with a 100k budget
+  // cap — so a fully-packed batch lands near 100k estimated / ≤120k actual, comfortably
+  // under 200k with room for prompt + system + response overhead.
+  const tokensFor = b => (b.type === 'document') ? (pagesFor(b) * 5500) : 2000;
 
   const batches = [];
   let cur = [];
