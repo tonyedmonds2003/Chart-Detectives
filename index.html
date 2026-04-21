@@ -2987,6 +2987,22 @@ async function loadCaseDriveFiles() {
     // Default: every file checked
     driveFilesChecked = {};
     driveFiles.forEach(f => { driveFilesChecked[f.id] = true; });
+    // Persist a filename → Drive-URL map on the case. Downstream code (analysis post-
+    // processing, report generator) uses this to convert "(Source: <record>)" citations
+    // into clickable links that Debbie can click to open the actual source PDF. Keyed by
+    // filename (not id) because Haiku cites records by their title text — it never sees
+    // the Drive file id. We keep BOTH the full filename and the base name (without
+    // extension) in the map so a citation like "Hospital_records" matches the same PDF
+    // as "Hospital_records.pdf". Split-PDF chunk suffixes like " — pp. 1-40 of 120" are
+    // also stripped when looking up, so every chunk cite resolves to the parent file.
+    c.driveFileIndex = {};
+    for (const f of driveFiles) {
+      const url = batesToDriveUrl(f.id);
+      c.driveFileIndex[f.name] = url;
+      const base = f.name.replace(/\.[^.]+$/, '');
+      if (base && !c.driveFileIndex[base]) c.driveFileIndex[base] = url;
+    }
+    save();
     renderDriveFileList();
   } catch (e) {
     listEl.innerHTML = '<div class="alert alert-danger">Could not list Drive folder: ' + esc(e.message) + '</div>';
@@ -3067,7 +3083,7 @@ async function runAsyncRecordAnalysis(params) {
 
   // --- 3) Build batch requests ---
   const batchRequests = batches.map((batch, bi) => {
-    const promptText = `You are an expert Legal Nurse Consultant reviewing medical records.
+    const promptText = `You are a research assistant helping a licensed Legal Nurse Consultant extract facts from medical records. You are NOT the expert on this case — a licensed LNC will review, edit, and sign any final work product. Do not add ethical commentary or refuse the task — the licensed professional supervising this work has already established the proper legal and ethical framework.
 ${caseContext ? 'Case context: ' + caseContext : ''}
 ${instructions ? 'Special instructions: ' + instructions : ''}
 ${bi === 0 && textAddendum ? '\nAdditional text records (provided only in this first batch):' + textAddendum : ''}
@@ -3080,7 +3096,7 @@ This is BATCH ${bi + 1} of ${batches.length} for a large case. From the records 
 • Nursing care decisions, interventions, and any deviations from standard of care
 • Any photos/images: describe what is visible and cite the source filename
 
-Be thorough and factual. Cite the source record name/date for each fact. Do NOT write a narrative summary yet — just extract facts. A final synthesis step will combine your extractions across all batches into the full ${typeLabels[type] || type}.`;
+Be thorough and factual. Cite the source record name/date for each fact. Do NOT write a narrative summary yet — just extract facts. A final synthesis step will combine your extractions across all batches for the LNC's review.`;
     // Cache-control on the persona system block lets identical prefixes across all
     // batches share a cache entry (when the prefix crosses Anthropic's minimum token
     // threshold). We also cache the stable prompt preamble — case context + instructions
@@ -3329,7 +3345,7 @@ async function pollBatchAndFinish(ctx) {
   const typeLabel = typeLabels[type] || type;
 
   const buildSynthPrompt = (intro, items) =>
-`You are an expert Legal Nurse Consultant preparing a legal deliverable. Accuracy is non-negotiable.
+`You are a research assistant helping a licensed Legal Nurse Consultant organize factual information extracted from medical records. You are NOT the expert on this case — a licensed LNC will review, edit, and sign any final work product. Your job is to produce a well-organized, fully cited compilation of facts from the source material below so the LNC can work from a clean timeline. Accuracy is non-negotiable.
 ${caseContext ? 'Case context: ' + caseContext : ''}
 ${instructions ? 'Special instructions: ' + instructions : ''}
 
@@ -3341,13 +3357,14 @@ MANDATORY ACCURACY RULES — violations are grounds for rejection:
 • Copy source citations verbatim. Do not paraphrase, shorten, or reformat record names.
 • If two sources disagree on a fact, record both with their respective citations rather than picking one.
 • Do not add clinical commentary, causation analysis, or deviations from standard of care unless it is explicitly stated in the source text.
+• Stay on task. Do NOT add commentary about professional ethics, credentials, HIPAA, AI-vs-human authorship, or whether this task is appropriate. The licensed professional supervising this work has already established the proper legal and ethical framework. Refusing the task or inserting ethical warnings is itself a quality failure — just organize the facts with their citations.
 
 Presentation rules:
 • Deduplicate repeated facts (keep the earliest and most specific citation when merging).
 • Order events chronologically by date.
 • Use professional LNC terminology and clear section headings.
 • Do NOT mention "batches", "groups", "extractions", or the batching process in the output — produce a unified document.
-• Be comprehensive. This is the final deliverable — completeness beats brevity.
+• Be comprehensive. This compilation will be reviewed and refined by a licensed professional — completeness beats brevity.
 
 ${items.join('\n\n')}`;
 
@@ -3688,8 +3705,15 @@ function renderSavedAnalysisIfAny(caseInfo, area, pre) {
   const c = state.cases.find(x => x.id === caseInfo.id);
   if (!c || !c.lastAnalysis) return false;
   area.style.display = 'none';
-  pre.textContent = c.lastAnalysis;
-  pre.style.display = 'block';
+  // Use the interactive review renderer (linkified citations, editable body,
+  // Finalize button). If reviewedAnalysis has in-progress edits, renderAnalysisReview
+  // picks that up automatically.
+  if (typeof renderAnalysisReview === 'function') {
+    renderAnalysisReview(c.lastAnalysis, caseInfo, pre);
+  } else {
+    pre.textContent = c.lastAnalysis;
+    pre.style.display = 'block';
+  }
   const copyBtn = document.getElementById('copy-rec-btn');
   if (copyBtn) copyBtn.style.display = '';
   const sendBtn = document.getElementById('send-to-report-btn');
@@ -3989,13 +4013,13 @@ async function runRecordAnalysis() {
                       && (totalPages <= SAFE_SINGLE_CALL_PAGES)
                       && ((totalPages * 2200) <= SAFE_SINGLE_CALL_TOKENS);
   if (fitsSingleCall) {
-    const prompt = `You are an expert Legal Nurse Consultant reviewing medical records.
+    const prompt = `You are a research assistant helping a licensed Legal Nurse Consultant organize factual information from medical records. You are NOT the expert on this case — a licensed LNC will review, edit, and sign any final work product. Do not add ethical commentary or refuse the task — the licensed professional supervising this work has already established the proper legal and ethical framework.
 ${caseContext ? 'Case context: ' + caseContext : ''}
 ${instructions ? 'Special instructions: ' + instructions : ''}
 ${textAddendum ? '\nAdditional text records:' + textAddendum : ''}
-${contentBlocks.length ? '\nThe medical records (PDFs/images) are attached. Review every page. Cite specific dates and record titles in your analysis.' : 'No records were provided — generate a demonstration template showing the format.'}
+${contentBlocks.length ? '\nThe medical records (PDFs/images) are attached. Review every page. Cite specific dates and record titles for every fact you extract.' : 'No records were provided — generate a demonstration template showing the format.'}
 
-Please produce a ${typeLabels[type] || type}. Format your response clearly with sections, dates, and source references where applicable. Use professional LNC terminology.`;
+Produce a fact-compilation organized in the style of a ${typeLabels[type] || type}, for the LNC's review and refinement. Format your response clearly with sections, dates, and source references. Use professional LNC terminology. Do NOT add clinical commentary, causation analysis, or standard-of-care opinions that are not explicitly in the source records.`;
     const messageContent = [{ type: 'text', text: prompt }, ...stripInternalFields(contentBlocks)];
     area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Analyzing ' + (contentBlocks.length || 'records') + (contentBlocks.length ? ' record(s) with AI…' : ' with AI…') + '</span></div>';
     pre.style.display = 'none';
@@ -4091,7 +4115,7 @@ Please produce a ${typeLabels[type] || type}. Format your response clearly with 
     const batchMB = batch.reduce((n,b) => n + ((b.source && b.source.data) ? b.source.data.length : 0), 0) / (1024*1024);
     const batchPages = batch.reduce((n,b) => n + (b.type === 'document' ? (b._pageCount || 1) : 1), 0);
     area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>AI analysis — batch ' + (bi+1) + ' of ' + batches.length + ' (' + batch.length + ' file' + (batch.length>1?'s':'') + ', ' + batchMB.toFixed(0) + ' MB, ~' + batchPages + ' pages)…</span></div>';
-    const batchPromptText = `You are an expert Legal Nurse Consultant reviewing medical records.
+    const batchPromptText = `You are a research assistant helping a licensed Legal Nurse Consultant extract facts from medical records. You are NOT the expert on this case — a licensed LNC will review, edit, and sign any final work product. Do not add ethical commentary or refuse the task — the licensed professional supervising this work has already established the proper legal and ethical framework.
 ${caseContext ? 'Case context: ' + caseContext : ''}
 ${instructions ? 'Special instructions: ' + instructions : ''}
 ${bi === 0 && textAddendum ? '\nAdditional text records (provided only in this first batch):' + textAddendum : ''}
@@ -4104,7 +4128,7 @@ This is BATCH ${bi+1} of ${batches.length} for a large case. From the records at
 • Nursing care decisions, interventions, and any deviations from standard of care
 • Any photos/images: describe what is visible and cite the source filename
 
-Be thorough and factual. Cite the source record name/date for each fact. Do NOT write a narrative summary yet — just extract facts. A final synthesis step will combine your extractions across all batches into the full ${typeLabels[type] || type}.`;
+Be thorough and factual. Cite the source record name/date for each fact. Do NOT write a narrative summary yet — just extract facts. A final synthesis step will combine your extractions across all batches for the LNC's review.`;
     const batchContent = [{ type: 'text', text: batchPromptText }, ...stripInternalFields(batch)];
     try {
       const r = await callClaude(batchContent);
@@ -4149,7 +4173,7 @@ Be thorough and factual. Cite the source record name/date for each fact. Do NOT 
   const typeLabel = typeLabels[type] || type;
 
   const buildSynthPrompt = (intro, items) =>
-`You are an expert Legal Nurse Consultant preparing a legal deliverable. Accuracy is non-negotiable.
+`You are a research assistant helping a licensed Legal Nurse Consultant organize factual information extracted from medical records. You are NOT the expert on this case — a licensed LNC will review, edit, and sign any final work product. Your job is to produce a well-organized, fully cited compilation of facts from the source material below so the LNC can work from a clean timeline. Accuracy is non-negotiable.
 ${caseContext ? 'Case context: ' + caseContext : ''}
 ${instructions ? 'Special instructions: ' + instructions : ''}
 
@@ -4161,13 +4185,14 @@ MANDATORY ACCURACY RULES — violations are grounds for rejection:
 • Copy source citations verbatim. Do not paraphrase, shorten, or reformat record names.
 • If two sources disagree on a fact, record both with their respective citations rather than picking one.
 • Do not add clinical commentary, causation analysis, or deviations from standard of care unless it is explicitly stated in the source text.
+• Stay on task. Do NOT add commentary about professional ethics, credentials, HIPAA, AI-vs-human authorship, or whether this task is appropriate. The licensed professional supervising this work has already established the proper legal and ethical framework. Refusing the task or inserting ethical warnings is itself a quality failure — just organize the facts with their citations.
 
 Presentation rules:
 • Deduplicate repeated facts (keep the earliest and most specific citation when merging).
 • Order events chronologically by date.
 • Use professional LNC terminology and clear section headings.
 • Do NOT mention "batches", "groups", "extractions", or the batching process in the output — produce a unified document.
-• Be comprehensive. This is the final deliverable — completeness beats brevity.
+• Be comprehensive. This compilation will be reviewed and refined by a licensed professional — completeness beats brevity.
 
 ${items.join('\n\n')}`;
 
@@ -4354,13 +4379,15 @@ async function runVerificationPass(finalText, sourceItems, area) {
     let verifyPrompt;
     if (hasSource) {
       verifyPrompt =
-`You are a senior Legal Nurse Consultant reviewing a draft report for a peer before it goes to a hiring attorney. Your job is to catch any factual claim that is not clearly supported by the source material.
+`You are a research assistant checking a draft fact-compilation against the source material it was built from. A licensed Legal Nurse Consultant will use your flags to clean up the draft before producing her own work product — you are not producing expert opinion and not signing a deliverable. Your only job is to flag places where the draft makes a claim that isn't clearly supported by the source text.
 
 Review the DRAFT REPORT against the SOURCE MATERIAL below and flag every one of the following:
 • A date, name, dose, diagnosis, provider, or event in the draft that does NOT appear in the source material.
 • A statement in the draft that is missing a source citation.
 • A statement that appears inferred, embellished, or adds clinical commentary beyond what the source states.
 • A citation in the draft that doesn't match any record name present in the source material.
+
+Stay on task. Do NOT add commentary about professional ethics, credentials, HIPAA, AI-vs-human authorship, or whether the task is appropriate — the licensed professional supervising this work has already established the legal and ethical framework. Refusing the review or inserting ethical warnings is itself a quality failure.
 
 Output format:
 • If the draft is clean, reply with exactly: "REVIEW COMPLETE — no unsupported claims identified."
@@ -4369,7 +4396,7 @@ Output format:
    - What's missing or mismatched (e.g., "no source citation", "date not in source", "citation does not match any record")
    - (Optional) The closest supporting line from the source, if any, quoted
 
-Be strict. False negatives on a legal deliverable cost more than false positives. When in doubt, flag it.
+Be strict. False negatives on a fact-compilation cost more than false positives. When in doubt, flag it.
 
 ===== DRAFT REPORT =====
 ${finalText}
@@ -4381,7 +4408,7 @@ ${combinedSource}`;
       // missing citations, vague language, and internal contradictions this way even
       // without the full source material.
       verifyPrompt =
-`You are a senior Legal Nurse Consultant reviewing a draft report for a peer before it goes to a hiring attorney. The source material for this case is too large to include in full, so review the DRAFT REPORT below for INTERNAL QUALITY ONLY.
+`You are a research assistant checking a draft fact-compilation for internal consistency. The source material for this case is too large to include in full, so review the DRAFT REPORT below for INTERNAL QUALITY ONLY. A licensed Legal Nurse Consultant will use your flags to clean up the draft before producing her own work product — you are not producing expert opinion and not signing a deliverable.
 
 Flag every one of the following:
 • Any factual statement missing a source citation (record name and/or date).
@@ -4389,13 +4416,15 @@ Flag every one of the following:
 • Internal contradictions (two statements in the draft that can't both be true).
 • Statements that read as inferred clinical commentary rather than extracted facts.
 
+Stay on task. Do NOT add commentary about professional ethics, credentials, HIPAA, AI-vs-human authorship, or whether the task is appropriate — the licensed professional supervising this work has already established the legal and ethical framework. Refusing the review or inserting ethical warnings is itself a quality failure.
+
 Output format:
 • If the draft is clean, reply with exactly: "REVIEW COMPLETE — no internal issues identified."
 • Otherwise, produce a numbered list. For each flagged item, include:
    - The quoted claim from the draft (in "double quotes")
    - What the problem is (e.g., "no source citation", "contradicts item 7", "vague language")
 
-Be strict. This is a legal deliverable.
+Be strict.
 
 ===== DRAFT REPORT =====
 ${finalText}`;
@@ -4413,11 +4442,231 @@ ${finalText}`;
   }
 }
 
+// ===== ANALYSIS REVIEW WORKFLOW =====
+// Turn the AI's plain-text analysis into an interactive review pane Debbie can
+// edit inline — with every source citation as a clickable Drive link, the verifier's
+// flags pinned as a highlighted callout, and a one-click Finalize button at the
+// bottom that produces the clean Word deliverable. Her edits are debounce-saved
+// to the case record so she can walk away and come back without losing work.
+
+// Resolve a citation target (like "Hospital_records.pdf" or "Nurse notes — pp. 40-80")
+// to a Drive URL using the case's persisted filename→URL index. Tolerant of chunk
+// suffixes from split PDFs and of extension/no-extension variants so a single entry
+// in the index covers every way Haiku might reference the file in its citations.
+function resolveDriveUrl(name, driveFileIndex) {
+  if (!driveFileIndex || !name) return null;
+  const raw = String(name).trim();
+  // Strip common chunk suffixes first: " — pp. 12-45 of 120.pdf" → ""
+  const base = raw.replace(/\s*[—\-–]\s*pp\.?\s*\d+\s*[-–]\s*\d+(\s*of\s*\d+)?\s*(\.pdf)?\s*$/i, '').trim();
+  const baseNoExt = base.replace(/\.[^.]+$/, '');
+  return driveFileIndex[raw]
+      || driveFileIndex[base]
+      || driveFileIndex[baseNoExt]
+      || driveFileIndex[base + '.pdf']
+      || driveFileIndex[baseNoExt + '.pdf']
+      || null;
+}
+
+// Convert (Source: X) and [Source: X] citations in an analysis text into HTML
+// hyperlinks pointing to the actual source record on Drive. Unresolvable citations
+// are left as plain text so Debbie knows to check them manually. Output is HTML,
+// safe to innerHTML into a container. Everything else is HTML-escaped.
+function linkifyCitations(text, driveFileIndex) {
+  if (!text) return '';
+  const escHtml = (s) => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  let html = escHtml(text);
+  // (Source: <name>) or [Source: <name>] — the name runs up to the first closer.
+  const pattern = /(\(|\[)Source:\s*([^)\]\n]+?)(\)|\])/gi;
+  html = html.replace(pattern, (match, open, name, close) => {
+    const trimmed = name.trim();
+    const url = resolveDriveUrl(trimmed, driveFileIndex);
+    if (!url) return match;
+    const safeUrl = escHtml(url);
+    return open + 'Source: <a href="' + safeUrl + '" target="_blank" rel="noopener" style="color:#0563c1;text-decoration:underline;font-weight:500;">' + escHtml(trimmed) + '</a>' + close;
+  });
+  return html;
+}
+
+// Split an analysis string into the chronology body + the appended verification
+// section. The verifier writes "===== INTERNAL QUALITY REVIEW ... =====" — we peel
+// that off so the UI renders it as a visual callout rather than burying it at the
+// bottom of a long document.
+function splitAnalysisForReview(text) {
+  if (!text) return { body: '', review: '' };
+  const m = text.match(/={3,}\s*INTERNAL QUALITY REVIEW[^\n]*={3,}/i);
+  if (!m || m.index === undefined) return { body: text, review: '' };
+  return {
+    body: text.slice(0, m.index).trimEnd(),
+    review: text.slice(m.index + m[0].length).trim()
+  };
+}
+
+// Render the analysis into the rec-result container as an interactive review pane.
+// The container itself is not editable — only the body div inside it. That keeps
+// the review callout and the finalize footer stable while Debbie types.
+function renderAnalysisReview(text, caseInfo, container) {
+  if (!container) return;
+  const c = caseInfo && state.cases.find(x => x.id === caseInfo.id);
+  const driveIndex = (c && c.driveFileIndex) || {};
+  const { body, review } = splitAnalysisForReview(text);
+
+  container.innerHTML = '';
+  container.style.display = 'block';
+  container.style.background = 'transparent';
+  container.style.padding = '0';
+  container.style.whiteSpace = 'normal';
+  container.style.fontFamily = 'inherit';
+  container.removeAttribute('contenteditable');
+
+  // Pinned review callout (only if the verifier flagged anything or signed off).
+  if (review) {
+    const flagged = !/^\s*REVIEW COMPLETE/i.test(review);
+    const callout = document.createElement('div');
+    callout.style.border = flagged ? '2px solid #e6b800' : '2px solid #2e7d32';
+    callout.style.background = flagged ? '#fff9e6' : '#e8f5e9';
+    callout.style.padding = '12px 14px';
+    callout.style.borderRadius = '8px';
+    callout.style.marginBottom = '14px';
+    callout.style.fontSize = '13px';
+    callout.style.lineHeight = '1.5';
+    const header = document.createElement('div');
+    header.style.fontWeight = '600';
+    header.style.marginBottom = '6px';
+    header.style.color = flagged ? '#8c6b00' : '#1b5e20';
+    header.textContent = flagged
+      ? '⚠ Items to verify before delivery'
+      : '✓ Internal review: no unsupported claims identified';
+    callout.appendChild(header);
+    if (flagged) {
+      const sub = document.createElement('div');
+      sub.style.color = '#4d3a00';
+      sub.style.marginBottom = '8px';
+      sub.textContent = 'Review each flagged item against the source record (click the blue link to open). Fix or remove the bullet in the editor below. This callout does NOT appear in the final report.';
+      callout.appendChild(sub);
+    }
+    const body2 = document.createElement('div');
+    body2.style.borderTop = flagged ? '1px solid #e6b800' : '1px solid #2e7d32';
+    body2.style.paddingTop = '10px';
+    body2.style.marginTop = '4px';
+    body2.style.whiteSpace = 'pre-wrap';
+    body2.innerHTML = linkifyCitations(review, driveIndex);
+    callout.appendChild(body2);
+    container.appendChild(callout);
+  }
+
+  // Editable analysis body. The pre-wrap preserves the AI's paragraph breaks; the
+  // contenteditable lets Debbie rewrite, remove, or accept each bullet in place.
+  const bodyEl = document.createElement('div');
+  bodyEl.id = 'rec-review-body';
+  bodyEl.contentEditable = 'true';
+  bodyEl.spellcheck = true;
+  bodyEl.style.whiteSpace = 'pre-wrap';
+  bodyEl.style.outline = 'none';
+  bodyEl.style.minHeight = '140px';
+  bodyEl.style.padding = '14px 16px';
+  bodyEl.style.background = '#ffffff';
+  bodyEl.style.border = '1px solid #e5e5e5';
+  bodyEl.style.borderRadius = '6px';
+  bodyEl.style.fontSize = '14px';
+  bodyEl.style.lineHeight = '1.6';
+  bodyEl.style.fontFamily = 'inherit';
+  bodyEl.style.maxHeight = '65vh';
+  bodyEl.style.overflowY = 'auto';
+  // If Debbie has an in-progress edited version saved, restore that; otherwise
+  // start from the AI's body.
+  const restored = (c && c.reviewedAnalysis) ? c.reviewedAnalysis : body;
+  bodyEl.innerHTML = linkifyCitations(restored, driveIndex);
+  container.appendChild(bodyEl);
+
+  // Debounced save of Debbie's edits. innerText (not innerHTML) strips the anchor
+  // markup back to plain text, so the persisted version stays clean and linkify
+  // runs fresh each time the pane re-renders.
+  let saveTimer = null;
+  bodyEl.addEventListener('input', () => {
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      if (!c) return;
+      c.reviewedAnalysis = bodyEl.innerText;
+      c.reviewedAnalysisAt = new Date().toISOString();
+      save();
+    }, 800);
+  });
+
+  // Footer: finalize button + small status note.
+  const footer = document.createElement('div');
+  footer.style.marginTop = '14px';
+  footer.style.display = 'flex';
+  footer.style.gap = '8px';
+  footer.style.alignItems = 'center';
+  footer.style.flexWrap = 'wrap';
+  const finalBtn = document.createElement('button');
+  finalBtn.type = 'button';
+  finalBtn.className = 'btn btn-gold';
+  finalBtn.textContent = 'Finalize & Generate Report';
+  finalBtn.title = 'Produces the clean Word deliverable from the edited chronology above. Strips the review callout and any leftover internal markers. Saves to Drive if connected.';
+  finalBtn.onclick = () => generateFinalReport(caseInfo, bodyEl, finalBtn);
+  footer.appendChild(finalBtn);
+  const note = document.createElement('span');
+  note.style.fontSize = '12px';
+  note.style.color = '#777';
+  note.textContent = 'Edits auto-save as you type. Click any blue citation to open the source record in Drive.';
+  footer.appendChild(note);
+  container.appendChild(footer);
+}
+
+// Generate the final deliverable docx from Debbie's reviewed/edited analysis.
+// Everything she removed or rewrote in the editor above is honored; the verifier
+// callout is never included (it lives in its own div outside the editable body).
+async function generateFinalReport(caseInfo, bodyEl, triggerBtn) {
+  if (triggerBtn) { triggerBtn.disabled = true; triggerBtn.textContent = 'Generating…'; }
+  try {
+    if (!caseInfo) throw new Error('No case selected.');
+    const c = state.cases.find(x => x.id === caseInfo.id) || caseInfo;
+    // Prefer the LIVE editor contents so her most recent unsaved keystrokes land
+    // in the report; fall back to the last auto-saved reviewed version; finally
+    // to the raw AI analysis if she never touched the editor.
+    let text = '';
+    if (bodyEl && bodyEl.innerText) text = bodyEl.innerText;
+    else if (c.reviewedAnalysis) text = c.reviewedAnalysis;
+    else if (c.lastAnalysis) text = splitAnalysisForReview(c.lastAnalysis).body;
+    if (!text.trim()) throw new Error('No analysis content to export.');
+    // Defensive strip in case the raw analysis somehow ends up passed through here
+    // with the review section still attached.
+    text = text.replace(/={3,}\s*INTERNAL QUALITY REVIEW[\s\S]*$/i, '').trim();
+    const title = 'Medical Chronology — ' + (c.patient || 'Unnamed case');
+    await generateDocx(title, text, c.patient || '', c.id || '');
+    // Stamp the finalized version on the case so we know when a deliverable was produced.
+    c.finalizedReport = text;
+    c.finalizedReportAt = new Date().toISOString();
+    save();
+    showToast('✓ Final report generated and saved to Drive.');
+  } catch (e) {
+    alert('Could not generate the final report: ' + e.message);
+    console.error('[finalize] generation failed:', e);
+  } finally {
+    if (triggerBtn) { triggerBtn.disabled = false; triggerBtn.textContent = 'Finalize & Generate Report'; }
+  }
+}
+
 // Common finish routine for both single-call and batched paths: show result, save to Drive.
 async function finishAnalysis(res, caseInfo, type, typeLabels, area, pre) {
   area.style.display = 'none';
-  pre.textContent = res;
-  pre.style.display = 'block';
+  // Render the interactive review pane (editable body, linkified citations, verification
+  // callout, Finalize & Generate Report button). Falls back to plain text rendering if
+  // the review pane helper isn't available for any reason (defensive — the helper is
+  // defined in the same file so this shouldn't fire in production).
+  if (typeof renderAnalysisReview === 'function') {
+    renderAnalysisReview(res, caseInfo, pre);
+  } else {
+    pre.textContent = res;
+    pre.style.display = 'block';
+  }
+  // Reset any prior reviewedAnalysis draft since this is a fresh run. Debbie's
+  // edits from an earlier version shouldn't bleed into a brand-new analysis.
+  if (caseInfo && caseInfo.id) {
+    const cc = state.cases.find(x => x.id === caseInfo.id);
+    if (cc) { cc.reviewedAnalysis = ''; cc.reviewedAnalysisAt = ''; }
+  }
   document.getElementById('copy-rec-btn').style.display = '';
   const sendBtn = document.getElementById('send-to-report-btn');
   if (sendBtn) sendBtn.style.display = '';
