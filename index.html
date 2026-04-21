@@ -1080,6 +1080,75 @@ tr:hover td { background: var(--gray-50); }
 
 <script>
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
+
+// --- Anthropic pricing for Claude Haiku 4.5 (USD per million tokens) ---
+// Used ONLY for the in-app cost estimate + actuals display. These are the published
+// list prices at the time of writing; if Anthropic changes them, update here and the
+// estimate adjusts everywhere it's shown.
+//   Regular sync: $1.00 / $5.00 per 1M (input / output)
+//   Batch API   : 50% discount on both sides
+//   Cache read  : 10% of input rate (0.10x) — applied only to tokens that hit the cache
+//   Cache write : 125% of input rate (1.25x) — one-time cost when cache is first written
+// NOTE: These are our best estimates for pre-run budgeting — actual costs are logged
+// from usage.input_tokens / usage.output_tokens returned by the API after each run.
+const HAIKU_PRICE_INPUT_PER_MTOK  = 1.00;
+const HAIKU_PRICE_OUTPUT_PER_MTOK = 5.00;
+const BATCH_DISCOUNT = 0.5;
+const CACHE_READ_MULTIPLIER  = 0.10;
+const CACHE_WRITE_MULTIPLIER = 1.25;
+
+// Per-page token estimate for dense medical PDFs. Calibrated against observed
+// tokenization on Chart Detectives cases — roughly 2.2 chars/token on dense records
+// at ~12k chars/page. This is deliberately high so pre-run estimates don't underquote
+// on heavy charting (dense nursing notes, med reconciliation lists, CFR citations).
+const TOKENS_PER_PDF_PAGE_ESTIMATE = 5500;
+
+// Given a total page count and batch count for a case, return a pre-run cost estimate.
+// Returns { low, high, extraction, synthesis, totalPages, numBatches }.
+// `low` assumes batch API pricing throughout; `high` adds a worst-case synthesis
+// that uses the full max_tokens budget at sync (non-batch) prices.
+function estimateAnalysisCost(totalPages, numBatches) {
+  const extractionInputTokens = totalPages * TOKENS_PER_PDF_PAGE_ESTIMATE;
+  // Extraction output: each batch caps at 32k max_tokens; typical output is ~8k-18k
+  // depending on content density. Use 14k as the midpoint estimate.
+  const extractionOutputTokens = numBatches * 14000;
+  const extractionCost =
+    (extractionInputTokens / 1e6) * HAIKU_PRICE_INPUT_PER_MTOK  * BATCH_DISCOUNT +
+    (extractionOutputTokens / 1e6) * HAIKU_PRICE_OUTPUT_PER_MTOK * BATCH_DISCOUNT;
+
+  // Synthesis: hierarchical reduction. Worst-case input is all batch outputs being
+  // re-read once per hierarchy level (up to 4 levels) — but in practice we collapse
+  // in 1-2 levels for most cases. Use a 2x-level estimate for `low` and 4x for `high`.
+  // Each synth call's max output is 12000 (callClaude default).
+  const synthInputLow  = extractionOutputTokens * 2;  // 2 reduction passes
+  const synthInputHigh = extractionOutputTokens * 4;  // worst-case 4 passes
+  const synthGroupsEstimate = Math.max(1, Math.ceil(numBatches / 10));
+  const synthOutputLow  = Math.min(12000 * synthGroupsEstimate, 50000);
+  const synthOutputHigh = Math.min(12000 * synthGroupsEstimate * 2, 150000);
+  // Synthesis runs on the sync API (not batch) so no batch discount applies.
+  const synthesisCostLow =
+    (synthInputLow / 1e6) * HAIKU_PRICE_INPUT_PER_MTOK +
+    (synthOutputLow / 1e6) * HAIKU_PRICE_OUTPUT_PER_MTOK;
+  const synthesisCostHigh =
+    (synthInputHigh / 1e6) * HAIKU_PRICE_INPUT_PER_MTOK +
+    (synthOutputHigh / 1e6) * HAIKU_PRICE_OUTPUT_PER_MTOK;
+
+  return {
+    low: extractionCost + synthesisCostLow,
+    high: extractionCost + synthesisCostHigh,
+    extraction: extractionCost,
+    synthesisLow: synthesisCostLow,
+    synthesisHigh: synthesisCostHigh,
+    totalPages, numBatches
+  };
+}
+
+// Format a USD number for display. Always shows two decimals, with a $ prefix.
+function fmtUsd(n) {
+  if (!isFinite(n)) return '$?';
+  if (n < 0.01) return '<$0.01';
+  return '$' + n.toFixed(2);
+}
 const LOGO_B64 = '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';
 
 // ===== GOOGLE DRIVE INTEGRATION =====
@@ -1972,6 +2041,83 @@ async function deleteUploadedFile(fileId) {
   } catch (e) { /* ignore */ }
 }
 
+// Per-run usage accumulator. Reset at the start of a new analysis run (sync Branch B,
+// async flow, or retry-synthesis) and read in finishAnalysis to show Debbie the
+// actual dollar cost of the run. We track four token streams so we can match Anthropic's
+// billing categories exactly:
+//   input        — non-cached input tokens on sync calls (full input price)
+//   output       — output tokens (full output price)
+//   cache_read   — tokens served from prompt cache (10% of input price)
+//   cache_create — tokens billed to write to cache (125% of input price, one-time)
+//   batch_input  — input tokens that went through the Batches API (50% off input price)
+//   batch_output — output tokens that came back from the Batches API (50% off output price)
+let _runUsage = null;
+function resetRunUsage() {
+  _runUsage = {
+    input: 0, output: 0,
+    cache_read: 0, cache_create: 0,
+    batch_input: 0, batch_output: 0,
+    batch_cache_read: 0, batch_cache_create: 0,
+    calls: 0, batch_calls: 0
+  };
+}
+// Add a single usage object (as returned by Anthropic) into _runUsage. `viaBatch` steers
+// the totals into the batch-priced buckets (50% off both sides).
+function addUsage(usage, viaBatch) {
+  if (!_runUsage || !usage) return;
+  const i = usage.input_tokens || 0;
+  const o = usage.output_tokens || 0;
+  const cr = usage.cache_read_input_tokens || 0;
+  const cc = usage.cache_creation_input_tokens || 0;
+  if (viaBatch) {
+    _runUsage.batch_input += i;
+    _runUsage.batch_output += o;
+    _runUsage.batch_cache_read += cr;
+    _runUsage.batch_cache_create += cc;
+    _runUsage.batch_calls += 1;
+  } else {
+    _runUsage.input += i;
+    _runUsage.output += o;
+    _runUsage.cache_read += cr;
+    _runUsage.cache_create += cc;
+    _runUsage.calls += 1;
+  }
+}
+// Convert the accumulated _runUsage into a total USD cost using Haiku 4.5 pricing.
+function computeRunCostUsd() {
+  if (!_runUsage) return 0;
+  const u = _runUsage;
+  // Sync pricing.
+  const syncCost =
+    (u.input  / 1e6) * HAIKU_PRICE_INPUT_PER_MTOK +
+    (u.output / 1e6) * HAIKU_PRICE_OUTPUT_PER_MTOK +
+    (u.cache_read  / 1e6) * HAIKU_PRICE_INPUT_PER_MTOK * CACHE_READ_MULTIPLIER +
+    (u.cache_create/ 1e6) * HAIKU_PRICE_INPUT_PER_MTOK * CACHE_WRITE_MULTIPLIER;
+  // Batch pricing (50% off both sides). Cache multipliers compound on top.
+  const batchCost =
+    (u.batch_input  / 1e6) * HAIKU_PRICE_INPUT_PER_MTOK  * BATCH_DISCOUNT +
+    (u.batch_output / 1e6) * HAIKU_PRICE_OUTPUT_PER_MTOK * BATCH_DISCOUNT +
+    (u.batch_cache_read  / 1e6) * HAIKU_PRICE_INPUT_PER_MTOK * CACHE_READ_MULTIPLIER * BATCH_DISCOUNT +
+    (u.batch_cache_create/ 1e6) * HAIKU_PRICE_INPUT_PER_MTOK * CACHE_WRITE_MULTIPLIER * BATCH_DISCOUNT;
+  return syncCost + batchCost;
+}
+
+// Persona system prompt, shared by every extraction batch and every synthesis call.
+// Kept as a module-level constant so (a) we only maintain one copy of the wording and
+// (b) we can emit it as an Anthropic cache-breakpoint block wherever we send it, which
+// lets prompt caching take effect for free when Anthropic's minimum-cacheable-prefix
+// threshold is met (currently ~2k tokens for Haiku — system alone is below that, but
+// combined with stable preambles in large synthesis calls we can cross the line).
+const LNC_SYSTEM_PROMPT_TEXT = 'You are Deborah J Edmonds BSN, RN, LNHA, GERO-BC, a legal nurse consultant with Chart Detectives Legal Nurse Consulting, LLC. You have over 35 years of healthcare experience and deep knowledge of medical standards, nursing practice, federal long-term care regulations (42 CFR), and legal documentation. Provide thorough, professional, and accurate responses appropriate for use in legal proceedings.';
+// Array form of the system prompt with an ephemeral cache breakpoint. The Anthropic
+// Messages API accepts `system` as either a string or an array of text blocks; using
+// the array form lets us attach cache_control. `ephemeral` means "cache for ~5 min
+// since last use" — perfect for a single case's run where dozens of batches and
+// multiple synthesis passes share the same prefix.
+const LNC_SYSTEM_PROMPT_BLOCKS = [
+  { type: 'text', text: LNC_SYSTEM_PROMPT_TEXT, cache_control: { type: 'ephemeral' } }
+];
+
 // Submit a batch of Messages requests. `batchRequests` is an array of { custom_id, params }.
 async function submitBatch(batchRequests) {
   const res = await fetch(`${PROXY_URL}/v1/messages/batches`, {
@@ -2785,6 +2931,27 @@ async function onRecCaseSelectChanged() {
   // so Drive listing still loads in parallel.
   if (c && c.activeJobId && isAsyncFlowEnabled()) {
     resumeAsyncJobForCase(c).catch(e => console.warn('resumeAsyncJobForCase failed:', e));
+  } else if (c) {
+    // No live job — if the case has a previously-saved analysis, restore it into the
+    // result pane and re-show the copy + Send-to-Report-Builder buttons. Without this,
+    // the analysis pane was empty on re-select and the user thought the buttons "went
+    // away" — the actual data was safe in c.lastAnalysis, just not rendered.
+    const area = document.getElementById('rec-result-area');
+    const pre = document.getElementById('rec-result');
+    if (area && pre && c.lastAnalysis) {
+      renderSavedAnalysisIfAny(c, area, pre);
+    } else if (area && pre) {
+      // No saved analysis either — reset the pane to the default idle state so
+      // stale content from a prior case doesn't hang around.
+      area.style.display = '';
+      area.innerHTML = '';
+      pre.style.display = 'none';
+      pre.textContent = '';
+      const copyBtn = document.getElementById('copy-rec-btn');
+      if (copyBtn) copyBtn.style.display = 'none';
+      const sendBtn = document.getElementById('send-to-report-btn');
+      if (sendBtn) sendBtn.style.display = 'none';
+    }
   }
 
   if (!c || !c.driveFolderId) {
@@ -2914,13 +3081,23 @@ This is BATCH ${bi + 1} of ${batches.length} for a large case. From the records 
 • Any photos/images: describe what is visible and cite the source filename
 
 Be thorough and factual. Cite the source record name/date for each fact. Do NOT write a narrative summary yet — just extract facts. A final synthesis step will combine your extractions across all batches into the full ${typeLabels[type] || type}.`;
-    const content = [{ type: 'text', text: promptText }, ...stripInternalFields(batch)];
+    // Cache-control on the persona system block lets identical prefixes across all
+    // batches share a cache entry (when the prefix crosses Anthropic's minimum token
+    // threshold). We also cache the stable prompt preamble — case context + instructions
+    // + the extraction rules — so the batches after the first have a shot at a cache hit
+    // once the prefix is long enough (e.g. when caseContext and instructions are
+    // substantial). The per-batch "BATCH X of Y" line and file blobs come after the
+    // cache breakpoint so they don't disturb the shared prefix.
+    const content = [
+      { type: 'text', text: promptText, cache_control: { type: 'ephemeral' } },
+      ...stripInternalFields(batch)
+    ];
     return {
       custom_id: 'batch-' + bi,
       params: {
         model: CLAUDE_MODEL,
         max_tokens: 32000,
-        system: 'You are Deborah J Edmonds BSN, RN, LNHA, GERO-BC, a legal nurse consultant with Chart Detectives Legal Nurse Consulting, LLC. You have over 35 years of healthcare experience and deep knowledge of medical standards, nursing practice, federal long-term care regulations (42 CFR), and legal documentation. Provide thorough, professional, and accurate responses appropriate for use in legal proceedings.',
+        system: LNC_SYSTEM_PROMPT_BLOCKS,
         messages: [{ role: 'user', content }]
       }
     };
@@ -3054,6 +3231,9 @@ async function pollBatchAndFinish(ctx) {
     }
     if (r.result && r.result.type === 'succeeded') {
       batchOutputs.push({ batch: bi + 1, text: extractTextFromMessage(r.result.message) });
+      // Log the batch result's usage into the run cost accumulator so the post-run
+      // display reflects what Anthropic actually billed.
+      if (r.result.message && r.result.message.usage) addUsage(r.result.message.usage, true);
       succeeded++;
     } else if (r.result && r.result.type === 'errored') {
       // Anthropic batch error envelope: r.result.error = { type: 'error', error: { type, message } }.
@@ -3126,14 +3306,24 @@ async function pollBatchAndFinish(ctx) {
 
   // --- Synthesize (hierarchical if too large — recursively reduces until it fits) ---
   await patchJob(jobId, { status: 'synthesizing' }).catch(() => {});
-  // Previous tuning (150k tokens * 4 chars/token = 600k chars) overflowed in the wild:
-  // 44 batches of dense medical extractions produced ~2.9 chars/token, so 600k chars
-  // clocked in at 206k actual tokens — over the 200k input limit. Lowering both the
-  // token budget AND the chars-per-token ratio gives durable headroom. At worst case
-  // (2.5 chars/token for very dense content), 400k chars = 160k tokens, leaving room
-  // for system prompt + preamble + response reservation under 200k.
-  const SYNTH_TOKEN_BUDGET = 120000;
-  const SYNTH_CHAR_BUDGET = 400000;
+  // Tuning history:
+  //   First pass  (150k tokens * 4 chars/token = 600k chars) — overflowed: 44 batches of
+  //                dense medical extractions produced ~2.9 chars/token, so 600k chars
+  //                clocked in at 206k actual tokens — over the 200k input limit.
+  //   Second pass (120k budget, 400k chars) — survived 93 batches but ran into HTTP 400
+  //                "prompt is too long" on a 304-batch case where per-group text density
+  //                pushed the actual tokenization north of 180k for some groups. Claude's
+  //                tokenizer runs denser on highly-structured medical content (dates, codes,
+  //                CFR citations, drug names) than plain prose — observed ratio ~2.2 chars/token.
+  //   Current    (100k budget, 250k chars) — targets ~113k tokens at 2.2 chars/token so
+  //                even worst-case dense content sits comfortably under 200k with room
+  //                for preamble, system prompt, and output reservation. The trade-off is
+  //                more hierarchy levels (more round-trips) but total wall-clock is still
+  //                small compared to extraction. MAX_HIERARCHY_LEVELS stays at 4 because
+  //                even a 1000-batch case converges to a single group within 4 levels
+  //                at a ~5x reduction per level.
+  const SYNTH_TOKEN_BUDGET = 100000;
+  const SYNTH_CHAR_BUDGET = 250000;
   const PROMPT_PREAMBLE_CHARS = 3000;
   const MAX_HIERARCHY_LEVELS = 4;
   const typeLabel = typeLabels[type] || type;
@@ -3268,9 +3458,63 @@ async function resumeAsyncJobForCase(caseInfo) {
     return;
   }
   if (job.status === 'failed') {
+    // Two very different failure modes with different recovery paths:
+    //
+    //   (a) Synthesis failed AFTER the batch succeeded. We have batch_id + hydratable
+    //       batch_requests in metadata, so results are still retrievable (Anthropic
+    //       retains them for 29 days, free) and we can re-run synthesis without paying
+    //       for a single extraction. This is the Kathleen Mimms case: 304 batches
+    //       succeeded, but synthesis exhausted the credit balance.
+    //
+    //   (b) Batch submit itself failed, or we don't have hydratable batch_requests.
+    //       Nothing to reuse — user must start over.
+    //
+    // For (a) we show a "Retry synthesis" button that preserves activeJobId so the
+    // retry path can find the job again. For (b) we clear activeJobId as before.
+    const md = job.metadata || {};
+    const canRetrySynth = !!job.batch_id
+      && Array.isArray(md.batch_requests)
+      && md.batch_requests.length === (md.num_batches || 1);
+    if (canRetrySynth) {
+      const errMsg = job.error || 'unknown error';
+      const batchCount = md.num_batches || md.batch_requests.length;
+      area.innerHTML = `
+        <div class="alert alert-warning">
+          <strong>Synthesis failed on this case, but extraction is recoverable.</strong><br><br>
+          Error: <code>${esc(errMsg)}</code><br><br>
+          The ${batchCount} batch extractions are still saved on Anthropic's side (free, 29-day retention).
+          Click below to re-run just the synthesis step — no re-extraction cost.
+          <br><br>
+          <button id="retry-synth-btn" class="btn btn-primary">🔄 Retry synthesis (no re-extraction)</button>
+          <button id="retry-synth-dismiss" class="btn btn-secondary" style="margin-left:8px;">Dismiss (start fresh later)</button>
+        </div>`;
+      const retryBtn = document.getElementById('retry-synth-btn');
+      const dismissBtn = document.getElementById('retry-synth-dismiss');
+      if (retryBtn) {
+        retryBtn.addEventListener('click', () => {
+          retryBtn.disabled = true;
+          if (dismissBtn) dismissBtn.disabled = true;
+          retrySynthesisForCase(caseInfo).catch(e => {
+            console.error('Retry synthesis failed:', e);
+            area.innerHTML = `<div class="alert alert-danger">Retry failed: ${esc(e.message)}</div>`;
+          });
+        });
+      }
+      if (dismissBtn) {
+        dismissBtn.addEventListener('click', () => {
+          const c = state.cases.find(x => x.id === caseInfo.id);
+          if (c) { c.activeJobId = null; save(); }
+          // Fall back to showing any previously-saved analysis for this case.
+          renderSavedAnalysisIfAny(caseInfo, area, pre);
+        });
+      }
+      return;
+    }
     area.innerHTML = `<div class="alert alert-danger">Previous analysis failed: ${esc(job.error || 'unknown error')}. <br><br>Click "Start AI Analysis" to try again.</div>`;
     const c = state.cases.find(x => x.id === caseInfo.id);
     if (c) { c.activeJobId = null; save(); }
+    // Preserve any earlier saved analysis so the user doesn't lose access to prior work.
+    renderSavedAnalysisIfAny(caseInfo, area, pre);
     return;
   }
 
@@ -3303,9 +3547,77 @@ async function resumeAsyncJobForCase(caseInfo) {
   });
 }
 
+// Re-run ONLY the synthesis step on a previously-failed job, reusing the batch results
+// that Anthropic still has cached (free, 29-day retention). Costs only the synthesis
+// call(s) — no re-extraction. This is what saves the Kathleen Mimms 304-batch run
+// after synthesis originally failed on credit exhaustion.
+async function retrySynthesisForCase(caseInfo) {
+  if (!caseInfo || !caseInfo.activeJobId) {
+    throw new Error('No active job id on this case.');
+  }
+  const area = document.getElementById('rec-result-area');
+  const pre = document.getElementById('rec-result');
+  if (!area || !pre) return;
+  area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Reloading failed job to retry synthesis…</span></div>';
+  pre.style.display = 'none';
+
+  const job = await getJob(caseInfo.activeJobId);
+  if (!job) throw new Error('Job record not found in KV.');
+  if (!job.batch_id) throw new Error('No batch id on job — nothing to retry from.');
+  const md = job.metadata || {};
+  if (!Array.isArray(md.batch_requests) || md.batch_requests.length !== (md.num_batches || 1)) {
+    throw new Error('Batch requests not hydratable from job metadata — cannot retry synthesis.');
+  }
+  // Flip the job back to a live state so the synthesis path can patch it again.
+  await patchJob(job.job_id, { status: 'synthesizing', error: '' }).catch(() => {});
+  // Capture billing-timer start fresh — this counts as a new billable-time entry once it finishes.
+  _analysisStartedAt = Date.now();
+  // Fresh cost accumulator for the retry. The original extractions are replayed for free
+  // from Anthropic's 29-day cached results, so this run only counts the synthesis calls.
+  resetRunUsage();
+  const typeLabels = { chronology: 'detailed medical chronology', summary: 'comprehensive narrative summary', gaps: 'analysis of care gaps and inconsistencies', providers: 'list of all providers, diagnoses, and medications', full: 'full comprehensive LNC analysis including chronology, summary, gaps, providers, and nursing care assessment' };
+  await pollBatchAndFinish({
+    jobId: job.job_id,
+    batchId: job.batch_id,
+    numBatches: md.num_batches || 1,
+    caseInfo,
+    type: md.analysis_type || 'summary',
+    typeLabels,
+    instructions: md.instructions || '',
+    caseContext: md.case_context || '',
+    textAddendum: '',
+    area, pre,
+    batchRequests: md.batch_requests
+  });
+}
+
+// Restore the previously-saved analysis for a case into the result pane and re-show the
+// copy + Send to Report Builder buttons. Used when no live job is in flight so the user
+// can get back to yesterday's work without having to re-run the analysis. Safe to call
+// when there is no saved analysis — the pane just stays empty.
+function renderSavedAnalysisIfAny(caseInfo, area, pre) {
+  if (!caseInfo || !pre || !area) return false;
+  const c = state.cases.find(x => x.id === caseInfo.id);
+  if (!c || !c.lastAnalysis) return false;
+  area.style.display = 'none';
+  pre.textContent = c.lastAnalysis;
+  pre.style.display = 'block';
+  const copyBtn = document.getElementById('copy-rec-btn');
+  if (copyBtn) copyBtn.style.display = '';
+  const sendBtn = document.getElementById('send-to-report-btn');
+  if (sendBtn) sendBtn.style.display = '';
+  // Timestamp banner so Debbie knows this is a recall, not a fresh run.
+  const when = c.lastAnalysisAt ? new Date(c.lastAnalysisAt).toLocaleString() : 'previously';
+  showToast('📂 Showing saved analysis from ' + when + ' — click Start AI Analysis to regenerate.');
+  return true;
+}
+
 async function runRecordAnalysis() {
   // Capture wall-clock start so finishAnalysis can auto-log the billable time spent.
   _analysisStartedAt = Date.now();
+  // Reset per-run usage accumulator. Every extraction, retry, and synthesis call that
+  // happens from here forward is totaled into this run's cost line item.
+  resetRunUsage();
   const caseId = document.getElementById('rec-case-select').value;
   const type = document.getElementById('analysis-type').value;
   const instructions = document.getElementById('analysis-instructions').value;
@@ -3583,8 +3895,19 @@ Please produce a ${typeLabels[type] || type}. Format your response clearly with 
     pre.style.display = 'none';
     document.getElementById('copy-rec-btn').style.display = 'none';
     { const s = document.getElementById('send-to-report-btn'); if (s) s.style.display = 'none'; }
+    // Pre-run cost estimate. For the async path we don't have `batches` yet (chunking
+    // happens inside runAsyncRecordAnalysis), so we estimate batch count from total pages
+    // using the same page cap that the chunker will apply. This matches reality within ±1
+    // batch unless a single PDF is huge. Shown to Debbie so she can cancel if the case is
+    // unexpectedly expensive — no surprise bills.
+    const estBatches = Math.max(1, Math.ceil(totalPages / SAFE_SINGLE_CALL_PAGES));
+    const cost = estimateAnalysisCost(totalPages, estBatches);
     const proceed = confirm(
       'This case has ' + contentBlocks.length + ' file(s) totaling ~' + totalMB.toFixed(0) + ' MB (~' + totalPages + ' pages).\n\n' +
+      'Estimated API cost: ' + fmtUsd(cost.low) + '–' + fmtUsd(cost.high) + '\n' +
+      '  • Extraction (batch, 50% off): ' + fmtUsd(cost.extraction) + '\n' +
+      '  • Synthesis (sync): ' + fmtUsd(cost.synthesisLow) + '–' + fmtUsd(cost.synthesisHigh) + '\n' +
+      '  • Split into ~' + estBatches + ' batch(es)\n\n' +
       'Submit as a background batch? You can close this tab and come back later — the report will be waiting when you reopen the case. Expected completion: 15–60 minutes.'
     );
     if (!proceed) {
@@ -3608,9 +3931,20 @@ Please produce a ${typeLabels[type] || type}. Format your response clearly with 
     SAFE_SINGLE_CALL_TOKENS
   );
   const estCalls = batches.length + 1;
+  // Pre-run cost estimate for the sync path. Shown in the same confirm dialog so Debbie
+  // can cancel on a surprise. Sync path doesn't get the 50% batch discount, so we reflect
+  // that by computing the estimate with batch-off pricing for the extraction leg.
+  const syncCost = estimateAnalysisCost(totalPages, batches.length);
+  // Remove the batch discount for the sync path by multiplying extraction back up by 2.
+  const syncExtraction = syncCost.extraction / BATCH_DISCOUNT;
+  const syncLow  = syncExtraction + syncCost.synthesisLow;
+  const syncHigh = syncExtraction + syncCost.synthesisHigh;
   const ok = confirm(
     'This case has ' + contentBlocks.length + ' file(s) totaling ~' + totalMB.toFixed(0) + ' MB (~' + totalPages + ' pages) — too much for a single AI call.\n\n' +
     'I can split them into ' + batches.length + ' batch(es), extract facts from each, then synthesize a final ' + (typeLabels[type] || type) + '.\n\n' +
+    'Estimated API cost: ' + fmtUsd(syncLow) + '–' + fmtUsd(syncHigh) + ' (sync mode, no batch discount)\n' +
+    '  • Extraction: ' + fmtUsd(syncExtraction) + '\n' +
+    '  • Synthesis: ' + fmtUsd(syncCost.synthesisLow) + '–' + fmtUsd(syncCost.synthesisHigh) + '\n\n' +
     'This will make ~' + estCalls + ' AI calls and may take several minutes.\n\nContinue?'
   );
   if (!ok) {
@@ -3833,6 +4167,10 @@ async function finishAnalysis(res, caseInfo, type, typeLabels, area, pre) {
   document.getElementById('copy-rec-btn').style.display = '';
   const sendBtn = document.getElementById('send-to-report-btn');
   if (sendBtn) sendBtn.style.display = '';
+  // Compute this run's actual API cost from the accumulated usage tokens. We snapshot
+  // it here so we can both (a) display it to Debbie and (b) persist it on the case.
+  const runCost = computeRunCostUsd();
+  const runUsageSnapshot = _runUsage ? { ..._runUsage } : null;
   // Persist the analysis on the case record so the Report Builder can pick it up later.
   if (caseInfo && caseInfo.id) {
     const c = state.cases.find(x => x.id === caseInfo.id);
@@ -3842,8 +4180,42 @@ async function finishAnalysis(res, caseInfo, type, typeLabels, area, pre) {
       c.lastAnalysisAt = new Date().toISOString();
       // Clear any stale summary — it'll be regenerated on demand when sent to the Report Builder.
       c.lastAnalysisSummary = '';
+      // Cost history lets Debbie see spend per-case across re-runs. We append rather
+      // than overwrite so retries/regenerations stay visible — useful when diagnosing
+      // a runaway case or comparing pre-run estimates against actuals.
+      if (!Array.isArray(c.analysisCostHistory)) c.analysisCostHistory = [];
+      if (runCost > 0) {
+        c.analysisCostHistory.push({
+          at: c.lastAnalysisAt,
+          type: type || '',
+          costUsd: runCost,
+          usage: runUsageSnapshot
+        });
+        c.lastAnalysisCostUsd = runCost;
+      }
       save();
     }
+  }
+  // Surface the cost in the UI so Debbie sees real spend, not an estimate. We append a
+  // small info banner under the result pane — non-intrusive, collapsible feel.
+  if (runCost > 0 && runUsageSnapshot) {
+    const u = runUsageSnapshot;
+    const totalInputTok = u.input + u.cache_read + u.cache_create + u.batch_input + u.batch_cache_read + u.batch_cache_create;
+    const totalOutputTok = u.output + u.batch_output;
+    const totalCalls = u.calls + u.batch_calls;
+    const costNode = document.createElement('div');
+    costNode.className = 'alert alert-info';
+    costNode.style.marginTop = '10px';
+    costNode.style.fontSize = '13px';
+    costNode.innerHTML =
+      '<strong>This run cost ' + fmtUsd(runCost) + '</strong> &nbsp; '
+      + '<span style="color:var(--gray-400);">'
+      + totalCalls + ' API call' + (totalCalls === 1 ? '' : 's') + ' • '
+      + 'input: ' + totalInputTok.toLocaleString() + ' tokens • '
+      + 'output: ' + totalOutputTok.toLocaleString() + ' tokens'
+      + (u.cache_read + u.batch_cache_read > 0 ? ' • cached: ' + (u.cache_read + u.batch_cache_read).toLocaleString() + ' tokens' : '')
+      + '</span>';
+    if (pre && pre.parentNode) pre.parentNode.insertBefore(costNode, pre.nextSibling);
   }
   // Auto-log the analysis duration as a standard billable entry on this case. We show
   // a neutral activity label ("Record review" / "Chronology preparation") — the same
@@ -4566,7 +4938,10 @@ async function callClaude(promptOrContent, options) {
     const inner = {
       model: CLAUDE_MODEL,
       max_tokens: maxTokens,
-      system: 'You are Deborah J Edmonds BSN, RN, LNHA, GERO-BC, a legal nurse consultant with Chart Detectives Legal Nurse Consulting, LLC. You have over 35 years of healthcare experience and deep knowledge of medical standards, nursing practice, federal long-term care regulations (42 CFR), and legal documentation. Provide thorough, professional, and accurate responses appropriate for use in legal proceedings.',
+      // Cacheable system block — see LNC_SYSTEM_PROMPT_BLOCKS for rationale. The Messages
+      // API accepts either a string or an array here; we use the array form everywhere so
+      // caching takes effect whenever the prefix is long enough.
+      system: LNC_SYSTEM_PROMPT_BLOCKS,
       messages: [{ role: 'user', content: promptOrContent }]
     };
     if (useStream) inner.stream = true;
@@ -4626,12 +5001,15 @@ async function callClaude(promptOrContent, options) {
       }
       if (useStream) {
         result = await readAnthropicSSE(res);
+        // readAnthropicSSE already folded usage into _runUsage — no-op here.
       } else {
         const data = await res.json();
         result = {
           text: (data.content || []).map(b => b.text || '').join(''),
           stop_reason: data.stop_reason || null
         };
+        // Accumulate usage for post-run cost display. Non-batch sync call.
+        addUsage(data.usage, false);
       }
       lastErr = null;
       break;
@@ -4678,6 +5056,13 @@ async function readAnthropicSSE(res) {
   let text = '';
   let stop_reason = null;
   let sawMessageStop = false;
+  // Usage tokens from SSE come in two places:
+  //   message_start.message.usage  — has input_tokens, cache_read/creation tokens, and
+  //                                  a preliminary output_tokens (usually 1)
+  //   message_delta.usage          — has the FINAL output_tokens (and sometimes the
+  //                                  final cache counts — we take the max of both)
+  // We accumulate a single `sseUsage` and commit it once at end of stream.
+  const sseUsage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
   try {
     while (true) {
       const { value, done } = await reader.read();
@@ -4700,6 +5085,15 @@ async function readAnthropicSSE(res) {
         let evt;
         try { evt = JSON.parse(raw); } catch { continue; }
         switch (evt.type) {
+          case 'message_start':
+            if (evt.message && evt.message.usage) {
+              const u = evt.message.usage;
+              sseUsage.input_tokens            = u.input_tokens || 0;
+              sseUsage.cache_read_input_tokens = u.cache_read_input_tokens || 0;
+              sseUsage.cache_creation_input_tokens = u.cache_creation_input_tokens || 0;
+              sseUsage.output_tokens           = u.output_tokens || 0;
+            }
+            break;
           case 'content_block_delta':
             if (evt.delta && evt.delta.type === 'text_delta' && typeof evt.delta.text === 'string') {
               text += evt.delta.text;
@@ -4707,6 +5101,16 @@ async function readAnthropicSSE(res) {
             break;
           case 'message_delta':
             if (evt.delta && evt.delta.stop_reason) stop_reason = evt.delta.stop_reason;
+            // Final output_tokens lands here per Anthropic's SSE contract. Take the max
+            // so a stray earlier value doesn't undercount. Cache counts are also
+            // occasionally re-reported here — fold them in with max() as well.
+            if (evt.usage) {
+              const u = evt.usage;
+              if (u.output_tokens != null) sseUsage.output_tokens = Math.max(sseUsage.output_tokens, u.output_tokens);
+              if (u.input_tokens != null)  sseUsage.input_tokens  = Math.max(sseUsage.input_tokens,  u.input_tokens);
+              if (u.cache_read_input_tokens != null)     sseUsage.cache_read_input_tokens     = Math.max(sseUsage.cache_read_input_tokens, u.cache_read_input_tokens);
+              if (u.cache_creation_input_tokens != null) sseUsage.cache_creation_input_tokens = Math.max(sseUsage.cache_creation_input_tokens, u.cache_creation_input_tokens);
+            }
             break;
           case 'message_stop':
             sawMessageStop = true;
@@ -4746,6 +5150,9 @@ async function readAnthropicSSE(res) {
   if (!sawMessageStop && !text) {
     throw new Error('Stream ended before any content was received');
   }
+  // Fold the SSE-derived usage into the run-level accumulator so post-run cost shows
+  // actual, not estimated, spend. Sync path (not batch).
+  addUsage(sseUsage, false);
   return { text, stop_reason };
 }
 
