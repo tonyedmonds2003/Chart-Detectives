@@ -239,18 +239,20 @@ tr:hover td { background: var(--gray-50); }
 <!-- TOP BAR -->
 <div class="topbar">
   <div class="topbar-brand">
-    <svg width="240" height="48" viewBox="0 0 240 48" xmlns="http://www.w3.org/2000/svg">
-      <!-- CD monogram — bold red serif on the left -->
-      <text x="0" y="37" font-family="Georgia, 'Times New Roman', serif" font-size="36" font-weight="bold" fill="#cc2222" letter-spacing="-2">CD</text>
-      <!-- Chart Detectives wordmark -->
-      <text x="64" y="22" font-family="Georgia, 'Times New Roman', serif" font-size="17" font-weight="bold" fill="#ffffff">Chart Detectives</text>
-      <!-- Legal Nurse Consulting -->
-      <text x="65" y="37" font-family="Arial, Helvetica, sans-serif" font-size="9.5" fill="#c9a84c" letter-spacing="1.5">LEGAL NURSE CONSULTING</text>
-      <!-- Magnifying glass on the right: red heart silhouette + ECG waveform crossing through it -->
-      <circle cx="213" cy="21" r="13" fill="none" stroke="#ffffff" stroke-width="2.4"/>
-      <path d="M213 27.5 C210 25, 206.5 22.8, 206.5 19.5 C206.5 17.4, 208.2 15.8, 210.2 15.8 C211.6 15.8, 212.6 16.6, 213 17.3 C213.4 16.6, 214.4 15.8, 215.8 15.8 C217.8 15.8, 219.5 17.4, 219.5 19.5 C219.5 22.8, 216 25, 213 27.5 Z" fill="#cc2222"/>
-      <polyline points="201,21 205,21 207,17 209,25 211,19 213,22 225,22" fill="none" stroke="#ffffff" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
-      <line x1="222" y1="30" x2="230" y2="38" stroke="#ffffff" stroke-width="3" stroke-linecap="round"/>
+    <svg width="300" height="72" viewBox="0 0 320 110" xmlns="http://www.w3.org/2000/svg">
+      <!-- White background card so the exact-colors logo reads cleanly over the navy topbar -->
+      <rect width="320" height="110" fill="#ffffff" rx="6"/>
+      <!-- "Chart Detectives" — black with red initial letters C and D -->
+      <text x="10" y="45" font-family="Arial, Helvetica, sans-serif" font-weight="bold" font-size="28">
+        <tspan fill="#d41c1c">C</tspan><tspan fill="#111111">hart </tspan><tspan fill="#d41c1c">D</tspan><tspan fill="#111111">etectives</tspan>
+      </text>
+      <!-- "Legal Nurse Consultants" — all black -->
+      <text x="10" y="85" font-family="Arial, Helvetica, sans-serif" font-weight="bold" font-size="26" fill="#111111">Legal Nurse Consultants</text>
+      <!-- Magnifying glass on the right: thick black border, white lens, red heart + red ECG inside -->
+      <circle cx="258" cy="50" r="34" fill="#ffffff" stroke="#111111" stroke-width="7"/>
+      <path d="M258,64 C252,58 240,50 240,38 C240,32 244,27 250,27 C254,27 256,30 258,32 C260,30 262,27 266,27 C272,27 276,32 276,38 C276,50 264,58 258,64 Z" fill="#d41c1c"/>
+      <polyline points="230,50 240,50 244,38 248,62 252,44 256,54 286,50" fill="none" stroke="#d41c1c" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+      <line x1="283" y1="75" x2="312" y2="104" stroke="#111111" stroke-width="11" stroke-linecap="round"/>
     </svg>
   </div>
   <div class="topbar-right">
@@ -314,17 +316,16 @@ tr:hover td { background: var(--gray-50); }
   </div>
   <div class="sidebar-bottom">
     <div class="sidebar-api-badge">
-      <svg width="170" height="34" viewBox="0 0 170 34" xmlns="http://www.w3.org/2000/svg" style="display:block;margin-bottom:6px;">
-        <!-- CD monogram in red -->
-        <text x="0" y="25" font-family="Georgia,serif" font-size="22" font-weight="bold" fill="#cc2222" letter-spacing="-1">CD</text>
-        <!-- Wordmark -->
-        <text x="34" y="13" font-family="Georgia,serif" font-size="10" font-weight="bold" fill="#ffffff">Chart Detectives</text>
-        <text x="34" y="25" font-family="Arial,sans-serif" font-size="6" fill="#c9a84c" letter-spacing="0.8">LEGAL NURSE CONSULTING</text>
-        <!-- Magnifying glass with heart + ECG -->
-        <circle cx="148" cy="14" r="9" fill="none" stroke="#ffffff" stroke-width="1.7"/>
-        <path d="M148 19 C146 17.4, 143.6 15.9, 143.6 13.6 C143.6 12.2, 144.8 11.1, 146.2 11.1 C147.2 11.1, 147.8 11.6, 148 12.1 C148.2 11.6, 148.8 11.1, 149.8 11.1 C151.2 11.1, 152.4 12.2, 152.4 13.6 C152.4 15.9, 150 17.4, 148 19 Z" fill="#cc2222"/>
-        <polyline points="140,14 143,14 144.5,11.2 146,16.6 147.5,12.6 149,14 156,14" fill="none" stroke="#ffffff" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/>
-        <line x1="154" y1="20" x2="159" y2="25" stroke="#ffffff" stroke-width="2" stroke-linecap="round"/>
+      <svg width="170" height="58" viewBox="0 0 320 110" xmlns="http://www.w3.org/2000/svg" style="display:block;margin-bottom:6px;">
+        <rect width="320" height="110" fill="#ffffff" rx="6"/>
+        <text x="10" y="45" font-family="Arial, Helvetica, sans-serif" font-weight="bold" font-size="28">
+          <tspan fill="#d41c1c">C</tspan><tspan fill="#111111">hart </tspan><tspan fill="#d41c1c">D</tspan><tspan fill="#111111">etectives</tspan>
+        </text>
+        <text x="10" y="85" font-family="Arial, Helvetica, sans-serif" font-weight="bold" font-size="26" fill="#111111">Legal Nurse Consultants</text>
+        <circle cx="258" cy="50" r="34" fill="#ffffff" stroke="#111111" stroke-width="7"/>
+        <path d="M258,64 C252,58 240,50 240,38 C240,32 244,27 250,27 C254,27 256,30 258,32 C260,30 262,27 266,27 C272,27 276,32 276,38 C276,50 264,58 258,64 Z" fill="#d41c1c"/>
+        <polyline points="230,50 240,50 244,38 248,62 252,44 256,54 286,50" fill="none" stroke="#d41c1c" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+        <line x1="283" y1="75" x2="312" y2="104" stroke="#111111" stroke-width="11" stroke-linecap="round"/>
       </svg>
       <p style="font-size:10px;">⚡ AI-powered by Claude</p>
     </div>
@@ -1125,8 +1126,8 @@ tr:hover td { background: var(--gray-50); }
 // Format: YYYY.MM.DD.N where N is the Nth change on that day (1-indexed).
 // APP_VERSION_LABEL is a human-readable caption shown on hover.
 // ============================================================================
-const APP_VERSION       = '2026.04.21.11';
-const APP_VERSION_LABEL = 'Apr 21, 2026 — Drive folders now split into shared /records/ (only what attorneys should see) and private /_Internal/ (drafts, analysis .txt, processed chunks). Records Reviewed table is built from real Drive + processed-manifest data with a "USE ONLY these rows" lock, so page counts can no longer be fabricated. New brand mark (red "CD" monogram + wordmark + magnifying glass w/ heart + ECG) wired into topbar, sidebar, and docx header — docx logo is rasterized from the canonical SVG at runtime so topbar + report always stay in sync.';
+const APP_VERSION       = '2026.04.21.13';
+const APP_VERSION_LABEL = 'Apr 21, 2026 — Records Reviewed manifest builder now falls back to the legacy _processed/ cache inside the records folder when the private work folder has no manifest yet, so PDF page counts populate on pre-split cases (like Mimm) without requiring a manual Reorganize. A best-effort background migration also runs so the next report no longer needs the fallback.';
 
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
 
@@ -1208,15 +1209,16 @@ function fmtUsd(n) {
 // and `getLogoPngBytes()` rasterizes it to a PNG on first use via canvas.
 // docx-js' ImageRun takes the PNG bytes and embeds them in the header.
 // ---------------------------------------------------------------------------
-const LOGO_SVG_STRING = '<svg width="240" height="48" viewBox="0 0 240 48" xmlns="http://www.w3.org/2000/svg">'
-  + '<rect width="240" height="48" fill="#0f2444"/>'
-  + '<text x="6" y="37" font-family="Georgia, Times New Roman, serif" font-size="36" font-weight="bold" fill="#cc2222" letter-spacing="-2">CD</text>'
-  + '<text x="70" y="22" font-family="Georgia, Times New Roman, serif" font-size="17" font-weight="bold" fill="#ffffff">Chart Detectives</text>'
-  + '<text x="71" y="37" font-family="Arial, Helvetica, sans-serif" font-size="9.5" fill="#c9a84c" letter-spacing="1.5">LEGAL NURSE CONSULTING</text>'
-  + '<circle cx="217" cy="21" r="13" fill="none" stroke="#ffffff" stroke-width="2.4"/>'
-  + '<path d="M217 27.5 C214 25, 210.5 22.8, 210.5 19.5 C210.5 17.4, 212.2 15.8, 214.2 15.8 C215.6 15.8, 216.6 16.6, 217 17.3 C217.4 16.6, 218.4 15.8, 219.8 15.8 C221.8 15.8, 223.5 17.4, 223.5 19.5 C223.5 22.8, 220 25, 217 27.5 Z" fill="#cc2222"/>'
-  + '<polyline points="205,21 209,21 211,17 213,25 215,19 217,22 229,22" fill="none" stroke="#ffffff" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>'
-  + '<line x1="226" y1="30" x2="234" y2="38" stroke="#ffffff" stroke-width="3" stroke-linecap="round"/>'
+const LOGO_SVG_STRING = '<svg width="320" height="110" viewBox="0 0 320 110" xmlns="http://www.w3.org/2000/svg">'
+  + '<rect width="320" height="110" fill="#ffffff"/>'
+  + '<text x="10" y="45" font-family="Arial, Helvetica, sans-serif" font-weight="bold" font-size="28">'
+  +   '<tspan fill="#d41c1c">C</tspan><tspan fill="#111111">hart </tspan><tspan fill="#d41c1c">D</tspan><tspan fill="#111111">etectives</tspan>'
+  + '</text>'
+  + '<text x="10" y="85" font-family="Arial, Helvetica, sans-serif" font-weight="bold" font-size="26" fill="#111111">Legal Nurse Consultants</text>'
+  + '<circle cx="258" cy="50" r="34" fill="#ffffff" stroke="#111111" stroke-width="7"/>'
+  + '<path d="M258,64 C252,58 240,50 240,38 C240,32 244,27 250,27 C254,27 256,30 258,32 C260,30 262,27 266,27 C272,27 276,32 276,38 C276,50 264,58 258,64 Z" fill="#d41c1c"/>'
+  + '<polyline points="230,50 240,50 244,38 248,62 252,44 256,54 286,50" fill="none" stroke="#d41c1c" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>'
+  + '<line x1="283" y1="75" x2="312" y2="104" stroke="#111111" stroke-width="11" stroke-linecap="round"/>'
   + '</svg>';
 
 let _logoPngBytesCache = null;
@@ -1236,8 +1238,8 @@ async function getLogoPngBytes() {
     });
     const scale = 3;
     const canvas = document.createElement('canvas');
-    canvas.width = 240 * scale;
-    canvas.height = 48 * scale;
+    canvas.width = 320 * scale;
+    canvas.height = 110 * scale;
     const ctx = canvas.getContext('2d');
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
@@ -2180,7 +2182,7 @@ async function generateDocx(title, content, patientName, caseId, caseRec) {
             new Paragraph({
               border: { bottom: { style: BorderStyle.SINGLE, size: 4, color: 'dddddd', space: 4 } },
               spacing: { before: 0, after: 80 },
-              children: [new ImageRun({ data: logoBytes, transformation: { width: 200, height: 40 }, type: 'png' })]
+              children: [new ImageRun({ data: logoBytes, transformation: { width: 220, height: 76 }, type: 'png' })]
             })
           ]
         })
@@ -5586,14 +5588,48 @@ async function runReportDraft() {
         if (f.mimeType === 'application/vnd.google-apps.folder') return false;
         return /\.(pdf|png|jpe?g|tif?f|heic|heif|bmp|gif)$/i.test(f.name);
       });
-      // Pull page counts from the processed manifest (in the private work folder).
+      // Pull page counts from the processed manifest. For cases that pre-date
+      // the folder split (where _processed/ still sits inside the records
+      // folder), we also check the legacy location and merge the entries so
+      // page counts populate even before the user clicks Reorganize. Work-folder
+      // entries win on collision since they're the current write target.
       let processedEntries = {};
       try {
+        // (a) Current location — private _Internal work folder.
         const workId = await ensureWorkFolderId(caseInfo);
-        const cacheParent = workId || caseInfo.driveFolderId;
-        const pf = await ensureProcessedFolder(cacheParent);
-        const pm = await loadProcessedManifest(pf);
-        processedEntries = (pm && pm.entries) || {};
+        if (workId) {
+          try {
+            const pfWork = await ensureProcessedFolder(workId);
+            const pmWork = await loadProcessedManifest(pfWork);
+            Object.assign(processedEntries, (pmWork && pmWork.entries) || {});
+          } catch(_e) {}
+        }
+        // (b) Legacy location — _processed/ inside the records folder itself.
+        // Only merge in rows the work-folder manifest didn't already cover.
+        try {
+          const legacyQ = `'${caseInfo.driveFolderId}' in parents and name = '_processed' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
+          const legacyUrl = 'https://www.googleapis.com/drive/v3/files?q=' + encodeURIComponent(legacyQ) + '&fields=files(id,name)&pageSize=10';
+          const legacyRes = await fetch(legacyUrl, { headers: { Authorization: 'Bearer ' + _driveToken } });
+          if (legacyRes.ok) {
+            const legacyData = await legacyRes.json();
+            const legacyFolder = (legacyData.files || [])[0];
+            if (legacyFolder && legacyFolder.id) {
+              const pmLegacy = await loadProcessedManifest(legacyFolder.id);
+              const legacyEntries = (pmLegacy && pmLegacy.entries) || {};
+              for (const k of Object.keys(legacyEntries)) {
+                if (!processedEntries[k]) processedEntries[k] = legacyEntries[k];
+              }
+              // Kick off a best-effort migration in the background so the
+              // *next* report doesn't need this fallback. Don't await — we
+              // don't want to delay report generation if Drive is slow, and
+              // migrateProcessedCacheIntoWorkFolder is idempotent.
+              if (workId) {
+                migrateProcessedCacheIntoWorkFolder(caseInfo).catch(e =>
+                  console.warn('[report] background migration failed:', e));
+              }
+            }
+          }
+        } catch(_e) { /* legacy cache lookup is best-effort */ }
       } catch(_e) { /* no cache yet — pages will display as "—" */ }
       records.sort((a,b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
       const rows = records.map((f, i) => {
