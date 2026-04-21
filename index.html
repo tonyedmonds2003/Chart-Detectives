@@ -1129,8 +1129,8 @@ tr:hover td { background: var(--gray-50); }
 // Format: YYYY.MM.DD.N where N is the Nth change on that day (1-indexed).
 // APP_VERSION_LABEL is a human-readable caption shown on hover.
 // ============================================================================
-const APP_VERSION       = '2026.04.21.17';
-const APP_VERSION_LABEL = 'Apr 21, 2026 — Logo glass rebuilt to match the clean brand reference Tony sent. Heart is now an OUTLINE (not filled) sitting inside the circle, red EKG pulse crosses behind it, thick black ring (stroke=18) and thick diagonal handle (stroke=26). ViewBox widened from 750x300 to 1000x300 so the wordmark on the left no longer overlaps the magnifying glass on the right — "Legal Nurse Consulting" ends around x=630, circle leftmost edge is at x=740. Wired through topbar SVG (260x78), sidebar SVG (220x66), canonical LOGO_SVG_STRING, canvas rasterizer (1000*scale x 300*scale), and docx Header ImageRun (220x66).';
+const APP_VERSION       = '2026.04.21.18';
+const APP_VERSION_LABEL = 'Apr 21, 2026 — Expanded citation linkification to cover the "LABEL: filename" form the model now emits. Previous build only linked bare labels ([AM], [BC]) and DM tokens; pieces like [AM: Deer Meadows Records Combined.pdf], [B: 3 7 2023 bruise -2976685.pdf], and [AM: Deer Meadows 002667--002670] fell through to bold plain text. generateDocx\'s parseInline now matches a LABEL_PREFIX_RX pattern (^[A-Z]{1,2}\\s*:\\s*\\S) on each comma/semicolon piece, looks up the label in caseInfo.recordsLabelIndex, and hyperlinks the ENTIRE piece (including the filename) to the underlying Drive record file. Bare labels and BATES_TO_URL hits still take precedence; order in the if/else chain preserves existing behavior.';
 
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
 
@@ -1976,7 +1976,13 @@ async function generateDocx(title, content, patientName, caseId, caseRec) {
   // [W; X; Y; Z; AA] become real hyperlinks to the underlying record files
   // instead of plain-bold dead text. Shape: { 'A': { id, name }, ... }.
   const recordsLabelIndex = (caseRec && caseRec.recordsLabelIndex) || {};
-  const LABEL_RX = /^[A-Z]{1,2}$/; // one- or two-letter uppercase label
+  const LABEL_RX = /^[A-Z]{1,2}$/; // bare one- or two-letter uppercase label: [AM]
+  // "LABEL: descriptive text" citation form, e.g.:
+  //   [AM: Deer Meadows Records Combined.pdf]
+  //   [B: 3 7 2023 bruise -2976685.pdf]
+  //   [AM: Deer Meadows 002667--002670]
+  // The whole piece gets linkified to the record file identified by the label.
+  const LABEL_PREFIX_RX = /^([A-Z]{1,2})\s*:\s*\S/;
   const COMBINED_RECORDS_NAME_RX = /^combined[\s_-]*(facility)?[\s_-]*records?\b/i;
   let combinedUrl = '';
   for (const name of Object.keys(driveFileIndex)) {
@@ -2044,10 +2050,20 @@ async function generateDocx(title, content, patientName, caseId, caseRec) {
           // hyphen/en-dash range ("DM000910–DM000913"), and whitespace.
           // (Comma-lists are now handled by the top-level split above.)
           const isDM = /^DM\d/i.test(trimmed) && /^[\sDM\d\-\u2013\u2014]+$/i.test(trimmed);
+          // "AM: Deer Meadows Records Combined.pdf" or "B: 3 7 2023 bruise .pdf":
+          // the piece carries its own label prefix, and we linkify the entire
+          // piece to the file the label points at. Checked AFTER the bare-label
+          // and BATES_TO_URL cases so exact matches still take precedence.
+          const prefixMatch = trimmed.match(LABEL_PREFIX_RX);
+          const prefixHit = prefixMatch ? recordsLabelIndex[prefixMatch[1]] : null;
           if (fid) runs.push(hyperlinkRun(part, batesToDriveUrl(fid), baseOpts));
           else if (LABEL_RX.test(trimmed) && labelHit && labelHit.id) {
             // Row label like [AM] or [BC] — link straight to the source record.
             runs.push(hyperlinkRun(part, batesToDriveUrl(labelHit.id), baseOpts));
+          }
+          else if (prefixHit && prefixHit.id) {
+            // "LABEL: filename ..." — link the whole piece to the labeled record.
+            runs.push(hyperlinkRun(part, batesToDriveUrl(prefixHit.id), baseOpts));
           }
           else if (isDM && combinedUrl) runs.push(hyperlinkRun(part, combinedUrl, baseOpts));
           else runs.push(makeRun(part, Object.assign({}, baseOpts, { bold: true })));
