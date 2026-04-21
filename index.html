@@ -526,6 +526,12 @@ tr:hover td { background: var(--gray-50); }
         <label class="form-label">Case</label>
         <select class="form-control" id="rep-case-select"><option value="">— choose a case —</option></select>
       </div>
+      <div class="form-group" style="background:var(--gray-50);padding:10px;border-radius:var(--radius-sm);border:1px solid var(--gray-200);">
+        <label class="form-label" style="margin-bottom:6px;">Case links &amp; caption</label>
+        <div id="rep-case-links">
+          <div style="color:var(--gray-400);font-size:12px;">Pick a case to configure its links.</div>
+        </div>
+      </div>
       <div class="form-group">
         <label class="form-label">Report type</label>
         <select class="form-control" id="rep-type">
@@ -1113,8 +1119,8 @@ tr:hover td { background: var(--gray-50); }
 // Format: YYYY.MM.DD.N where N is the Nth change on that day (1-indexed).
 // APP_VERSION_LABEL is a human-readable caption shown on hover.
 // ============================================================================
-const APP_VERSION       = '2026.04.21.4';
-const APP_VERSION_LABEL = 'Apr 21, 2026 — refusal-contagion fix: quarantine rule + max_tokens 64k + JS detector';
+const APP_VERSION       = '2026.04.21.5';
+const APP_VERSION_LABEL = 'Apr 21, 2026 — report format polish: real firm address/caption, Boynton-style cover, DM###### combined-records link, footer with page numbers';
 
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
 
@@ -1705,12 +1711,16 @@ function batesToDriveUrl(fileId) {
 }
 
 // ===== DOCX GENERATION =====
-async function generateDocx(title, content, patientName, caseId) {
+// `caseRec` (optional) is the full case record so we can read combinedRecordsUrl
+// for [DM######] tokens and display the case caption in the footer. Callers may
+// pass a partial object or nothing — the code guards against undefined.
+async function generateDocx(title, content, patientName, caseId, caseRec) {
   // Defensive load check — surface a clear error if the docx library failed to load (CDN blocked, offline, etc.)
   if (!window.docx || !window.docx.Document) {
     throw new Error('Word document library failed to load. Check your internet connection and refresh the page.');
   }
-  const { Document, Packer, Paragraph, TextRun, ExternalHyperlink, ImageRun, Header, AlignmentType,
+  const { Document, Packer, Paragraph, TextRun, ExternalHyperlink, ImageRun, Header, Footer,
+    PageNumber, AlignmentType, TabStopType, TabStopPosition,
     BorderStyle, HeadingLevel, LevelFormat, UnderlineType, WidthType, ShadingType, TableRow,
     TableCell, Table } = window.docx;
 
@@ -1718,6 +1728,13 @@ async function generateDocx(title, content, patientName, caseId) {
   const GOLD = 'c9a84c';
   const RED = 'cc2222';
   const LINK = '0563C1';
+
+  // If a full case record wasn't passed in, look it up by caseId so existing
+  // callers still pick up combinedRecordsUrl without changing their signatures.
+  if (!caseRec && caseId && typeof state !== 'undefined' && state && state.cases) {
+    caseRec = state.cases.find(x => x.id === caseId) || null;
+  }
+  const combinedUrl = (caseRec && caseRec.combinedRecordsUrl) ? String(caseRec.combinedRecordsUrl).trim() : '';
 
   // ---------- Inline helpers ----------
   function makeRun(text, opts) {
@@ -1750,7 +1767,13 @@ async function generateDocx(title, content, patientName, caseId) {
         parts.forEach((part, idx) => {
           if (idx > 0) runs.push(makeRun('; ', Object.assign({}, baseOpts, { bold: true })));
           const fid = BATES_TO_URL[part];
+          // Any [DM######] or [DM######-DM######] bates token routes to the
+          // case's combined facility records Drive file, if one is set. This
+          // keeps her citations clickable even when the records weren't
+          // uploaded as individually-named PDFs.
+          const isDM = /^DM\d{3,}(?:\s*[-–]\s*DM\d{3,})?$/i.test(part);
           if (fid) runs.push(hyperlinkRun(part, batesToDriveUrl(fid), baseOpts));
+          else if (isDM && combinedUrl) runs.push(hyperlinkRun(part, combinedUrl, baseOpts));
           else runs.push(makeRun(part, Object.assign({}, baseOpts, { bold: true })));
         });
         runs.push(makeRun(']', Object.assign({}, baseOpts, { bold: true })));
@@ -1825,26 +1848,33 @@ async function generateDocx(title, content, patientName, caseId) {
       continue;
     }
 
-    // H1 — explicit "# " or pure ALL-CAPS short line
+    // Horizontal-rule lines like "---" or "***" are markdown separators; they
+    // mean nothing in Word output and render as literal text if we don't skip
+    // them. Drop silently (the surrounding blank lines already provide spacing).
+    if (/^[-*_]{3,}$/.test(trimmed)) continue;
+
+    // H1 — explicit "# " or pure ALL-CAPS short line. Black, bold, underlined,
+    // no colored border — matches the Boynton reference format.
     if (trimmed.startsWith('# ') || (trimmed === trimmed.toUpperCase() && trimmed.length > 3 && trimmed.length < 80 && /[A-Z]/.test(trimmed))) {
       children.push(new Paragraph({
         spacing: { before: 320, after: 120 },
-        border: { bottom: { style: BorderStyle.SINGLE, size: 6, color: NAVY, space: 4 } },
-        children: parseInline(trimmed.replace(/^#+\s*/, ''), { bold: true, size: 28, color: NAVY })
+        children: parseInline(trimmed.replace(/^#+\s*/, ''), {
+          bold: true, size: 28, color: '000000', underline: { type: UnderlineType.SINGLE }
+        })
       }));
     }
-    // H2
+    // H2 — black bold, slightly smaller than H1
     else if (trimmed.startsWith('## ')) {
       children.push(new Paragraph({
         spacing: { before: 240, after: 80 },
-        children: parseInline(trimmed.replace(/^#+\s*/, ''), { bold: true, size: 24, color: NAVY })
+        children: parseInline(trimmed.replace(/^#+\s*/, ''), { bold: true, size: 24, color: '000000' })
       }));
     }
-    // H3
+    // H3 — black bold
     else if (trimmed.startsWith('### ')) {
       children.push(new Paragraph({
         spacing: { before: 160, after: 60 },
-        children: parseInline(trimmed.replace(/^#+\s*/, ''), { bold: true, size: 22, color: RED })
+        children: parseInline(trimmed.replace(/^#+\s*/, ''), { bold: true, size: 22, color: '000000' })
       }));
     }
     // Top-level bullet
@@ -1910,35 +1940,34 @@ async function generateDocx(title, content, patientName, caseId) {
           ]
         })
       },
+      // Footer mirrors the Boynton reference: patient name + "Nurse Review"
+      // on the left, "Page X of Y" on the right, separated by a right-aligned
+      // tab stop so it renders cleanly at any page width.
+      footers: {
+        default: new Footer({
+          children: [
+            new Paragraph({
+              tabStops: [{ type: TabStopType.RIGHT, position: TabStopPosition.MAX }],
+              spacing: { before: 0, after: 0 },
+              children: [
+                new TextRun({
+                  text: (patientName ? patientName + ' – ' : '') + 'Nurse Review',
+                  size: 18, color: '666666', font: 'Arial'
+                }),
+                new TextRun({ children: ['\t'], size: 18, color: '666666', font: 'Arial' }),
+                new TextRun({ children: ['Page ', PageNumber.CURRENT], size: 18, color: '666666', font: 'Arial' }),
+                new TextRun({ children: [' of ', PageNumber.TOTAL_PAGES], size: 18, color: '666666', font: 'Arial' })
+              ]
+            })
+          ]
+        })
+      },
+      // No cover page — the report body (now rendered straight from the
+      // markdown) carries its own title, byline, attorney address block and
+      // "Re:" line, matching the Boynton reference format. This avoids the
+      // old duplicate-title effect where a colored cover was followed by a
+      // second H1 "# Comprehensive Nurse Review".
       children: [
-        // Cover
-        new Paragraph({ spacing: { before: 480, after: 0 }, children: [] }),
-        new Paragraph({
-          alignment: AlignmentType.CENTER,
-          spacing: { before: 0, after: 160 },
-          children: [new TextRun({ text: title, bold: true, size: 40, color: NAVY, font: 'Arial' })]
-        }),
-        new Paragraph({
-          alignment: AlignmentType.CENTER,
-          spacing: { before: 0, after: 80 },
-          children: [new TextRun({ text: 'Deborah J Edmonds BSN, RN, LNHA, GERO-BC', size: 24, color: GOLD, font: 'Arial', italics: true })]
-        }),
-        new Paragraph({
-          alignment: AlignmentType.CENTER,
-          spacing: { before: 0, after: 80 },
-          children: [new TextRun({ text: 'Chart Detectives Legal Nurse Consulting, LLC', size: 22, color: '555555', font: 'Arial' })]
-        }),
-        new Paragraph({
-          alignment: AlignmentType.CENTER,
-          spacing: { before: 0, after: 80 },
-          children: [new TextRun({ text: new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }), size: 22, color: '777777', font: 'Arial' })]
-        }),
-        new Paragraph({
-          alignment: AlignmentType.CENTER,
-          border: { bottom: { style: BorderStyle.SINGLE, size: 8, color: RED, space: 8 } },
-          spacing: { before: 0, after: 480 },
-          children: [new TextRun({ text: patientName ? 'Re: ' + patientName.toUpperCase() : '', bold: true, size: 24, color: NAVY, font: 'Arial' })]
-        }),
         ...children
       ]
     }]
@@ -1948,9 +1977,9 @@ async function generateDocx(title, content, patientName, caseId) {
   return blob;
 }
 
-async function downloadDocx(title, content, patientName, caseId) {
+async function downloadDocx(title, content, patientName, caseId, caseRec) {
   try {
-    const blob = await generateDocx(title, content, patientName, caseId);
+    const blob = await generateDocx(title, content, patientName, caseId, caseRec);
     const filename = (patientName || 'LNC_Report').replace(/[^a-z0-9]/gi, '_') + '_' + new Date().toISOString().split('T')[0] + '.docx';
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -2479,6 +2508,15 @@ function saveCase() {
     deadline: document.getElementById('new-deadline').value,
     rate: parseFloat(document.getElementById('new-rate').value) || 150,
     notes: document.getElementById('new-notes').value.trim(),
+    // caseCaption: full styled caption used in the report's "Re:" line
+    // (e.g. "KATHLEEN MIMM, on behalf of the Estate of..."). Populated from
+    // the Report Builder setter; falls back to patient name if empty.
+    caseCaption: '',
+    // combinedRecordsUrl: Drive URL for a single combined facility-records PDF.
+    // Any [DM######] or [DM######-DM######] bates token in the final report
+    // will link here, so citations stay clickable even when the records
+    // weren't uploaded as individually-named files.
+    combinedRecordsUrl: '',
     status: 'active', created: new Date().toISOString()
   };
   state.cases.push(c); save();
@@ -2513,6 +2551,72 @@ function clearCaseForm() {
 function updateCaseStatus(caseId, status) {
   const c = state.cases.find(x => x.id === caseId);
   if (c) { c.status = status; save(); renderCases(); renderDashboard(); updateActiveCaseBadge(); }
+}
+
+// ----- Case link + caption setters (used from Report Builder UI) -----
+// Deliberately kept as prompt() dialogs so a setting change is one click, not
+// a whole modal+form round-trip. The values just land on the case record.
+function promptSetCombinedRecords(caseId) {
+  const c = state.cases.find(x => x.id === caseId);
+  if (!c) { alert('Pick a case first.'); return; }
+  const cur = c.combinedRecordsUrl || '';
+  const next = prompt(
+    'Paste the Google Drive share URL for the combined facility records file.\n\n' +
+    'Any [DM######] or [DM######-DM######] citation in the report will link to this URL.\n\n' +
+    'Leave blank to clear.',
+    cur
+  );
+  if (next === null) return; // user cancelled
+  c.combinedRecordsUrl = next.trim();
+  save();
+  renderReportCaseLinks(caseId);
+  showToast(c.combinedRecordsUrl ? '✓ Combined records link saved.' : '✓ Combined records link cleared.');
+}
+
+function promptSetCaseCaption(caseId) {
+  const c = state.cases.find(x => x.id === caseId);
+  if (!c) { alert('Pick a case first.'); return; }
+  const cur = c.caseCaption || '';
+  const next = prompt(
+    'Enter the full case caption as it should appear on the "Re:" line of the report.\n\n' +
+    'Example:  KATHLEEN MIMM, on behalf of the Estate of JOHN MIMM, v. DEER MEADOWS LTC\n\n' +
+    'Leave blank to use the patient name as a fallback.',
+    cur
+  );
+  if (next === null) return;
+  c.caseCaption = next.trim();
+  save();
+  renderReportCaseLinks(caseId);
+  showToast(c.caseCaption ? '✓ Case caption saved.' : '✓ Case caption cleared.');
+}
+
+// Renders the current combined-records URL + case caption status for the
+// selected case into the "Case links" card on the Report Builder page.
+function renderReportCaseLinks(caseId) {
+  const host = document.getElementById('rep-case-links');
+  if (!host) return;
+  const c = caseId ? state.cases.find(x => x.id === caseId) : null;
+  if (!c) {
+    host.innerHTML = '<div style="color:var(--gray-400);font-size:12px;">Pick a case to configure its links.</div>';
+    return;
+  }
+  const url = c.combinedRecordsUrl ? esc(c.combinedRecordsUrl) : '';
+  const cap = c.caseCaption ? esc(c.caseCaption) : '';
+  host.innerHTML =
+    '<div style="font-size:12px;line-height:1.5;">' +
+      '<div style="margin-bottom:6px;"><strong>Combined records URL:</strong><br>' +
+        (url ? '<a href="'+url+'" target="_blank" rel="noopener" style="word-break:break-all;">'+url+'</a>' :
+               '<span style="color:var(--gray-400);">not set — [DM######] citations won\'t be clickable</span>') +
+      '</div>' +
+      '<div style="margin-bottom:8px;"><strong>Case caption:</strong><br>' +
+        (cap ? '<span style="font-family:Georgia,serif;">'+cap+'</span>' :
+               '<span style="color:var(--gray-400);">not set — "Re:" will fall back to patient name</span>') +
+      '</div>' +
+      '<div style="display:flex;gap:6px;flex-wrap:wrap;">' +
+        '<button class="btn btn-outline btn-sm" onclick="promptSetCombinedRecords(\''+esc(c.id)+'\')">Set records link</button>' +
+        '<button class="btn btn-outline btn-sm" onclick="promptSetCaseCaption(\''+esc(c.id)+'\')">Set case caption</button>' +
+      '</div>' +
+    '</div>';
 }
 
 function deleteCase(caseId) {
@@ -4884,7 +4988,7 @@ async function generateFinalReport(caseInfo, bodyEl, triggerBtn) {
     // with the review section still attached.
     text = text.replace(/={3,}\s*INTERNAL QUALITY REVIEW[\s\S]*$/i, '').trim();
     const title = 'Medical Chronology — ' + (c.patient || 'Unnamed case');
-    await generateDocx(title, text, c.patient || '', c.id || '');
+    await generateDocx(title, text, c.patient || '', c.id || '', c);
     // Stamp the finalized version on the case so we know when a deliverable was produced.
     c.finalizedReport = text;
     c.finalizedReportAt = new Date().toISOString();
@@ -5113,6 +5217,40 @@ async function runReportDraft() {
   }
 
   const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+
+  // ---- Resolve real firm + attorney contact data so we can hard-code the
+  // cover/letterhead block in the prompt. This prevents Claude from inventing
+  // placeholders like "[Address line 1]" / "[Phone]" when the real details
+  // are sitting right on the case record.
+  const firmRec = caseInfo && caseInfo.firmId ? state.firms.find(f => f.id === caseInfo.firmId) : null;
+  const attyRec = caseInfo && caseInfo.attorneyId ? state.attorneys.find(a => a.id === caseInfo.attorneyId) : null;
+  const attyName = attyRec
+    ? (((attyRec.firstName||'') + ' ' + (attyRec.lastName||'')).trim() || (caseInfo && caseInfo.attorney) || '')
+    : ((caseInfo && caseInfo.attorney) || '');
+  const firmName = firmRec ? (firmRec.name || '') : ((caseInfo && caseInfo.firm) || '');
+  const firmStreet = firmRec ? (firmRec.street || '') : '';
+  const firmCityLine = firmRec
+    ? [firmRec.city, firmRec.state].filter(Boolean).join(', ') + (firmRec.zip ? ' ' + firmRec.zip : '')
+    : '';
+  const firmPhone = firmRec ? (firmRec.phone || '') : '';
+
+  // Build the letterhead block once, skipping any empty lines so we never emit
+  // blank "[Address line 2]" placeholders. If no firm is set we fall back to
+  // the free-text attorney/firm strings from the case record.
+  const letterheadLines = [];
+  if (attyName) letterheadLines.push(attyName + ', Esq.');
+  if (firmName) letterheadLines.push('**' + firmName + '**');
+  if (firmStreet) letterheadLines.push(firmStreet);
+  if (firmCityLine.trim()) letterheadLines.push(firmCityLine.trim());
+  if (firmPhone) letterheadLines.push(firmPhone);
+  const letterhead = letterheadLines.join('\n');
+
+  // Case caption: prefer the explicit caseCaption field the user set via the
+  // "Set case caption" button; otherwise fall back to an all-caps patient name.
+  const captionRaw = (caseInfo && caseInfo.caseCaption && caseInfo.caseCaption.trim())
+    ? caseInfo.caseCaption.trim()
+    : ((caseInfo && caseInfo.patient) ? caseInfo.patient.toUpperCase() : '');
+
   const prompt = `You are Deborah J Edmonds BSN, RN, LNHA, GERO-BC — a legal nurse consultant with over 35 years of healthcare experience encompassing long-term care, sub-acute rehab, medical-surgical and neurological/orthopedic nursing, operating room settings, and nursing leadership and administration. Your business is Chart Detectives Legal Nurse Consulting, LLC.
 
 You are drafting a ${typeLabels[type] || 'Comprehensive Nurse Review'} for an attorney. Use EXACTLY the structure, tone, and style described below.
@@ -5123,6 +5261,9 @@ KEY FINDINGS: ${findings}
 PROFESSIONAL OPINION: ${opinion || '[to be completed by Debbie]'}
 AUDIENCE NOTES: ${audience || 'Standard LNC report for plaintiff attorney review'}
 ${styleNote ? 'STYLE REFERENCE: ' + styleNote : ''}
+
+ABSOLUTE RULE — NO INVENTED DETAILS
+Do NOT invent or insert bracket placeholders like "[University]", "[other states]", "[Address line 1]", "[Phone]", or a made-up case caption. Use ONLY the letterhead block and case caption provided below, exactly as written. If a piece of information is not provided, omit that line entirely — never substitute a placeholder.
 
 OUTPUT FORMAT — STRICT MARKDOWN RULES
 The report will be parsed and converted to a Word document. You MUST use the following markdown conventions precisely; they are the only way headings, bullets, tables and hyperlinks render correctly.
@@ -5146,16 +5287,12 @@ Deborah J Edmonds BSN, RN, LNHA, GERO-BC
 
 ${today}
 
-[Attorney Name], Esq.
-**[Law Firm Name]**
-[Address line 1]
-[Address line 2]
-[Phone]
+${letterhead}
 
-Re: [FULL CASE CAPTION IN ALL CAPS — use patient name from case info]
+Re: ${captionRaw}
 
 # Introduction
-Write 2–3 sentences establishing qualifications: 35+ years diverse healthcare experience encompassing long-term care, sub-acute rehab, medical-surgical and neurological/orthopedic nursing, operating room settings, and nursing leadership and administration; BSN and geriatric nursing certification; full-time legal nurse consultant with active RN and Nursing Home Administrator licenses in Michigan.
+Write 2–3 sentences establishing qualifications. Mention 35+ years of diverse healthcare experience (long-term care, sub-acute rehab, medical-surgical and neurological/orthopedic nursing, operating room settings, and nursing leadership and administration), a BSN and a geriatric nursing certification, and that she is a full-time legal nurse consultant with active RN and Nursing Home Administrator licenses in Michigan. Do NOT add any details that are not in this list — in particular, do not name a specific university, do not list specific hospitals or facilities by name, and do not add other states beyond Michigan.
 
 # Brief Chronology
 Bullet list ("• ") of facility/hospital/care transitions with date ranges, based on the findings provided. End with "• Death: [date]" if applicable.
@@ -5233,7 +5370,7 @@ Write the complete report in a single response. Be thorough and exhaustive — t
     // Auto-generate Word doc
     const repPatient = caseInfo ? caseInfo.patient : 'Unknown Patient';
     const repTitle = typeLabels[type] || 'Comprehensive Nurse Review';
-    await downloadDocx(repTitle, res, repPatient, caseId);
+    await downloadDocx(repTitle, res, repPatient, caseId, caseInfo);
   } catch(e) {
     area.innerHTML = `<div class="alert alert-danger">Error: ${esc(e.message)}</div>`;
   }
@@ -5945,6 +6082,9 @@ uz.addEventListener('drop', e => { e.preventDefault(); uz.classList.remove('drag
   if (!sel) return;
   sel.addEventListener('change', () => {
     const caseId = sel.value;
+    // Always refresh the Case links card, even when the user picks the
+    // blank option — that way the "Pick a case" placeholder shows back up.
+    if (typeof renderReportCaseLinks === 'function') renderReportCaseLinks(caseId);
     if (!caseId) return;
     const c = state.cases.find(x => x.id === caseId);
     if (!c) return;
