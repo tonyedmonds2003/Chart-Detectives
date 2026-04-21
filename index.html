@@ -1119,8 +1119,8 @@ tr:hover td { background: var(--gray-50); }
 // Format: YYYY.MM.DD.N where N is the Nth change on that day (1-indexed).
 // APP_VERSION_LABEL is a human-readable caption shown on hover.
 // ============================================================================
-const APP_VERSION       = '2026.04.21.5';
-const APP_VERSION_LABEL = 'Apr 21, 2026 — report format polish: real firm address/caption, Boynton-style cover, DM###### combined-records link, footer with page numbers';
+const APP_VERSION       = '2026.04.21.6';
+const APP_VERSION_LABEL = 'Apr 21, 2026 — [DM######] auto-resolves via filename convention; case folders auto-share as "anyone with link — viewer" so attorney links in the .docx just work';
 
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
 
@@ -1557,6 +1557,49 @@ async function driveMoveFile(fileId, newParentId) {
   return res.json();
 }
 
+// Ensure a file/folder is shared as "Anyone with the link — Viewer" so links
+// embedded in the generated .docx actually resolve for attorneys/paralegals
+// who receive the report. Idempotent: if the permission already exists Drive
+// returns 400 "cannotAddPermission" or similar — we swallow that and treat
+// it as success rather than failing the whole case-creation flow.
+async function driveShareAnyoneReader(fileOrFolderId) {
+  if (!_driveToken) await driveSignIn(false);
+  if (!fileOrFolderId) return { ok: false, reason: 'no id' };
+  try {
+    // First, check whether an "anyone/reader" permission already exists so
+    // we don't spam the API on every re-run. Cheap GET, ignores errors.
+    const listRes = await fetch(
+      'https://www.googleapis.com/drive/v3/files/' + fileOrFolderId + '/permissions?fields=permissions(id,type,role)',
+      { headers: { Authorization: 'Bearer ' + _driveToken } }
+    );
+    if (listRes.ok) {
+      const listData = await listRes.json();
+      const already = (listData.permissions || []).find(p => p.type === 'anyone' && (p.role === 'reader' || p.role === 'writer' || p.role === 'commenter'));
+      if (already) return { ok: true, alreadyShared: true };
+    }
+    const res = await fetch(
+      'https://www.googleapis.com/drive/v3/files/' + fileOrFolderId + '/permissions?fields=id',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer ' + _driveToken,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ role: 'reader', type: 'anyone' })
+      }
+    );
+    if (!res.ok) {
+      const txt = await res.text();
+      console.warn('[drive] share-anyone-reader failed for', fileOrFolderId, res.status, txt);
+      return { ok: false, status: res.status, body: txt };
+    }
+    return { ok: true, alreadyShared: false };
+  } catch (e) {
+    console.warn('[drive] share-anyone-reader threw:', e);
+    return { ok: false, error: String(e && e.message || e) };
+  }
+}
+
 // ===== HIERARCHY BUILDER =====
 // Walks Root → Firm → Attorney → Case, creating folders as needed. Returns the case folder id.
 // Guardrails: needs a root, needs a firm record, needs an attorney record. Missing pieces
@@ -1576,6 +1619,16 @@ async function ensureCaseHierarchy(caseInfo) {
   }
   const caseFolderName = ((caseInfo.patient || 'Untitled') + ' — ' + (caseInfo.id || '')).trim().replace(/ — $/,'');
   const caseFolder = await driveFindOrCreateFolder(parentId, caseFolderName);
+  // Set the case folder (and everything inside it, by inheritance) to be
+  // viewable by anyone with the link. This is what makes the [citation]
+  // hyperlinks in the generated .docx actually open for the attorney and
+  // paralegals who receive the report — without this, Drive returns a
+  // "You need access" page. Non-fatal if it fails (e.g. org policy blocks
+  // link sharing) — Debbie can still share manually.
+  const share = await driveShareAnyoneReader(caseFolder.id);
+  if (!share.ok) {
+    console.warn('[drive] case folder link-sharing could not be enabled automatically:', share);
+  }
   return caseFolder;
 }
 
@@ -1730,11 +1783,26 @@ async function generateDocx(title, content, patientName, caseId, caseRec) {
   const LINK = '0563C1';
 
   // If a full case record wasn't passed in, look it up by caseId so existing
-  // callers still pick up combinedRecordsUrl without changing their signatures.
+  // callers still pick up driveFileIndex without changing their signatures.
   if (!caseRec && caseId && typeof state !== 'undefined' && state && state.cases) {
     caseRec = state.cases.find(x => x.id === caseId) || null;
   }
-  const combinedUrl = (caseRec && caseRec.combinedRecordsUrl) ? String(caseRec.combinedRecordsUrl).trim() : '';
+  // Resolve the "combined facility records" PDF by convention: scan the case's
+  // driveFileIndex for the first filename that matches a combined-records
+  // pattern. Debbie just has to name the file something like
+  // "Combined Records.pdf" and drop it in the case folder — the app picks it
+  // up automatically when she hits "Load files from case folder", so no
+  // manual URL paste is needed (and it works on every computer that opens
+  // the generated .docx since the link is baked into the Word doc itself).
+  const driveFileIndex = (caseRec && caseRec.driveFileIndex) || {};
+  const COMBINED_RECORDS_NAME_RX = /^combined[\s_-]*(facility)?[\s_-]*records?\b/i;
+  let combinedUrl = '';
+  for (const name of Object.keys(driveFileIndex)) {
+    if (COMBINED_RECORDS_NAME_RX.test(name)) { combinedUrl = driveFileIndex[name]; break; }
+  }
+  // Back-compat: if an explicit combinedRecordsUrl was ever set on the case
+  // record (older builds supported this), honor it as an override.
+  if (caseRec && caseRec.combinedRecordsUrl) combinedUrl = String(caseRec.combinedRecordsUrl).trim();
 
   // ---------- Inline helpers ----------
   function makeRun(text, opts) {
@@ -2512,11 +2580,6 @@ function saveCase() {
     // (e.g. "KATHLEEN MIMM, on behalf of the Estate of..."). Populated from
     // the Report Builder setter; falls back to patient name if empty.
     caseCaption: '',
-    // combinedRecordsUrl: Drive URL for a single combined facility-records PDF.
-    // Any [DM######] or [DM######-DM######] bates token in the final report
-    // will link here, so citations stay clickable even when the records
-    // weren't uploaded as individually-named files.
-    combinedRecordsUrl: '',
     status: 'active', created: new Date().toISOString()
   };
   state.cases.push(c); save();
@@ -2553,26 +2616,11 @@ function updateCaseStatus(caseId, status) {
   if (c) { c.status = status; save(); renderCases(); renderDashboard(); updateActiveCaseBadge(); }
 }
 
-// ----- Case link + caption setters (used from Report Builder UI) -----
-// Deliberately kept as prompt() dialogs so a setting change is one click, not
-// a whole modal+form round-trip. The values just land on the case record.
-function promptSetCombinedRecords(caseId) {
-  const c = state.cases.find(x => x.id === caseId);
-  if (!c) { alert('Pick a case first.'); return; }
-  const cur = c.combinedRecordsUrl || '';
-  const next = prompt(
-    'Paste the Google Drive share URL for the combined facility records file.\n\n' +
-    'Any [DM######] or [DM######-DM######] citation in the report will link to this URL.\n\n' +
-    'Leave blank to clear.',
-    cur
-  );
-  if (next === null) return; // user cancelled
-  c.combinedRecordsUrl = next.trim();
-  save();
-  renderReportCaseLinks(caseId);
-  showToast(c.combinedRecordsUrl ? '✓ Combined records link saved.' : '✓ Combined records link cleared.');
-}
-
+// ----- Case caption setter (used from Report Builder UI) -----
+// Deliberately kept as a prompt() dialog so a setting change is one click,
+// not a whole modal+form round-trip. Records linking is NOT set here — the
+// app auto-discovers a file named "Combined Records.pdf" (or similar) in
+// the case's Drive folder via the existing driveFileIndex scan.
 function promptSetCaseCaption(caseId) {
   const c = state.cases.find(x => x.id === caseId);
   if (!c) { alert('Pick a case first.'); return; }
@@ -2590,30 +2638,39 @@ function promptSetCaseCaption(caseId) {
   showToast(c.caseCaption ? '✓ Case caption saved.' : '✓ Case caption cleared.');
 }
 
-// Renders the current combined-records URL + case caption status for the
-// selected case into the "Case links" card on the Report Builder page.
+// Renders the "Case links" card on the Report Builder page: status of the
+// combined-facility-records auto-detection (read-only — Debbie controls this
+// by what she names the file in Drive) plus the editable case caption.
 function renderReportCaseLinks(caseId) {
   const host = document.getElementById('rep-case-links');
   if (!host) return;
   const c = caseId ? state.cases.find(x => x.id === caseId) : null;
   if (!c) {
-    host.innerHTML = '<div style="color:var(--gray-400);font-size:12px;">Pick a case to configure its links.</div>';
+    host.innerHTML = '<div style="color:var(--gray-400);font-size:12px;">Pick a case to see its links.</div>';
     return;
   }
-  const url = c.combinedRecordsUrl ? esc(c.combinedRecordsUrl) : '';
+  // Scan the case's driveFileIndex for a combined-records match.
+  const idx = c.driveFileIndex || {};
+  const rx = /^combined[\s_-]*(facility)?[\s_-]*records?\b/i;
+  let detectedName = '', detectedUrl = '';
+  for (const name of Object.keys(idx)) {
+    if (rx.test(name)) { detectedName = name; detectedUrl = idx[name]; break; }
+  }
   const cap = c.caseCaption ? esc(c.caseCaption) : '';
   host.innerHTML =
     '<div style="font-size:12px;line-height:1.5;">' +
-      '<div style="margin-bottom:6px;"><strong>Combined records URL:</strong><br>' +
-        (url ? '<a href="'+url+'" target="_blank" rel="noopener" style="word-break:break-all;">'+url+'</a>' :
-               '<span style="color:var(--gray-400);">not set — [DM######] citations won\'t be clickable</span>') +
+      '<div style="margin-bottom:8px;"><strong>Combined records file:</strong><br>' +
+        (detectedUrl
+          ? '✓ <a href="'+esc(detectedUrl)+'" target="_blank" rel="noopener">'+esc(detectedName)+'</a> '
+            + '<span style="color:var(--gray-400);">(auto-detected in case folder)</span>'
+          : '<span style="color:var(--gray-400);">not found. Drop a file named <b>Combined Records.pdf</b> (or <i>Combined Facility Records.pdf</i>) in this case\'s Drive folder, then click <b>Load files from case folder</b> on the Record Analysis page. [DM######] citations will link to it automatically.</span>'
+        ) +
       '</div>' +
       '<div style="margin-bottom:8px;"><strong>Case caption:</strong><br>' +
         (cap ? '<span style="font-family:Georgia,serif;">'+cap+'</span>' :
                '<span style="color:var(--gray-400);">not set — "Re:" will fall back to patient name</span>') +
       '</div>' +
       '<div style="display:flex;gap:6px;flex-wrap:wrap;">' +
-        '<button class="btn btn-outline btn-sm" onclick="promptSetCombinedRecords(\''+esc(c.id)+'\')">Set records link</button>' +
         '<button class="btn btn-outline btn-sm" onclick="promptSetCaseCaption(\''+esc(c.id)+'\')">Set case caption</button>' +
       '</div>' +
     '</div>';
@@ -2680,7 +2737,14 @@ async function connectCaseFolder(caseId) {
     c.driveFolderName = picked.name;
     save();
     renderCases();
-    showToast('📁 Linked ' + picked.name + ' to ' + c.patient);
+    // Flip link-sharing on for the picked folder too — same reason as
+    // ensureCaseHierarchy: the .docx links need to resolve for recipients.
+    const share = await driveShareAnyoneReader(picked.id);
+    if (share.ok) {
+      showToast('📁 Linked ' + picked.name + ' to ' + c.patient + ' — view-only sharing enabled');
+    } else {
+      showToast('📁 Linked ' + picked.name + ' to ' + c.patient + ' (share manually — auto-share failed)');
+    }
   } catch (e) {
     alert('Could not open Drive picker: ' + e.message);
   }
@@ -3205,6 +3269,15 @@ async function loadCaseDriveFiles() {
     }
     save();
     renderDriveFileList();
+    // Backfill: flip the folder to "anyone with the link — viewer" if it
+    // isn't already. Newly-created folders get this in ensureCaseHierarchy,
+    // but pre-existing folders from older app versions miss it. This is a
+    // no-op if the permission already exists.
+    driveShareAnyoneReader(c.driveFolderId).then(r => {
+      if (r && r.ok && !r.alreadyShared) {
+        showToast('🔗 Case folder set to view-only shareable.');
+      }
+    }).catch(e => console.warn('[drive] backfill share failed:', e));
   } catch (e) {
     listEl.innerHTML = '<div class="alert alert-danger">Could not list Drive folder: ' + esc(e.message) + '</div>';
   }
