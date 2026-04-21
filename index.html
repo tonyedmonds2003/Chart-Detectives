@@ -1119,8 +1119,8 @@ tr:hover td { background: var(--gray-50); }
 // Format: YYYY.MM.DD.N where N is the Nth change on that day (1-indexed).
 // APP_VERSION_LABEL is a human-readable caption shown on hover.
 // ============================================================================
-const APP_VERSION       = '2026.04.21.8';
-const APP_VERSION_LABEL = 'Apr 21, 2026 — [DM######] citations now fall back to the case\'s Drive folder URL automatically. Zero per-case setup: load records into the folder and DM links just work.';
+const APP_VERSION       = '2026.04.21.9';
+const APP_VERSION_LABEL = 'Apr 21, 2026 — Report Builder now gets a 64k-token output budget (was 12k), so full 40–70 page LNC reports no longer truncate mid-Opinion. Previous build cut off at "the facility ordered Voltaren".';
 
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
 
@@ -5451,7 +5451,16 @@ Write the complete report in a single response. Be thorough and exhaustive — t
   document.getElementById('export-rep-btn').style.display = 'none';
 
   try {
-    const res = await callClaude(prompt);
+    // maxTokens: 64000 — the report prompt explicitly asks for "40–70 pages"
+    // of prose with full section coverage (Introduction, Brief Chronology, Injury
+    // Analysis, Deviations, Records Reviewed, Chronology, Medical History,
+    // History of Illness, Opinion, signature block). The default 12000-token
+    // budget was cutting off mid-Opinion — e.g. the Apr 21 Mimm report stopped
+    // at "the facility ordered Voltaren" with no Deviations/Records-Reviewed
+    // sections and no signature block. 64k matches the synthesis budget and
+    // comfortably holds a full clinical report. Streaming (default in
+    // callClaude) keeps us clear of Cloudflare's 100s subrequest timeout.
+    const res = await callClaude(prompt, { maxTokens: 64000 });
     area.style.display = 'none';
     ta.value = res;
     ta.style.display = 'block';
