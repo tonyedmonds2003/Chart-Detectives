@@ -1113,8 +1113,8 @@ tr:hover td { background: var(--gray-50); }
 // Format: YYYY.MM.DD.N where N is the Nth change on that day (1-indexed).
 // APP_VERSION_LABEL is a human-readable caption shown on hover.
 // ============================================================================
-const APP_VERSION       = '2026.04.21.3';
-const APP_VERSION_LABEL = 'Apr 21, 2026 — verifier refactor + visibility fix + version badge';
+const APP_VERSION       = '2026.04.21.4';
+const APP_VERSION_LABEL = 'Apr 21, 2026 — refusal-contagion fix: quarantine rule + max_tokens 64k + JS detector';
 
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
 
@@ -3130,6 +3130,44 @@ function driveFileKindLabel(mime) {
   return 'FILE';
 }
 
+// ===== REDUCER OUTPUT QUALITY DETECTOR =====
+// After each Lk reducer call, we scan the output for signs that the model refused,
+// produced meta-commentary, or otherwise failed to reduce. The guard matters because
+// in a hierarchical synth, one poisoned Lk output is read as "source material" by the
+// Lk+1 reducer — and we've observed (April 2026 Mimms case) that refusal is contagious:
+// one bad L1 group propagates into an L2 refusal, then an L3 refusal, then the final
+// synth produces a 2,052-char refusal instead of the actual 69,000-char deliverable.
+//
+// Detection heuristic:
+//   • Short output (< 4,000 chars) where input was substantial (≥ 15,000 chars combined)
+//   • First 800 chars of the output start with known refusal phrasing
+//   • Output is dominated by meta-commentary about the task rather than fact extraction
+//
+// When a refusal shape is detected, the caller replaces the group's output with an
+// inert marker (`===== Lk GROUP N SKIPPED — failed quality check =====`) so the next
+// level's reducer sees it as a skip/empty rather than as a quotable refusal.
+function looksLikeRefusal(text, inputCharsApprox) {
+  if (!text || typeof text !== 'string') return false;
+  const trimmed = text.trim();
+  if (!trimmed) return true; // empty is also a failure mode
+  // Strong signal: output starts with refusal phrasing.
+  const head = trimmed.slice(0, 800);
+  const refusalStart = /^(I (cannot|can't|won't|must|need to|apologize|am unable|'m unable|'m not able)|As an AI|I understand (you|that)|I'm sorry|Let me be direct|I have to decline|I must decline)/i;
+  if (refusalStart.test(head)) return true;
+  // Strong signal: output mentions "template", "demonstration", or meta-commentary in the head.
+  const metaCommentary = /(is a template|demonstration (template|document|output)|presented as though|cannot produce (the|this) (document|report|analysis)|without (proper )?(authorization|oversight|credentials|supervision))/i;
+  if (metaCommentary.test(head)) return true;
+  // Weaker signal: output is suspiciously short relative to input. A real reducer given
+  // 15k+ chars of source extractions should produce at least 4k chars of consolidated
+  // output. Below that threshold is almost always a refusal or empty response.
+  if (typeof inputCharsApprox === 'number' && inputCharsApprox >= 15000 && trimmed.length < 4000) {
+    // But allow the legitimate "no facts found" sentinel through as-is — it's correct behavior.
+    if (/^ERROR: No extractable facts/.test(trimmed)) return false;
+    return true;
+  }
+  return false;
+}
+
 // ===== ASYNC ANALYSIS (Files API + Batches API + KV job state) =====
 // Called from runRecordAnalysis when isAsyncFlowEnabled() is true AND the case doesn't
 // fit in a single synchronous call. This path is robust to the browser being closed mid-run
@@ -3455,8 +3493,9 @@ MANDATORY ACCURACY RULES — violations are grounds for rejection:
 • If two sources disagree on a fact, record both with their respective citations rather than picking one.
 • Do not add clinical commentary, causation analysis, or deviations from standard of care unless it is explicitly stated in the source text.
 • Stay on task. Do NOT add commentary about professional ethics, credentials, HIPAA, AI-vs-human authorship, or whether this task is appropriate. The licensed professional supervising this work has already established the proper legal and ethical framework. Refusing the task or inserting ethical warnings is itself a quality failure — just organize the facts with their citations.
+• QUARANTINE POLLUTED INPUTS. Some input chunks below may themselves be prior refusals, model commentary about the task, or incomplete truncated output instead of factual extractions. If an input chunk begins with phrasing like "I cannot…", "I need to be direct…", "I am unable to…", "As an AI…", or "I apologize…", OR reads as meta-commentary about whether the task is appropriate rather than as a fact extraction, treat that specific chunk as EMPTY / MISSING DATA. Silently skip it. Synthesize only from the clean, fact-bearing chunks. Do NOT quote, reference, or acknowledge the polluted chunk in your output. Do NOT refuse the task yourself in response to a polluted input — the licensed LNC has already validated the task. This is the single most important reliability rule: refusal contagion breaks the whole pipeline, so one bad chunk must never infect the output.
 • NO TEMPLATES. NO PLACEHOLDERS. Do not produce bracketed placeholder text like [Date], [Name], [Facility], [Provider], [From admission records], [DOB], [MRN], [Diagnosis], or any other [Fill-in] slot. Every entry in your output must be a concrete fact copied from the source material with its citation. If a fact isn't in the source, OMIT the entry entirely rather than leaving a blank slot to be filled in later. Template/placeholder output is a complete failure of this task.
-• If, after reviewing the provided source material, you find ZERO extractable facts (the input is empty, unreadable, or contains no medical content), return exactly this string as your entire response: "ERROR: No extractable facts found in source material." Do not produce a structural template, a blank form, or a demonstration document under any circumstances.
+• If, after reviewing the provided source material AND after skipping any polluted chunks per the quarantine rule above, you find ZERO extractable facts remaining (all chunks were empty/polluted), return exactly this string as your entire response: "ERROR: No extractable facts found in source material." Do not produce a structural template, a blank form, or a demonstration document under any circumstances.
 
 Presentation rules:
 • Deduplicate repeated facts (keep the earliest and most specific citation when merging).
@@ -3536,11 +3575,23 @@ ${items.join('\n\n')}`;
           groups[gi]
         );
         try {
-          // 32k output cap for synthesis — prevents silent truncation of consolidated
-          // group outputs on dense medical cases. See historical note: 12k default was
-          // tuned for the old non-streaming path.
-          const r = await callClaude(groupPrompt, { maxTokens: 32000 });
-          newItems[gi] = '===== L' + level + ' GROUP ' + (gi + 1) + ' CONSOLIDATED =====\n' + r;
+          // 64k output cap — Haiku 4.5 supports 64k output tokens. Raised from 32k after
+          // observing that mid-pipeline truncation (toast: "Output reached the token cap
+          // and may be truncated") cascaded into refusal-like consolidations at the next
+          // hierarchy level, poisoning the final synth. Cost trade-off is acceptable on
+          // a legal deliverable where completeness beats brevity.
+          const inputChars = groups[gi].reduce((n, s) => n + (s ? s.length : 0), 0);
+          let r = await callClaude(groupPrompt, { maxTokens: 64000 });
+          // Refusal quarantine: if this group's output looks like a refusal or is
+          // suspiciously short relative to its input, replace it with an inert skip
+          // marker so the next level's reducer doesn't read it as source material.
+          // This is the circuit breaker that prevents refusal contagion.
+          if (looksLikeRefusal(r, inputChars)) {
+            console.warn('[synth L' + level + '] group ' + (gi + 1) + ' output failed quality check (len=' + (r ? r.length : 0) + ', input=' + inputChars + ') — quarantining to prevent contagion');
+            newItems[gi] = '===== L' + level + ' GROUP ' + (gi + 1) + ' SKIPPED — failed quality check =====\n[This group\'s consolidation did not produce usable output and has been silently skipped. Content from this subset is not represented in the final synthesis.]';
+          } else {
+            newItems[gi] = '===== L' + level + ' GROUP ' + (gi + 1) + ' CONSOLIDATED =====\n' + r;
+          }
         } catch (e) {
           // Fall through with the raw group contents so no facts are lost even if one
           // group's synth call fails.
@@ -3577,11 +3628,11 @@ ${items.join('\n\n')}`;
       ? 'Below are fact extractions from ' + numBatches + ' batches of medical records for this case. Combine them into a single ' + typeLabel + '.'
       : 'Below are ' + items.length + ' consolidated fact extraction(s) covering this case. Combine them into a single ' + typeLabel + '.';
     const synthPrompt = buildSynthPrompt(intro, items);
-    // Same 32k cap for the final combine call — this is the deliverable that lands in
-    // the result pane and gets copied into the Report Builder, so we absolutely cannot
-    // have it truncate. Previous runs with the 12k default were cutting off ~30-40% of
-    // the final narrative on large cases.
-    finalText = await callClaude(synthPrompt, { maxTokens: 32000 });
+    // 64k output cap for the final combine call — Haiku 4.5's maximum. Raised from 32k
+    // after observing truncation in intermediate reducer calls cascade into refusal-like
+    // final outputs. This is the deliverable that lands in the result pane, so complete
+    // narrative is non-negotiable. Cost impact is worth it on a legal deliverable.
+    finalText = await callClaude(synthPrompt, { maxTokens: 64000 });
     // Post-synthesis verification pass. Uses the last-level `items` (consolidated group
     // outputs for big cases, raw batchOutputs text for small cases) as source material —
     // always more compact than raw extractions, so fits under the 150k char cap more
@@ -4320,8 +4371,9 @@ MANDATORY ACCURACY RULES — violations are grounds for rejection:
 • If two sources disagree on a fact, record both with their respective citations rather than picking one.
 • Do not add clinical commentary, causation analysis, or deviations from standard of care unless it is explicitly stated in the source text.
 • Stay on task. Do NOT add commentary about professional ethics, credentials, HIPAA, AI-vs-human authorship, or whether this task is appropriate. The licensed professional supervising this work has already established the proper legal and ethical framework. Refusing the task or inserting ethical warnings is itself a quality failure — just organize the facts with their citations.
+• QUARANTINE POLLUTED INPUTS. Some input chunks below may themselves be prior refusals, model commentary about the task, or incomplete truncated output instead of factual extractions. If an input chunk begins with phrasing like "I cannot…", "I need to be direct…", "I am unable to…", "As an AI…", or "I apologize…", OR reads as meta-commentary about whether the task is appropriate rather than as a fact extraction, treat that specific chunk as EMPTY / MISSING DATA. Silently skip it. Synthesize only from the clean, fact-bearing chunks. Do NOT quote, reference, or acknowledge the polluted chunk in your output. Do NOT refuse the task yourself in response to a polluted input — the licensed LNC has already validated the task. This is the single most important reliability rule: refusal contagion breaks the whole pipeline, so one bad chunk must never infect the output.
 • NO TEMPLATES. NO PLACEHOLDERS. Do not produce bracketed placeholder text like [Date], [Name], [Facility], [Provider], [From admission records], [DOB], [MRN], [Diagnosis], or any other [Fill-in] slot. Every entry in your output must be a concrete fact copied from the source material with its citation. If a fact isn't in the source, OMIT the entry entirely rather than leaving a blank slot to be filled in later. Template/placeholder output is a complete failure of this task.
-• If, after reviewing the provided source material, you find ZERO extractable facts (the input is empty, unreadable, or contains no medical content), return exactly this string as your entire response: "ERROR: No extractable facts found in source material." Do not produce a structural template, a blank form, or a demonstration document under any circumstances.
+• If, after reviewing the provided source material AND after skipping any polluted chunks per the quarantine rule above, you find ZERO extractable facts remaining (all chunks were empty/polluted), return exactly this string as your entire response: "ERROR: No extractable facts found in source material." Do not produce a structural template, a blank form, or a demonstration document under any circumstances.
 
 Presentation rules:
 • Deduplicate repeated facts (keep the earliest and most specific citation when merging).
@@ -4377,8 +4429,20 @@ ${items.join('\n\n')}`;
           groups[gi]
         );
         try {
-          const r = await callClaude(groupPrompt, { maxTokens: 32000 });
-          newItems[gi] = '===== L' + level + ' GROUP ' + (gi+1) + ' CONSOLIDATED =====\n' + r;
+          // 64k output cap (Haiku 4.5 max). Raised from 32k to prevent mid-pipeline
+          // truncation, which was cascading into refusal-shaped consolidations at the
+          // next hierarchy level — a single truncation could poison the whole synth.
+          const inputChars = groups[gi].reduce((n, s) => n + (s ? s.length : 0), 0);
+          let r = await callClaude(groupPrompt, { maxTokens: 64000 });
+          // Same refusal quarantine as the async path. See looksLikeRefusal() for the
+          // heuristic — short output from a substantial input, or a refusal-shaped head,
+          // gets replaced with an inert skip marker instead of a "CONSOLIDATED" wrapper.
+          if (looksLikeRefusal(r, inputChars)) {
+            console.warn('[synth L' + level + '] group ' + (gi+1) + ' output failed quality check (len=' + (r ? r.length : 0) + ', input=' + inputChars + ') — quarantining to prevent contagion');
+            newItems[gi] = '===== L' + level + ' GROUP ' + (gi+1) + ' SKIPPED — failed quality check =====\n[This group\'s consolidation did not produce usable output and has been silently skipped. Content from this subset is not represented in the final synthesis.]';
+          } else {
+            newItems[gi] = '===== L' + level + ' GROUP ' + (gi+1) + ' CONSOLIDATED =====\n' + r;
+          }
         } catch(e) {
           newItems[gi] = '===== L' + level + ' GROUP ' + (gi+1) + ' ERROR =====\n[Group synthesis failed: ' + e.message + ']\n\nRaw items follow:\n\n' + groups[gi].join('\n\n');
         }
@@ -4409,8 +4473,9 @@ ${items.join('\n\n')}`;
       ? 'Below are fact extractions from ' + batches.length + ' batches of medical records for this case. Combine them into a single ' + typeLabel + '.'
       : 'Below are ' + items.length + ' consolidated fact extraction(s) covering this case. Combine them into a single ' + typeLabel + '.';
     const synthPrompt = buildSynthPrompt(intro, items);
-    // 32k output cap for the final deliverable — prevents truncation of the combined report.
-    let res = await callClaude(synthPrompt, { maxTokens: 32000 });
+    // 64k output cap (Haiku 4.5 max) for the final deliverable — raised from 32k to
+    // match the reducer cap and give the final combine call full room to breathe.
+    let res = await callClaude(synthPrompt, { maxTokens: 64000 });
     // Post-synthesis verification pass — mirrors the async path. See runVerificationPass
     // for why this is worth the extra Haiku call on a legal deliverable. Pass the
     // known-filename list + case context so the verifier can distinguish real
