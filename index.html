@@ -3384,7 +3384,16 @@ ${items.join('\n\n')}`;
           groups[gi]
         );
         try {
-          const r = await callClaude(groupPrompt);
+          // Raise synthesis output cap to 32k tokens. The callClaude default of 12k was
+          // tuned around Cloudflare's 100-second non-streaming timeout — no longer a concern
+          // since we switched to SSE streaming (bytes flow continuously, the connection
+          // stays alive regardless of how long Haiku takes to finish). 12k was truncating
+          // dense group consolidations mid-sentence and silently losing facts before the
+          // next reduction level — exactly what we can't afford on a legal deliverable.
+          // 32k gives Haiku room to emit a full consolidated fact list per group even on
+          // the largest medical cases. Haiku 4.5's max is higher than this, but 32k is
+          // comfortably safe and keeps the output-side cost predictable.
+          const r = await callClaude(groupPrompt, { maxTokens: 32000 });
           newItems.push('===== L' + level + ' GROUP ' + (gi + 1) + ' CONSOLIDATED =====\n' + r);
         } catch (e) {
           // Fall through with the raw group contents so no facts are lost even if one
@@ -3404,7 +3413,11 @@ ${items.join('\n\n')}`;
       ? 'Below are fact extractions from ' + numBatches + ' batches of medical records for this case. Combine them into a single ' + typeLabel + '.'
       : 'Below are ' + items.length + ' consolidated fact extraction(s) covering this case. Combine them into a single ' + typeLabel + '.';
     const synthPrompt = buildSynthPrompt(intro, items);
-    finalText = await callClaude(synthPrompt);
+    // Same 32k cap for the final combine call — this is the deliverable that lands in
+    // the result pane and gets copied into the Report Builder, so we absolutely cannot
+    // have it truncate. Previous runs with the 12k default were cutting off ~30-40% of
+    // the final narrative on large cases.
+    finalText = await callClaude(synthPrompt, { maxTokens: 32000 });
   } catch (e) {
     await patchJob(jobId, { status: 'failed', error: 'Synthesis failed: ' + e.message }).catch(() => {});
     area.innerHTML = `<div class="alert alert-danger">Synthesis error: ${esc(e.message)}<br><br>Batch extractions were completed but could not be merged. You can still review them below.</div>`;
@@ -4072,7 +4085,9 @@ ${items.join('\n\n')}`;
           groups[gi]
         );
         try {
-          const r = await callClaude(groupPrompt);
+          // 32k output cap for synthesis — see async-path twin for rationale. Prevents
+          // silent truncation of consolidated group outputs on dense medical cases.
+          const r = await callClaude(groupPrompt, { maxTokens: 32000 });
           newItems.push('===== L' + level + ' GROUP ' + (gi+1) + ' CONSOLIDATED =====\n' + r);
         } catch(e) {
           newItems.push('===== L' + level + ' GROUP ' + (gi+1) + ' ERROR =====\n[Group synthesis failed: ' + e.message + ']\n\nRaw items follow:\n\n' + groups[gi].join('\n\n'));
@@ -4088,7 +4103,8 @@ ${items.join('\n\n')}`;
       ? 'Below are fact extractions from ' + batches.length + ' batches of medical records for this case. Combine them into a single ' + typeLabel + '.'
       : 'Below are ' + items.length + ' consolidated fact extraction(s) covering this case. Combine them into a single ' + typeLabel + '.';
     const synthPrompt = buildSynthPrompt(intro, items);
-    const res = await callClaude(synthPrompt);
+    // 32k output cap for the final deliverable — prevents truncation of the combined report.
+    const res = await callClaude(synthPrompt, { maxTokens: 32000 });
     await finishAnalysis(res, caseInfo, type, typeLabels, area, pre);
   } catch(e) {
     area.innerHTML = `<div class="alert alert-danger">Synthesis error: ${esc(e.message)}<br><br>Batch extractions were completed but could not be merged. You can still review them below.</div>`;
