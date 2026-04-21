@@ -239,17 +239,18 @@ tr:hover td { background: var(--gray-50); }
 <!-- TOP BAR -->
 <div class="topbar">
   <div class="topbar-brand">
-    <svg width="220" height="48" viewBox="0 0 220 48" xmlns="http://www.w3.org/2000/svg">
-      <!-- Magnifying glass outer circle - WHITE -->
-      <circle cx="20" cy="20" r="14" fill="none" stroke="#ffffff" stroke-width="3"/>
-      <!-- EKG heartbeat line - RED -->
-      <polyline points="8,20 11,20 13.5,13 16,27 18.5,15 21,22 23.5,20 32,20" fill="none" stroke="#cc2222" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-      <!-- Handle - WHITE -->
-      <line x1="30" y1="30" x2="38" y2="38" stroke="#ffffff" stroke-width="3.5" stroke-linecap="round"/>
-      <!-- Chart Detectives -->
-      <text x="48" y="22" font-family="Georgia, 'Times New Roman', serif" font-size="17" font-weight="bold" fill="#ffffff">Chart Detectives</text>
+    <svg width="240" height="48" viewBox="0 0 240 48" xmlns="http://www.w3.org/2000/svg">
+      <!-- CD monogram — bold red serif on the left -->
+      <text x="0" y="37" font-family="Georgia, 'Times New Roman', serif" font-size="36" font-weight="bold" fill="#cc2222" letter-spacing="-2">CD</text>
+      <!-- Chart Detectives wordmark -->
+      <text x="64" y="22" font-family="Georgia, 'Times New Roman', serif" font-size="17" font-weight="bold" fill="#ffffff">Chart Detectives</text>
       <!-- Legal Nurse Consulting -->
-      <text x="49" y="37" font-family="Arial, Helvetica, sans-serif" font-size="9.5" fill="#c9a84c" letter-spacing="1.5">LEGAL NURSE CONSULTING</text>
+      <text x="65" y="37" font-family="Arial, Helvetica, sans-serif" font-size="9.5" fill="#c9a84c" letter-spacing="1.5">LEGAL NURSE CONSULTING</text>
+      <!-- Magnifying glass on the right: red heart silhouette + ECG waveform crossing through it -->
+      <circle cx="213" cy="21" r="13" fill="none" stroke="#ffffff" stroke-width="2.4"/>
+      <path d="M213 27.5 C210 25, 206.5 22.8, 206.5 19.5 C206.5 17.4, 208.2 15.8, 210.2 15.8 C211.6 15.8, 212.6 16.6, 213 17.3 C213.4 16.6, 214.4 15.8, 215.8 15.8 C217.8 15.8, 219.5 17.4, 219.5 19.5 C219.5 22.8, 216 25, 213 27.5 Z" fill="#cc2222"/>
+      <polyline points="201,21 205,21 207,17 209,25 211,19 213,22 225,22" fill="none" stroke="#ffffff" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+      <line x1="222" y1="30" x2="230" y2="38" stroke="#ffffff" stroke-width="3" stroke-linecap="round"/>
     </svg>
   </div>
   <div class="topbar-right">
@@ -313,12 +314,17 @@ tr:hover td { background: var(--gray-50); }
   </div>
   <div class="sidebar-bottom">
     <div class="sidebar-api-badge">
-      <svg width="160" height="34" viewBox="0 0 160 34" xmlns="http://www.w3.org/2000/svg" style="display:block;margin-bottom:6px;">
-        <circle cx="14" cy="14" r="10" fill="none" stroke="#ffffff" stroke-width="2.2"/>
-        <polyline points="5,14 7.5,14 9.5,9 11.5,19 13.5,11 15.5,16 17.5,14 23,14" fill="none" stroke="#cc2222" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
-        <line x1="21" y1="21" x2="27" y2="27" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round"/>
-        <text x="32" y="13" font-family="Georgia,serif" font-size="10" font-weight="bold" fill="#ffffff">Chart Detectives</text>
-        <text x="32" y="25" font-family="Arial,sans-serif" font-size="6" fill="#c9a84c" letter-spacing="0.8">LEGAL NURSE CONSULTING</text>
+      <svg width="170" height="34" viewBox="0 0 170 34" xmlns="http://www.w3.org/2000/svg" style="display:block;margin-bottom:6px;">
+        <!-- CD monogram in red -->
+        <text x="0" y="25" font-family="Georgia,serif" font-size="22" font-weight="bold" fill="#cc2222" letter-spacing="-1">CD</text>
+        <!-- Wordmark -->
+        <text x="34" y="13" font-family="Georgia,serif" font-size="10" font-weight="bold" fill="#ffffff">Chart Detectives</text>
+        <text x="34" y="25" font-family="Arial,sans-serif" font-size="6" fill="#c9a84c" letter-spacing="0.8">LEGAL NURSE CONSULTING</text>
+        <!-- Magnifying glass with heart + ECG -->
+        <circle cx="148" cy="14" r="9" fill="none" stroke="#ffffff" stroke-width="1.7"/>
+        <path d="M148 19 C146 17.4, 143.6 15.9, 143.6 13.6 C143.6 12.2, 144.8 11.1, 146.2 11.1 C147.2 11.1, 147.8 11.6, 148 12.1 C148.2 11.6, 148.8 11.1, 149.8 11.1 C151.2 11.1, 152.4 12.2, 152.4 13.6 C152.4 15.9, 150 17.4, 148 19 Z" fill="#cc2222"/>
+        <polyline points="140,14 143,14 144.5,11.2 146,16.6 147.5,12.6 149,14 156,14" fill="none" stroke="#ffffff" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/>
+        <line x1="154" y1="20" x2="159" y2="25" stroke="#ffffff" stroke-width="2" stroke-linecap="round"/>
       </svg>
       <p style="font-size:10px;">⚡ AI-powered by Claude</p>
     </div>
@@ -1119,8 +1125,8 @@ tr:hover td { background: var(--gray-50); }
 // Format: YYYY.MM.DD.N where N is the Nth change on that day (1-indexed).
 // APP_VERSION_LABEL is a human-readable caption shown on hover.
 // ============================================================================
-const APP_VERSION       = '2026.04.21.9';
-const APP_VERSION_LABEL = 'Apr 21, 2026 — Report Builder now gets a 64k-token output budget (was 12k), so full 40–70 page LNC reports no longer truncate mid-Opinion. Previous build cut off at "the facility ordered Voltaren".';
+const APP_VERSION       = '2026.04.21.11';
+const APP_VERSION_LABEL = 'Apr 21, 2026 — Drive folders now split into shared /records/ (only what attorneys should see) and private /_Internal/ (drafts, analysis .txt, processed chunks). Records Reviewed table is built from real Drive + processed-manifest data with a "USE ONLY these rows" lock, so page counts can no longer be fabricated. New brand mark (red "CD" monogram + wordmark + magnifying glass w/ heart + ECG) wired into topbar, sidebar, and docx header — docx logo is rasterized from the canonical SVG at runtime so topbar + report always stay in sync.';
 
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
 
@@ -1192,6 +1198,62 @@ function fmtUsd(n) {
   if (n < 0.01) return '<$0.01';
   return '$' + n.toFixed(2);
 }
+// ---------------------------------------------------------------------------
+// Brand mark — canonical SVG + runtime PNG rasterizer for docx headers.
+//
+// Previously this file hard-coded a PNG in LOGO_B64 (base64). The topbar and
+// the docx header could drift out of sync, and updating the logo meant
+// regenerating an image and re-embedding the base64 blob. Now the source of
+// truth is LOGO_SVG_STRING (the same design rendered inline in the topbar),
+// and `getLogoPngBytes()` rasterizes it to a PNG on first use via canvas.
+// docx-js' ImageRun takes the PNG bytes and embeds them in the header.
+// ---------------------------------------------------------------------------
+const LOGO_SVG_STRING = '<svg width="240" height="48" viewBox="0 0 240 48" xmlns="http://www.w3.org/2000/svg">'
+  + '<rect width="240" height="48" fill="#0f2444"/>'
+  + '<text x="6" y="37" font-family="Georgia, Times New Roman, serif" font-size="36" font-weight="bold" fill="#cc2222" letter-spacing="-2">CD</text>'
+  + '<text x="70" y="22" font-family="Georgia, Times New Roman, serif" font-size="17" font-weight="bold" fill="#ffffff">Chart Detectives</text>'
+  + '<text x="71" y="37" font-family="Arial, Helvetica, sans-serif" font-size="9.5" fill="#c9a84c" letter-spacing="1.5">LEGAL NURSE CONSULTING</text>'
+  + '<circle cx="217" cy="21" r="13" fill="none" stroke="#ffffff" stroke-width="2.4"/>'
+  + '<path d="M217 27.5 C214 25, 210.5 22.8, 210.5 19.5 C210.5 17.4, 212.2 15.8, 214.2 15.8 C215.6 15.8, 216.6 16.6, 217 17.3 C217.4 16.6, 218.4 15.8, 219.8 15.8 C221.8 15.8, 223.5 17.4, 223.5 19.5 C223.5 22.8, 220 25, 217 27.5 Z" fill="#cc2222"/>'
+  + '<polyline points="205,21 209,21 211,17 213,25 215,19 217,22 229,22" fill="none" stroke="#ffffff" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>'
+  + '<line x1="226" y1="30" x2="234" y2="38" stroke="#ffffff" stroke-width="3" stroke-linecap="round"/>'
+  + '</svg>';
+
+let _logoPngBytesCache = null;
+// Render LOGO_SVG_STRING to a PNG Uint8Array. Cached per page load so we don't
+// re-rasterize for every docx we generate. We scale up 3× so the embedded PNG
+// still looks crisp when docx-js sizes it down to 180×36 points in the header.
+async function getLogoPngBytes() {
+  if (_logoPngBytesCache) return _logoPngBytesCache;
+  const svgBlob = new Blob([LOGO_SVG_STRING], { type: 'image/svg+xml' });
+  const svgUrl = URL.createObjectURL(svgBlob);
+  try {
+    const img = new Image();
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = () => reject(new Error('Logo SVG failed to load for rasterization'));
+      img.src = svgUrl;
+    });
+    const scale = 3;
+    const canvas = document.createElement('canvas');
+    canvas.width = 240 * scale;
+    canvas.height = 48 * scale;
+    const ctx = canvas.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    const pngBlob = await new Promise((resolve, reject) => {
+      canvas.toBlob(b => b ? resolve(b) : reject(new Error('canvas.toBlob returned null')), 'image/png');
+    });
+    const buf = await pngBlob.arrayBuffer();
+    _logoPngBytesCache = new Uint8Array(buf);
+    return _logoPngBytesCache;
+  } finally {
+    URL.revokeObjectURL(svgUrl);
+  }
+}
+
+// Legacy — kept so old references don't crash; unused by current code.
 const LOGO_B64 = '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';
 
 // ===== GOOGLE DRIVE INTEGRATION =====
@@ -1601,41 +1663,145 @@ async function driveShareAnyoneReader(fileOrFolderId) {
 }
 
 // ===== HIERARCHY BUILDER =====
-// Walks Root → Firm → Attorney → Case, creating folders as needed. Returns the case folder id.
-// Guardrails: needs a root, needs a firm record, needs an attorney record. Missing pieces
-// (e.g. a case with a firm but no attorney) fall back to {root}/{firm}/{case}.
+// We build TWO parallel folder trees for every case so attorneys/paralegals only
+// ever see the raw case records and the finalized, sent report — never Debbie's
+// internal work product (analysis drafts, chunked PDFs, cached extractions,
+// auto-saved DOCX revisions).
+//
+//   {root}/{firm}/{attorney}/{case}/          ← RECORDS   (anyone-with-link: viewer)
+//   {root}/_Internal/{firm}/{attorney}/{case}/ ← WORK      (not shared)
+//
+// The records folder is the one whose URL backs every DM-citation hyperlink in
+// the generated .docx. Anyone with the .docx automatically gets view access
+// (via the "anyone with link — viewer" permission set once at folder creation).
+//
+// The work folder holds the _processed chunk cache, analysis TXT dumps, and
+// auto-saved DOCX revisions. No auto-share — if Debbie wants to send a report
+// she copies/moves the final .docx manually, which keeps the "sent to client"
+// decision explicit rather than implicit.
+//
+// Guardrails: needs a root, needs a firm record. Missing attorney falls back to
+// {root}/{firm}/{case} and {root}/_Internal/{firm}/{case} respectively.
+//
+// Return shape: { records: {id, name, ...}, work: {id, name, ...} }
+// Callers that only care about the records folder (the legacy single-folder
+// shape) should read `.records`.
+const WORK_ROOT_NAME = '_Internal';
 async function ensureCaseHierarchy(caseInfo) {
   if (!state.driveRootFolderId) throw new Error('Set a Chart Detectives root folder first.');
   if (!caseInfo) throw new Error('Unknown case.');
   const firmRec = caseInfo.firmId ? state.firms.find(f => f.id === caseInfo.firmId) : null;
   const attyRec = caseInfo.attorneyId ? state.attorneys.find(a => a.id === caseInfo.attorneyId) : null;
   if (!firmRec) throw new Error('This case has no firm selected — pick a firm before organizing into Drive.');
-  const firmFolder = await driveFindOrCreateFolder(state.driveRootFolderId, firmRec.name || 'Unnamed Firm');
+
+  const firmName = firmRec.name || 'Unnamed Firm';
+  const attyName = attyRec ? (((attyRec.firstName||'') + ' ' + (attyRec.lastName||'')).trim() || 'Unnamed Attorney') : null;
+  const caseFolderName = ((caseInfo.patient || 'Untitled') + ' — ' + (caseInfo.id || '')).trim().replace(/ — $/,'');
+
+  // ---- Records tree (shared)
+  const firmFolder = await driveFindOrCreateFolder(state.driveRootFolderId, firmName);
   let parentId = firmFolder.id;
-  if (attyRec) {
-    const fullName = ((attyRec.firstName||'') + ' ' + (attyRec.lastName||'')).trim() || 'Unnamed Attorney';
-    const attyFolder = await driveFindOrCreateFolder(parentId, fullName);
+  if (attyName) {
+    const attyFolder = await driveFindOrCreateFolder(parentId, attyName);
     parentId = attyFolder.id;
   }
-  const caseFolderName = ((caseInfo.patient || 'Untitled') + ' — ' + (caseInfo.id || '')).trim().replace(/ — $/,'');
-  const caseFolder = await driveFindOrCreateFolder(parentId, caseFolderName);
-  // Set the case folder (and everything inside it, by inheritance) to be
-  // viewable by anyone with the link. This is what makes the [citation]
-  // hyperlinks in the generated .docx actually open for the attorney and
-  // paralegals who receive the report — without this, Drive returns a
-  // "You need access" page. Non-fatal if it fails (e.g. org policy blocks
-  // link sharing) — Debbie can still share manually.
-  const share = await driveShareAnyoneReader(caseFolder.id);
+  const recordsFolder = await driveFindOrCreateFolder(parentId, caseFolderName);
+  // Set the records folder (and everything inside it, by inheritance) to be
+  // viewable by anyone with the link — this is what makes the [DM######]
+  // hyperlinks in the generated .docx resolve for attorneys/paralegals who
+  // receive the report. Non-fatal if it fails (e.g. org policy blocks link
+  // sharing) — Debbie can still share manually.
+  const share = await driveShareAnyoneReader(recordsFolder.id);
   if (!share.ok) {
-    console.warn('[drive] case folder link-sharing could not be enabled automatically:', share);
+    console.warn('[drive] records folder link-sharing could not be enabled automatically:', share);
   }
-  return caseFolder;
+
+  // ---- Work tree (private, parallel hierarchy)
+  const workRoot = await driveFindOrCreateFolder(state.driveRootFolderId, WORK_ROOT_NAME);
+  const workFirm = await driveFindOrCreateFolder(workRoot.id, firmName);
+  let workParentId = workFirm.id;
+  if (attyName) {
+    const workAtty = await driveFindOrCreateFolder(workParentId, attyName);
+    workParentId = workAtty.id;
+  }
+  const workFolder = await driveFindOrCreateFolder(workParentId, caseFolderName);
+  // Explicitly do NOT share the work folder. It may inherit "anyone with link"
+  // from a parent Drive or Shared Drive setting; short of diving into per-folder
+  // permission restrictions (which break under normal My Drive semantics) the
+  // best defence is to simply not surface its URL anywhere in the app or in
+  // generated reports.
+
+  return { records: recordsFolder, work: workFolder };
 }
 
-// Ensure the _processed subfolder exists inside a case folder and return its id.
-async function ensureProcessedFolder(caseFolderId) {
-  const f = await driveFindOrCreateFolder(caseFolderId, '_processed');
+// Given a case, ensure its work folder exists and return its id. Used by
+// upload sites (analysis TXT, generated DOCX, processed cache) that run for
+// existing cases which may not have driveWorkFolderId populated yet (legacy
+// cases created before the split, or cases linked via the Drive picker). If
+// the records folder is missing we bail with a null — the caller should just
+// skip the Drive upload rather than put work-product in an unexpected place.
+async function ensureWorkFolderId(caseInfo) {
+  if (!caseInfo) return null;
+  if (caseInfo.driveWorkFolderId) return caseInfo.driveWorkFolderId;
+  try {
+    // If we have full firm + attorney context, build the parallel hierarchy.
+    if (state.driveRootFolderId && caseInfo.firmId) {
+      const h = await ensureCaseHierarchy(caseInfo);
+      caseInfo.driveFolderId = caseInfo.driveFolderId || h.records.id;
+      caseInfo.driveFolderName = caseInfo.driveFolderName || h.records.name;
+      caseInfo.driveWorkFolderId = h.work.id;
+      caseInfo.driveWorkFolderName = h.work.name;
+      save();
+      return h.work.id;
+    }
+    // Fall back to a flat {root}/_Internal/{patient-caseid}/ for cases without
+    // full firm+attorney context (picker-linked cases, legacy cases).
+    if (state.driveRootFolderId && caseInfo.driveFolderId) {
+      const workRoot = await driveFindOrCreateFolder(state.driveRootFolderId, WORK_ROOT_NAME);
+      const flatName = ((caseInfo.patient || 'Untitled') + ' — ' + (caseInfo.id || '')).trim().replace(/ — $/,'');
+      const w = await driveFindOrCreateFolder(workRoot.id, flatName);
+      caseInfo.driveWorkFolderId = w.id;
+      caseInfo.driveWorkFolderName = w.name;
+      save();
+      return w.id;
+    }
+  } catch(e) {
+    console.warn('[drive] ensureWorkFolderId failed:', e);
+  }
+  return null;
+}
+
+// Ensure the _processed subfolder exists inside a given parent and return its id.
+// Historically the parent was the records folder — which made the cached
+// chunked-PDF files visible to anyone the records folder was shared with. It is
+// now the WORK folder, so the chunks stay private.
+async function ensureProcessedFolder(parentFolderId) {
+  const f = await driveFindOrCreateFolder(parentFolderId, '_processed');
   return f.id;
+}
+
+// One-time migration: if an old `_processed` subfolder exists inside the
+// records folder, move it into the work folder so the cached chunks stop
+// being visible to anyone with the records link. Drive file IDs do not change
+// on a move, so the processed-manifest (which references chunks by ID) stays
+// valid. Idempotent — a second call finds nothing to move and exits quietly.
+async function migrateProcessedCacheIntoWorkFolder(caseInfo) {
+  if (!caseInfo || !caseInfo.driveFolderId || !caseInfo.driveWorkFolderId) return;
+  if (!_driveToken) return;
+  try {
+    // Look for `_processed` inside the records folder only (not the work folder).
+    const q = `'${caseInfo.driveFolderId}' in parents and name = '_processed' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
+    const url = 'https://www.googleapis.com/drive/v3/files?q=' + encodeURIComponent(q) + '&fields=files(id,name,parents)&pageSize=5';
+    const res = await fetch(url, { headers: { Authorization: 'Bearer ' + _driveToken } });
+    if (!res.ok) return;
+    const data = await res.json();
+    const legacy = (data.files || [])[0];
+    if (!legacy) return;
+    await driveMoveFile(legacy.id, caseInfo.driveWorkFolderId);
+    console.log('[drive] migrated legacy _processed cache from records folder into work folder for case', caseInfo.id);
+  } catch(e) {
+    console.warn('[drive] migrateProcessedCacheIntoWorkFolder failed:', e);
+  }
 }
 
 // ===== PROCESSED CACHE =====
@@ -1899,7 +2065,7 @@ async function generateDocx(title, content, patientName, caseId, caseRec) {
   // ---------- Parse body ----------
   const lines = content.split('\n');
   const children = [];
-  const logoBytes = Uint8Array.from(atob(LOGO_B64), c => c.charCodeAt(0));
+  const logoBytes = await getLogoPngBytes();
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -2014,7 +2180,7 @@ async function generateDocx(title, content, patientName, caseId, caseRec) {
             new Paragraph({
               border: { bottom: { style: BorderStyle.SINGLE, size: 4, color: 'dddddd', space: 4 } },
               spacing: { before: 0, after: 80 },
-              children: [new ImageRun({ data: logoBytes, transformation: { width: 180, height: 41 }, type: 'png' })]
+              children: [new ImageRun({ data: logoBytes, transformation: { width: 200, height: 40 }, type: 'png' })]
             })
           ]
         })
@@ -2065,13 +2231,22 @@ async function downloadDocx(title, content, patientName, caseId, caseRec) {
     a.download = filename;
     a.click();
     showToast('📄 Report downloaded as ' + filename);
-    // If this case has a Drive folder linked, also save the report into the folder.
+    // If this case has a Drive folder linked, save the draft report into the
+    // PRIVATE _Internal work folder — NOT the records folder. Attorneys/
+    // paralegals only see what Debbie explicitly sends them; drafts stay
+    // internal until she's reviewed + hand-delivered them.
     const caseInfo = caseId ? state.cases.find(c => c.id === caseId) : null;
     if (caseInfo && caseInfo.driveFolderId) {
       try {
-        await driveUploadFile(caseInfo.driveFolderId, filename,
+        const workFolderId = await ensureWorkFolderId(caseInfo);
+        const destFolderId = workFolderId || caseInfo.driveFolderId;
+        await driveUploadFile(destFolderId, filename,
           'application/vnd.openxmlformats-officedocument.wordprocessingml.document', blob);
-        showToast('💾 Report also saved to Drive folder: ' + caseInfo.driveFolderName);
+        if (workFolderId) {
+          showToast('🔒 Draft report saved to private work folder (not shared with attorney)');
+        } else {
+          showToast('💾 Report also saved to Drive folder: ' + caseInfo.driveFolderName);
+        }
       } catch(e) {
         showToast('⚠️ Drive save failed: ' + e.message, true);
       }
@@ -2602,12 +2777,14 @@ function saveCase() {
   // to auto-build the Firm/Attorney/Case hierarchy. We don't block the UI on this — the
   // case is already saved and a network failure shouldn't keep the form open.
   if (state.driveRootFolderId && c.firmId && c.attorneyId && _driveToken) {
-    ensureCaseHierarchy(c).then(folder => {
-      c.driveFolderId = folder.id;
-      c.driveFolderName = folder.name;
+    ensureCaseHierarchy(c).then(h => {
+      c.driveFolderId = h.records.id;
+      c.driveFolderName = h.records.name;
+      c.driveWorkFolderId = h.work.id;
+      c.driveWorkFolderName = h.work.name;
       save();
       renderCases();
-      showToast('📁 Auto-created ' + folder.name + ' in Drive.');
+      showToast('📁 Auto-created ' + h.records.name + ' in Drive (records shared, _Internal private).');
     }).catch(e => {
       console.warn('Hierarchy auto-create failed:', e);
       showToast('⚠ Could not auto-organize in Drive: ' + e.message);
@@ -2762,6 +2939,17 @@ async function connectCaseFolder(caseId) {
     } else {
       showToast('📁 Linked ' + picked.name + ' to ' + c.patient + ' (share manually — auto-share failed)');
     }
+    // Also provision the parallel private work folder so future analysis
+    // dumps + DOCX revisions stay out of the picked (shared) folder.
+    try {
+      const wid = await ensureWorkFolderId(c);
+      if (wid) {
+        await migrateProcessedCacheIntoWorkFolder(c);
+        showToast('🔒 Private _Internal work folder ready — analysis + draft reports will save there');
+      }
+    } catch(e) {
+      console.warn('[drive] work-folder provisioning failed after picker:', e);
+    }
   } catch (e) {
     alert('Could not open Drive picker: ' + e.message);
   }
@@ -2839,6 +3027,15 @@ async function reorganizeCaseIntoHierarchy(caseId) {
       c.driveFolderName = caseFolder.name;
       save();
       showToast('📁 Created ' + caseFolder.name + ' in hierarchy.');
+    }
+    // Also ensure the parallel _Internal/{firm}/{attorney}/{case}/ work folder
+    // exists and is linked. Keeps analysis TXT dumps, cached PDF chunks, and
+    // auto-saved DOCX revisions out of the shared records folder.
+    try {
+      await ensureWorkFolderId(c);
+      await migrateProcessedCacheIntoWorkFolder(c);
+    } catch(e) {
+      console.warn('[drive] work-folder provisioning failed in reorganize:', e);
     }
     renderCases();
   } catch(e) {
@@ -4166,7 +4363,18 @@ async function runRecordAnalysis() {
   let manifestDirty = false;
   if (selectedDrive.length && caseInfo && caseInfo.driveFolderId) {
     try {
-      processedFolderId = await ensureProcessedFolder(caseInfo.driveFolderId);
+      // Cache processed chunks in the PRIVATE _Internal work folder so
+      // attorneys/paralegals never see our extraction artifacts when they
+      // browse the shared records folder.
+      const workId = await ensureWorkFolderId(caseInfo);
+      const cacheParent = workId || caseInfo.driveFolderId;
+      processedFolderId = await ensureProcessedFolder(cacheParent);
+      // One-time migration: if the legacy _processed sits inside the records
+      // folder from an older case, move it into the work folder (Drive IDs
+      // don't change across moves, so the manifest stays valid).
+      if (workId) {
+        try { await migrateProcessedCacheIntoWorkFolder(caseInfo); } catch(_e) {}
+      }
       processedManifest = await loadProcessedManifest(processedFolderId);
     } catch(e) {
       console.warn('Processed cache unavailable:', e);
@@ -5181,10 +5389,20 @@ async function finishAnalysis(res, caseInfo, type, typeLabels, area, pre) {
   }
   if (caseInfo && caseInfo.driveFolderId) {
     try {
+      // Analysis .txt files are internal work product. They go into the
+      // PRIVATE _Internal/<firm>/<attorney>/<case>/ tree so opposing counsel
+      // or even the retaining attorney never sees them in the shared records
+      // folder.
       const today = new Date().toISOString().split('T')[0];
       const fname = (typeLabels[type] || 'Analysis').replace(/[^a-z0-9 ]/gi,'').replace(/\s+/g,'_') + ' - ' + caseInfo.patient.replace(/[^a-z0-9 ]/gi,'') + ' - ' + today + '.txt';
-      await driveUploadFile(caseInfo.driveFolderId, fname, 'text/plain', res);
-      showToast('💾 Analysis saved to Drive: ' + fname);
+      const workFolderId = await ensureWorkFolderId(caseInfo);
+      const destFolderId = workFolderId || caseInfo.driveFolderId;
+      await driveUploadFile(destFolderId, fname, 'text/plain', res);
+      if (workFolderId) {
+        showToast('🔒 Analysis saved to private work folder: ' + fname);
+      } else {
+        showToast('💾 Analysis saved to Drive: ' + fname);
+      }
     } catch(e) {
       showToast('⚠️ Drive save failed: ' + e.message, true);
     }
@@ -5341,6 +5559,81 @@ async function runReportDraft() {
     ? caseInfo.caseCaption.trim()
     : ((caseInfo && caseInfo.patient) ? caseInfo.patient.toUpperCase() : '');
 
+  // ---- Build a REAL Records Reviewed table from Drive + the processed-cache
+  // manifest. This is the anti-hallucination fix for the "| A | [Facility
+  // Name] Medical Records | [###] |" template placeholders that Claude was
+  // filling in with invented page counts (e.g. "2,700+", "85", "150+").
+  //
+  // Page counts come from the processed manifest (chunks[].totalPages — set by
+  // the PDF chunker when records were first analyzed). Filenames + Drive file
+  // IDs come from a live driveListFolder call on the case records folder, so
+  // the table always reflects what's actually sitting in Drive right now.
+  //
+  // We then inject the rendered pipe table into the prompt and replace the
+  // old "generate your own table" instruction with a hard "USE ONLY these
+  // rows, do not add or remove rows, do not change any page count" lock.
+  let recordsManifestBlock = '';
+  let recordsManifestLocked = false;
+  try {
+    if (caseInfo && caseInfo.driveFolderId) {
+      const allFiles = await driveListFolder(caseInfo.driveFolderId);
+      // Only include record files (PDFs + images). Exclude our own generated
+      // outputs (.docx, .txt) and anything starting with "_" so the table
+      // matches what an attorney actually received.
+      const records = (allFiles || []).filter(f => {
+        if (!f || !f.name) return false;
+        if (/^_/.test(f.name)) return false;
+        if (f.mimeType === 'application/vnd.google-apps.folder') return false;
+        return /\.(pdf|png|jpe?g|tif?f|heic|heif|bmp|gif)$/i.test(f.name);
+      });
+      // Pull page counts from the processed manifest (in the private work folder).
+      let processedEntries = {};
+      try {
+        const workId = await ensureWorkFolderId(caseInfo);
+        const cacheParent = workId || caseInfo.driveFolderId;
+        const pf = await ensureProcessedFolder(cacheParent);
+        const pm = await loadProcessedManifest(pf);
+        processedEntries = (pm && pm.entries) || {};
+      } catch(_e) { /* no cache yet — pages will display as "—" */ }
+      records.sort((a,b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+      const rows = records.map((f, i) => {
+        // Letters A..Z, then AA..ZZ if there are more than 26 files.
+        let letter;
+        if (i < 26) {
+          letter = String.fromCharCode(65 + i);
+        } else {
+          const first = Math.floor((i - 26) / 26);
+          const second = (i - 26) % 26;
+          letter = String.fromCharCode(65 + first) + String.fromCharCode(65 + second);
+        }
+        const entry = processedEntries[f.id];
+        const firstChunk = entry && entry.chunks && entry.chunks[0];
+        // For PDFs the chunker stamps totalPages on each chunk. For images we
+        // treat them as a single page.
+        let pages = null;
+        if (firstChunk && typeof firstChunk.totalPages === 'number' && firstChunk.totalPages > 0) {
+          pages = firstChunk.totalPages;
+        } else if (/\.(png|jpe?g|tif?f|heic|heif|bmp|gif)$/i.test(f.name)) {
+          pages = 1;
+        }
+        const pagesDisplay = (pages != null) ? String(pages) : '—';
+        // Escape pipe characters in filenames so the markdown table doesn't break.
+        const safeName = String(f.name).replace(/\|/g, '\\|');
+        return `| ${letter} | ${safeName} | ${pagesDisplay} |`;
+      });
+      if (rows.length) {
+        recordsManifestBlock = [
+          '| Prefix | File Name | Total Pages |',
+          '| --- | --- | --- |',
+          ...rows
+        ].join('\n');
+        recordsManifestLocked = true;
+      }
+    }
+  } catch(e) {
+    console.warn('[report] records manifest build failed:', e);
+  }
+
   const prompt = `You are Deborah J Edmonds BSN, RN, LNHA, GERO-BC — a legal nurse consultant with over 35 years of healthcare experience encompassing long-term care, sub-acute rehab, medical-surgical and neurological/orthopedic nursing, operating room settings, and nursing leadership and administration. Your business is Chart Detectives Legal Nurse Consulting, LLC.
 
 You are drafting a ${typeLabels[type] || 'Comprehensive Nurse Review'} for an attorney. Use EXACTLY the structure, tone, and style described below.
@@ -5402,12 +5695,13 @@ Use real CFR citations appropriate to long-term care / nursing home cases: **42 
 Produce at least 6–10 distinct deviation bullets, each with 2–4 sub-bullets. Do not condense.
 
 # Records Reviewed and Record Legend
-Pipe table:
-| Prefix | File Name | Total Pages |
-| --- | --- | --- |
-| A | [Facility Name] Medical Records | [###] |
-| B | Hospital Records | [###] |
-...
+${recordsManifestLocked
+  ? `USE ONLY the rows in the table below. Do not add rows. Do not remove rows. Do not modify any filename. Do not modify any Total Pages value. Do not replace any value with a placeholder like "[###]". Copy the table verbatim into the report as the entire content of this section:
+
+${recordsManifestBlock}`
+  : `The user has not yet linked a Drive records folder for this case, so the Records Reviewed table cannot be generated automatically. Output ONLY the following single line for this section and nothing else — do NOT invent filenames or page counts:
+
+*The Records Reviewed table will be attached separately.*`}
 
 # Chronology
 Detailed pipe table of every clinical event of relevance. Columns:
