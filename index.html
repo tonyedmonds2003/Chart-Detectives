@@ -239,9 +239,9 @@ tr:hover td { background: var(--gray-50); }
 <!-- TOP BAR -->
 <div class="topbar">
   <div class="topbar-brand">
-    <svg width="300" height="72" viewBox="0 0 320 110" xmlns="http://www.w3.org/2000/svg">
+    <svg width="320" height="76" viewBox="0 0 460 110" xmlns="http://www.w3.org/2000/svg">
       <!-- White background card so the exact-colors logo reads cleanly over the navy topbar -->
-      <rect width="320" height="110" fill="#ffffff" rx="6"/>
+      <rect width="460" height="110" fill="#ffffff" rx="6"/>
       <!-- "Chart Detectives" — black with red initial letters C and D -->
       <text x="10" y="45" font-family="Arial, Helvetica, sans-serif" font-weight="bold" font-size="28">
         <tspan fill="#d41c1c">C</tspan><tspan fill="#111111">hart </tspan><tspan fill="#d41c1c">D</tspan><tspan fill="#111111">etectives</tspan>
@@ -249,10 +249,10 @@ tr:hover td { background: var(--gray-50); }
       <!-- "Legal Nurse Consultants" — all black -->
       <text x="10" y="85" font-family="Arial, Helvetica, sans-serif" font-weight="bold" font-size="26" fill="#111111">Legal Nurse Consultants</text>
       <!-- Magnifying glass on the right: thick black border, white lens, red heart + red ECG inside -->
-      <circle cx="258" cy="50" r="34" fill="#ffffff" stroke="#111111" stroke-width="7"/>
-      <path d="M258,64 C252,58 240,50 240,38 C240,32 244,27 250,27 C254,27 256,30 258,32 C260,30 262,27 266,27 C272,27 276,32 276,38 C276,50 264,58 258,64 Z" fill="#d41c1c"/>
-      <polyline points="230,50 240,50 244,38 248,62 252,44 256,54 286,50" fill="none" stroke="#d41c1c" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-      <line x1="283" y1="75" x2="312" y2="104" stroke="#111111" stroke-width="11" stroke-linecap="round"/>
+      <circle cx="390" cy="50" r="34" fill="#ffffff" stroke="#111111" stroke-width="7"/>
+      <path d="M390,64 C384,58 372,50 372,38 C372,32 376,27 382,27 C386,27 388,30 390,32 C392,30 394,27 398,27 C404,27 408,32 408,38 C408,50 396,58 390,64 Z" fill="#d41c1c"/>
+      <polyline points="362,50 372,50 376,38 380,62 384,44 388,54 418,50" fill="none" stroke="#d41c1c" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+      <line x1="415" y1="75" x2="444" y2="104" stroke="#111111" stroke-width="11" stroke-linecap="round"/>
     </svg>
   </div>
   <div class="topbar-right">
@@ -316,16 +316,16 @@ tr:hover td { background: var(--gray-50); }
   </div>
   <div class="sidebar-bottom">
     <div class="sidebar-api-badge">
-      <svg width="170" height="58" viewBox="0 0 320 110" xmlns="http://www.w3.org/2000/svg" style="display:block;margin-bottom:6px;">
-        <rect width="320" height="110" fill="#ffffff" rx="6"/>
+      <svg width="190" height="46" viewBox="0 0 460 110" xmlns="http://www.w3.org/2000/svg" style="display:block;margin-bottom:6px;">
+        <rect width="460" height="110" fill="#ffffff" rx="6"/>
         <text x="10" y="45" font-family="Arial, Helvetica, sans-serif" font-weight="bold" font-size="28">
           <tspan fill="#d41c1c">C</tspan><tspan fill="#111111">hart </tspan><tspan fill="#d41c1c">D</tspan><tspan fill="#111111">etectives</tspan>
         </text>
         <text x="10" y="85" font-family="Arial, Helvetica, sans-serif" font-weight="bold" font-size="26" fill="#111111">Legal Nurse Consultants</text>
-        <circle cx="258" cy="50" r="34" fill="#ffffff" stroke="#111111" stroke-width="7"/>
-        <path d="M258,64 C252,58 240,50 240,38 C240,32 244,27 250,27 C254,27 256,30 258,32 C260,30 262,27 266,27 C272,27 276,32 276,38 C276,50 264,58 258,64 Z" fill="#d41c1c"/>
-        <polyline points="230,50 240,50 244,38 248,62 252,44 256,54 286,50" fill="none" stroke="#d41c1c" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-        <line x1="283" y1="75" x2="312" y2="104" stroke="#111111" stroke-width="11" stroke-linecap="round"/>
+        <circle cx="390" cy="50" r="34" fill="#ffffff" stroke="#111111" stroke-width="7"/>
+        <path d="M390,64 C384,58 372,50 372,38 C372,32 376,27 382,27 C386,27 388,30 390,32 C392,30 394,27 398,27 C404,27 408,32 408,38 C408,50 396,58 390,64 Z" fill="#d41c1c"/>
+        <polyline points="362,50 372,50 376,38 380,62 384,44 388,54 418,50" fill="none" stroke="#d41c1c" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+        <line x1="415" y1="75" x2="444" y2="104" stroke="#111111" stroke-width="11" stroke-linecap="round"/>
       </svg>
       <p style="font-size:10px;">⚡ AI-powered by Claude</p>
     </div>
@@ -1126,8 +1126,8 @@ tr:hover td { background: var(--gray-50); }
 // Format: YYYY.MM.DD.N where N is the Nth change on that day (1-indexed).
 // APP_VERSION_LABEL is a human-readable caption shown on hover.
 // ============================================================================
-const APP_VERSION       = '2026.04.21.13';
-const APP_VERSION_LABEL = 'Apr 21, 2026 — Records Reviewed manifest builder now falls back to the legacy _processed/ cache inside the records folder when the private work folder has no manifest yet, so PDF page counts populate on pre-split cases (like Mimm) without requiring a manual Reorganize. A best-effort background migration also runs so the next report no longer needs the fallback.';
+const APP_VERSION       = '2026.04.21.14';
+const APP_VERSION_LABEL = 'Apr 21, 2026 — Fixed logo sizing: widened viewBox from 320 to 460 units so the "Legal Nurse Consultants" wordmark (wider than 320 units at 26pt bold Arial) no longer collides with the magnifying glass. Glass center shifted from cx=258 to cx=390 with heart path, ECG polyline, and handle coords moved +132. Change wired through the topbar SVG, sidebar SVG, canonical LOGO_SVG_STRING, canvas rasterizer dimensions (460*scale x 110*scale), and docx Header ImageRun transformation (240x57 preserves the 460:110 aspect ratio so reports show the logo undistorted).';
 
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
 
@@ -1209,16 +1209,16 @@ function fmtUsd(n) {
 // and `getLogoPngBytes()` rasterizes it to a PNG on first use via canvas.
 // docx-js' ImageRun takes the PNG bytes and embeds them in the header.
 // ---------------------------------------------------------------------------
-const LOGO_SVG_STRING = '<svg width="320" height="110" viewBox="0 0 320 110" xmlns="http://www.w3.org/2000/svg">'
-  + '<rect width="320" height="110" fill="#ffffff"/>'
+const LOGO_SVG_STRING = '<svg width="460" height="110" viewBox="0 0 460 110" xmlns="http://www.w3.org/2000/svg">'
+  + '<rect width="460" height="110" fill="#ffffff"/>'
   + '<text x="10" y="45" font-family="Arial, Helvetica, sans-serif" font-weight="bold" font-size="28">'
   +   '<tspan fill="#d41c1c">C</tspan><tspan fill="#111111">hart </tspan><tspan fill="#d41c1c">D</tspan><tspan fill="#111111">etectives</tspan>'
   + '</text>'
   + '<text x="10" y="85" font-family="Arial, Helvetica, sans-serif" font-weight="bold" font-size="26" fill="#111111">Legal Nurse Consultants</text>'
-  + '<circle cx="258" cy="50" r="34" fill="#ffffff" stroke="#111111" stroke-width="7"/>'
-  + '<path d="M258,64 C252,58 240,50 240,38 C240,32 244,27 250,27 C254,27 256,30 258,32 C260,30 262,27 266,27 C272,27 276,32 276,38 C276,50 264,58 258,64 Z" fill="#d41c1c"/>'
-  + '<polyline points="230,50 240,50 244,38 248,62 252,44 256,54 286,50" fill="none" stroke="#d41c1c" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>'
-  + '<line x1="283" y1="75" x2="312" y2="104" stroke="#111111" stroke-width="11" stroke-linecap="round"/>'
+  + '<circle cx="390" cy="50" r="34" fill="#ffffff" stroke="#111111" stroke-width="7"/>'
+  + '<path d="M390,64 C384,58 372,50 372,38 C372,32 376,27 382,27 C386,27 388,30 390,32 C392,30 394,27 398,27 C404,27 408,32 408,38 C408,50 396,58 390,64 Z" fill="#d41c1c"/>'
+  + '<polyline points="362,50 372,50 376,38 380,62 384,44 388,54 418,50" fill="none" stroke="#d41c1c" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>'
+  + '<line x1="415" y1="75" x2="444" y2="104" stroke="#111111" stroke-width="11" stroke-linecap="round"/>'
   + '</svg>';
 
 let _logoPngBytesCache = null;
@@ -1238,7 +1238,7 @@ async function getLogoPngBytes() {
     });
     const scale = 3;
     const canvas = document.createElement('canvas');
-    canvas.width = 320 * scale;
+    canvas.width = 460 * scale;
     canvas.height = 110 * scale;
     const ctx = canvas.getContext('2d');
     ctx.imageSmoothingEnabled = true;
@@ -2182,7 +2182,7 @@ async function generateDocx(title, content, patientName, caseId, caseRec) {
             new Paragraph({
               border: { bottom: { style: BorderStyle.SINGLE, size: 4, color: 'dddddd', space: 4 } },
               spacing: { before: 0, after: 80 },
-              children: [new ImageRun({ data: logoBytes, transformation: { width: 220, height: 76 }, type: 'png' })]
+              children: [new ImageRun({ data: logoBytes, transformation: { width: 240, height: 57 }, type: 'png' })]
             })
           ]
         })
