@@ -1119,8 +1119,8 @@ tr:hover td { background: var(--gray-50); }
 // Format: YYYY.MM.DD.N where N is the Nth change on that day (1-indexed).
 // APP_VERSION_LABEL is a human-readable caption shown on hover.
 // ============================================================================
-const APP_VERSION       = '2026.04.21.6';
-const APP_VERSION_LABEL = 'Apr 21, 2026 — [DM######] auto-resolves via filename convention; case folders auto-share as "anyone with link — viewer" so attorney links in the .docx just work';
+const APP_VERSION       = '2026.04.21.8';
+const APP_VERSION_LABEL = 'Apr 21, 2026 — [DM######] citations now fall back to the case\'s Drive folder URL automatically. Zero per-case setup: load records into the folder and DM links just work.';
 
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
 
@@ -1787,18 +1787,25 @@ async function generateDocx(title, content, patientName, caseId, caseRec) {
   if (!caseRec && caseId && typeof state !== 'undefined' && state && state.cases) {
     caseRec = state.cases.find(x => x.id === caseId) || null;
   }
-  // Resolve the "combined facility records" PDF by convention: scan the case's
-  // driveFileIndex for the first filename that matches a combined-records
-  // pattern. Debbie just has to name the file something like
-  // "Combined Records.pdf" and drop it in the case folder — the app picks it
-  // up automatically when she hits "Load files from case folder", so no
-  // manual URL paste is needed (and it works on every computer that opens
-  // the generated .docx since the link is baked into the Word doc itself).
+  // Resolve the target URL for [DM######] citations. Priority:
+  //   1. Explicit combinedRecordsUrl on the case record (rare — legacy override).
+  //   2. A file in the case's Drive folder named "Combined Records.pdf" /
+  //      "Combined Facility Records.pdf" / similar — picked up automatically
+  //      from driveFileIndex if she happens to have one.
+  //   3. The case's Drive folder URL itself — always present once the case has
+  //      been saved with a linked folder. This is the zero-setup default:
+  //      Debbie uploads records however she normally does, the attorney
+  //      clicking a DM citation lands at the folder listing (already shared
+  //      view-only), and picks the specific file from there. Works for every
+  //      case without her having to name, merge, or configure anything.
   const driveFileIndex = (caseRec && caseRec.driveFileIndex) || {};
   const COMBINED_RECORDS_NAME_RX = /^combined[\s_-]*(facility)?[\s_-]*records?\b/i;
   let combinedUrl = '';
   for (const name of Object.keys(driveFileIndex)) {
     if (COMBINED_RECORDS_NAME_RX.test(name)) { combinedUrl = driveFileIndex[name]; break; }
+  }
+  if (!combinedUrl && caseRec && caseRec.driveFolderId) {
+    combinedUrl = 'https://drive.google.com/drive/folders/' + caseRec.driveFolderId;
   }
   // Back-compat: if an explicit combinedRecordsUrl was ever set on the case
   // record (older builds supported this), honor it as an override.
@@ -1835,11 +1842,15 @@ async function generateDocx(title, content, patientName, caseId, caseRec) {
         parts.forEach((part, idx) => {
           if (idx > 0) runs.push(makeRun('; ', Object.assign({}, baseOpts, { bold: true })));
           const fid = BATES_TO_URL[part];
-          // Any [DM######] or [DM######-DM######] bates token routes to the
-          // case's combined facility records Drive file, if one is set. This
-          // keeps her citations clickable even when the records weren't
-          // uploaded as individually-named PDFs.
-          const isDM = /^DM\d{3,}(?:\s*[-–]\s*DM\d{3,})?$/i.test(part);
+          // Any DM#######-style bates token routes to the case's combined
+          // facility records Drive file, if one is set. Accepts: single
+          // ("DM000811"), hyphen/en-dash range ("DM000910–DM000913"), and
+          // comma-separated list ("DM000824, DM000826"). We detect by
+          // requiring the string to start with DM + digit and contain only
+          // DM-compatible characters (digits, commas, whitespace, hyphens,
+          // en-dashes) — anything else (e.g. "[Deer Meadows 002621–002635]")
+          // falls through to the plain-bold branch.
+          const isDM = /^DM\d/i.test(part) && /^[\sDM\d,\-\u2013\u2014]+$/i.test(part);
           if (fid) runs.push(hyperlinkRun(part, batesToDriveUrl(fid), baseOpts));
           else if (isDM && combinedUrl) runs.push(hyperlinkRun(part, combinedUrl, baseOpts));
           else runs.push(makeRun(part, Object.assign({}, baseOpts, { bold: true })));
@@ -2638,9 +2649,9 @@ function promptSetCaseCaption(caseId) {
   showToast(c.caseCaption ? '✓ Case caption saved.' : '✓ Case caption cleared.');
 }
 
-// Renders the "Case links" card on the Report Builder page: status of the
-// combined-facility-records auto-detection (read-only — Debbie controls this
-// by what she names the file in Drive) plus the editable case caption.
+// Renders the "Case links" card on the Report Builder page: shows where
+// [DM######] citations will point (auto-detected combined file, or the case
+// folder as a fallback) plus the editable case caption.
 function renderReportCaseLinks(caseId) {
   const host = document.getElementById('rep-case-links');
   if (!host) return;
@@ -2649,21 +2660,27 @@ function renderReportCaseLinks(caseId) {
     host.innerHTML = '<div style="color:var(--gray-400);font-size:12px;">Pick a case to see its links.</div>';
     return;
   }
-  // Scan the case's driveFileIndex for a combined-records match.
+  // Work out where DM citations will resolve. Mirror the generateDocx
+  // priority: combined-records override → combined-records file in folder →
+  // case folder URL.
   const idx = c.driveFileIndex || {};
   const rx = /^combined[\s_-]*(facility)?[\s_-]*records?\b/i;
-  let detectedName = '', detectedUrl = '';
+  let citeTarget = '', citeLabel = '';
   for (const name of Object.keys(idx)) {
-    if (rx.test(name)) { detectedName = name; detectedUrl = idx[name]; break; }
+    if (rx.test(name)) { citeTarget = idx[name]; citeLabel = 'Linked to “' + name + '” in the case folder.'; break; }
+  }
+  if (!citeTarget && c.driveFolderId) {
+    citeTarget = 'https://drive.google.com/drive/folders/' + c.driveFolderId;
+    citeLabel = 'Linked to the case\'s Drive folder (default). Attorneys will land on the folder and pick the record.';
   }
   const cap = c.caseCaption ? esc(c.caseCaption) : '';
   host.innerHTML =
     '<div style="font-size:12px;line-height:1.5;">' +
-      '<div style="margin-bottom:8px;"><strong>Combined records file:</strong><br>' +
-        (detectedUrl
-          ? '✓ <a href="'+esc(detectedUrl)+'" target="_blank" rel="noopener">'+esc(detectedName)+'</a> '
-            + '<span style="color:var(--gray-400);">(auto-detected in case folder)</span>'
-          : '<span style="color:var(--gray-400);">not found. Drop a file named <b>Combined Records.pdf</b> (or <i>Combined Facility Records.pdf</i>) in this case\'s Drive folder, then click <b>Load files from case folder</b> on the Record Analysis page. [DM######] citations will link to it automatically.</span>'
+      '<div style="margin-bottom:8px;"><strong>[DM######] citations link to:</strong><br>' +
+        (citeTarget
+          ? '✓ <a href="'+esc(citeTarget)+'" target="_blank" rel="noopener" style="word-break:break-all;">' + esc(citeTarget) + '</a><br>'
+            + '<span style="color:var(--gray-500);">' + esc(citeLabel) + '</span>'
+          : '<span style="color:var(--gray-400);">No Drive folder linked to this case yet — links won\'t resolve. Add records via Record Analysis → Load files from case folder.</span>'
         ) +
       '</div>' +
       '<div style="margin-bottom:8px;"><strong>Case caption:</strong><br>' +
