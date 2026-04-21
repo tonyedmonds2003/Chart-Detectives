@@ -48,6 +48,25 @@ body { font-family: 'DM Sans', sans-serif; background: var(--cream); color: var(
 .topbar-avatar { width: 32px; height: 32px; border-radius: 50%; background: var(--gold); display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 13px; color: var(--navy); }
 .topbar-name { color: var(--white); font-size: 13px; }
 .topbar-time { color: var(--gold-light); font-size: 12px; font-variant-numeric: tabular-nums; }
+/* App-version badge in the top bar. Green = running matches on-disk HTML.
+   Red = stale tab (hard-reload needed). Gray = check hasn't run or failed. */
+.topbar-version {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 9px; border-radius: 10px;
+  font-size: 11px; font-weight: 600; letter-spacing: 0.02em;
+  cursor: pointer; user-select: none;
+  background: rgba(255,255,255,0.08);
+  color: rgba(255,255,255,0.75);
+  border: 1px solid rgba(255,255,255,0.12);
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  font-variant-numeric: tabular-nums;
+}
+.topbar-version:hover { background: rgba(255,255,255,0.14); color: #fff; }
+.topbar-version.fresh { background: rgba(34,139,70,0.25); color: #b9f3c9; border-color: rgba(100,220,140,0.35); }
+.topbar-version.fresh:hover { background: rgba(34,139,70,0.40); color: #fff; }
+.topbar-version.stale { background: rgba(190,30,30,0.30); color: #ffc9c9; border-color: rgba(255,90,90,0.50); }
+.topbar-version.stale:hover { background: rgba(190,30,30,0.50); color: #fff; }
+.topbar-version .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: 0.8; }
 
 /* SIDEBAR */
 .sidebar { width: var(--sidebar-w); background: var(--navy-dark); position: fixed; left: 0; top: var(--top-h); bottom: 0; overflow-y: auto; z-index: 90; display: flex; flex-direction: column; }
@@ -234,6 +253,12 @@ tr:hover td { background: var(--gray-50); }
     </svg>
   </div>
   <div class="topbar-right">
+    <span class="topbar-version" id="app-version-badge"
+          title="App version — click to re-check"
+          onclick="checkAppVersionFreshness(true)">
+      <span class="dot"></span>
+      <span id="app-version-text">v…</span>
+    </span>
     <span class="topbar-time" id="clock">--:-- --</span>
     <div class="topbar-user">
       <div class="topbar-avatar">D</div>
@@ -1079,6 +1104,18 @@ tr:hover td { background: var(--gray-50); }
 </div>
 
 <script>
+// ============================================================================
+// APP VERSION — bump this on every meaningful edit to index.html.
+// The badge in the top bar reads APP_VERSION from the running page and
+// compares it against the value baked into index.html on disk (via fetch).
+// If they differ, the badge turns red and Tony knows to hard-reload.
+//
+// Format: YYYY.MM.DD.N where N is the Nth change on that day (1-indexed).
+// APP_VERSION_LABEL is a human-readable caption shown on hover.
+// ============================================================================
+const APP_VERSION       = '2026.04.21.3';
+const APP_VERSION_LABEL = 'Apr 21, 2026 — verifier refactor + visibility fix + version badge';
+
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
 
 // --- Anthropic pricing for Claude Haiku 4.5 (USD per million tokens) ---
@@ -2258,6 +2295,60 @@ function migrateFirmsAndAttorneys() {
   if (changed) save();
 }
 
+// ===== APP VERSION BADGE =====
+// Paint the badge with the currently-running version, then fetch the on-disk
+// HTML to see if that version is still current. If the disk copy has a newer
+// APP_VERSION string, the badge turns red — that's Tony's signal to
+// hard-reload the tab before running any new analysis.
+function paintAppVersionBadge(state, message) {
+  const badge = document.getElementById('app-version-badge');
+  const text  = document.getElementById('app-version-text');
+  if (!badge || !text) return;
+  badge.classList.remove('fresh', 'stale');
+  if (state === 'fresh') badge.classList.add('fresh');
+  if (state === 'stale') badge.classList.add('stale');
+  text.textContent = 'v' + APP_VERSION;
+  const parts = [
+    'Running: v' + APP_VERSION,
+    APP_VERSION_LABEL ? '(' + APP_VERSION_LABEL + ')' : '',
+    message || ''
+  ].filter(Boolean);
+  badge.title = parts.join('\n') + '\n\nClick to re-check.';
+}
+async function checkAppVersionFreshness(userInitiated) {
+  paintAppVersionBadge(null, 'Checking on-disk version…');
+  try {
+    // Fetch the current page URL, bypassing cache so we read the actual file
+    // on disk (not the copy this tab booted from).
+    const resp = await fetch(window.location.href, { cache: 'no-store' });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const html = await resp.text();
+    // Pull the APP_VERSION literal out of the on-disk HTML. Regex is loose on
+    // whitespace but anchored to `const APP_VERSION` so we don't match any
+    // other string containing a version-like token.
+    const m = html.match(/const\s+APP_VERSION\s*=\s*['"]([^'"]+)['"]/);
+    if (!m) throw new Error('APP_VERSION not found in on-disk HTML');
+    const diskVersion = m[1];
+    if (diskVersion === APP_VERSION) {
+      paintAppVersionBadge('fresh', 'Up to date — on-disk version matches.');
+      if (userInitiated) console.log('[version] up to date: v' + APP_VERSION);
+    } else {
+      paintAppVersionBadge('stale',
+        'STALE TAB — on-disk version is v' + diskVersion + '. '
+        + 'Hard-reload (Ctrl+Shift+R) before running analysis.');
+      console.warn('[version] STALE: running v' + APP_VERSION + ' but disk has v' + diskVersion);
+      if (userInitiated) {
+        alert('Stale tab detected.\n\nRunning version:  v' + APP_VERSION
+              + '\nOn-disk version:   v' + diskVersion
+              + '\n\nHard-reload this tab (Ctrl+Shift+R) before running any analysis or reports.');
+      }
+    }
+  } catch (e) {
+    paintAppVersionBadge(null, 'Freshness check failed: ' + e.message);
+    if (userInitiated) console.warn('[version] check failed:', e);
+  }
+}
+
 // ===== INIT =====
 load();
 setInterval(() => {
@@ -2265,6 +2356,12 @@ setInterval(() => {
   const el = document.getElementById('clock');
   if (el) el.textContent = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }, 1000);
+
+// Paint the badge immediately so the version number is visible at boot,
+// then kick off the on-disk freshness check after a short delay so it doesn't
+// race with whatever the browser is doing during initial page load.
+paintAppVersionBadge(null, 'Version check not yet run.');
+setTimeout(() => checkAppVersionFreshness(false), 1500);
 
 function init() {
   populateCaseDropdowns();
@@ -3687,6 +3784,11 @@ async function retrySynthesisForCase(caseInfo) {
   if (!area || !pre) {
     throw new Error('Record Analysis pane is not currently mounted — switch to the Record Analysis tab and try again.');
   }
+  // Critical: renderSavedAnalysisIfAny hides `area` (style.display='none') when
+  // showing a prior analysis in the interactive review renderer. If we just write
+  // into area.innerHTML here without un-hiding it, the "Synthesizing…" spinner is
+  // invisible and the user thinks the re-run is broken. Force it back to visible.
+  area.style.display = '';
   area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Reloading job to re-run synthesis…</span></div>';
   pre.style.display = 'none';
 
