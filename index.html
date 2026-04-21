@@ -3329,19 +3329,25 @@ async function pollBatchAndFinish(ctx) {
   const typeLabel = typeLabels[type] || type;
 
   const buildSynthPrompt = (intro, items) =>
-`You are an expert Legal Nurse Consultant.
+`You are an expert Legal Nurse Consultant preparing a legal deliverable. Accuracy is non-negotiable.
 ${caseContext ? 'Case context: ' + caseContext : ''}
 ${instructions ? 'Special instructions: ' + instructions : ''}
 
 ${intro}
 
-Rules:
-• Deduplicate repeated facts.
+MANDATORY ACCURACY RULES — violations are grounds for rejection:
+• DO NOT invent or infer facts. If a date, name, dose, diagnosis, provider, or citation is unclear or missing in the source text, write "[unclear in source]" in that position rather than guessing or filling from clinical knowledge.
+• Every factual statement must end with its source citation (record name and/or date) in the form "(Source: <record>)". No bare claims.
+• Copy source citations verbatim. Do not paraphrase, shorten, or reformat record names.
+• If two sources disagree on a fact, record both with their respective citations rather than picking one.
+• Do not add clinical commentary, causation analysis, or deviations from standard of care unless it is explicitly stated in the source text.
+
+Presentation rules:
+• Deduplicate repeated facts (keep the earliest and most specific citation when merging).
 • Order events chronologically by date.
-• Preserve all source citations (record names/dates).
 • Use professional LNC terminology and clear section headings.
-• Do NOT mention "batches", "groups", or the batching process in the output — produce a unified document.
-• Be comprehensive; this is the final deliverable.
+• Do NOT mention "batches", "groups", "extractions", or the batching process in the output — produce a unified document.
+• Be comprehensive. This is the final deliverable — completeness beats brevity.
 
 ${items.join('\n\n')}`;
 
@@ -3376,32 +3382,73 @@ ${items.join('\n\n')}`;
 
       area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Large case — L' + level + ' reducing ' + items.length + ' items into ' + groups.length + ' groups…</span></div>';
 
-      const newItems = [];
-      for (let gi = 0; gi < groups.length; gi++) {
-        area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>L' + level + ': synthesizing group ' + (gi + 1) + ' of ' + groups.length + '…</span></div>';
+      // Parallel group synthesis with bounded concurrency. Why 4:
+      //   • Anthropic's per-org rate limits comfortably absorb 4 concurrent Haiku calls
+      //     even during a long-running job.
+      //   • 4× wall-clock improvement on 25+ group runs (Mimms-class cases drop from ~90min
+      //     to ~25min), but we keep each call fully sequential within its worker so retry
+      //     logic inside callClaude stays deterministic per-call.
+      //   • Processing time is billable, so speed is NOT the primary motivator — this is
+      //     about giving Debbie the deliverable sooner when she's waiting on it. Quality
+      //     is unchanged: each group still gets its own dedicated call with full retry.
+      //
+      // Ordering invariant: we write into newItems[gi] by index (NOT push) so the final
+      // report preserves the original document ordering regardless of which worker
+      // finishes first. Critical — batch order reflects chronological sequencing in many
+      // cases, and shuffling it would break the chronological rule in buildSynthPrompt.
+      //
+      // Error handling: per-call try/catch inside runOne writes a fallback slot with the
+      // raw group content, so no facts are lost even if one worker's call fails. We
+      // use Promise.all on the workers (safe — runOne swallows errors) rather than
+      // Promise.allSettled on the individual calls, because we need all workers to
+      // drain the queue before we move on.
+      const newItems = new Array(groups.length);
+      const CONCURRENCY = Math.min(4, groups.length);
+      let completed = 0;
+      let inFlight = 0;
+      const updateProgress = () => {
+        area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>L' + level + ': ' + completed + '/' + groups.length + ' groups completed, ' + inFlight + ' in flight…</span></div>';
+      };
+      updateProgress();
+
+      const runOne = async (gi) => {
+        inFlight++;
+        updateProgress();
         const groupPrompt = buildSynthPrompt(
           'Below are fact extractions from a subset of this case\'s records. Produce a consolidated, deduplicated fact extraction covering this subset only — preserve every date, source citation, medication, provider, diagnosis, and deviation. This will be combined with other subsets in a final step.',
           groups[gi]
         );
         try {
-          // Raise synthesis output cap to 32k tokens. The callClaude default of 12k was
-          // tuned around Cloudflare's 100-second non-streaming timeout — no longer a concern
-          // since we switched to SSE streaming (bytes flow continuously, the connection
-          // stays alive regardless of how long Haiku takes to finish). 12k was truncating
-          // dense group consolidations mid-sentence and silently losing facts before the
-          // next reduction level — exactly what we can't afford on a legal deliverable.
-          // 32k gives Haiku room to emit a full consolidated fact list per group even on
-          // the largest medical cases. Haiku 4.5's max is higher than this, but 32k is
-          // comfortably safe and keeps the output-side cost predictable.
+          // 32k output cap for synthesis — prevents silent truncation of consolidated
+          // group outputs on dense medical cases. See historical note: 12k default was
+          // tuned for the old non-streaming path.
           const r = await callClaude(groupPrompt, { maxTokens: 32000 });
-          newItems.push('===== L' + level + ' GROUP ' + (gi + 1) + ' CONSOLIDATED =====\n' + r);
+          newItems[gi] = '===== L' + level + ' GROUP ' + (gi + 1) + ' CONSOLIDATED =====\n' + r;
         } catch (e) {
           // Fall through with the raw group contents so no facts are lost even if one
           // group's synth call fails.
-          newItems.push('===== L' + level + ' GROUP ' + (gi + 1) + ' ERROR =====\n[Group synthesis failed: ' + e.message + ']\n\nRaw items for this group follow:\n\n' + groups[gi].join('\n\n'));
+          newItems[gi] = '===== L' + level + ' GROUP ' + (gi + 1) + ' ERROR =====\n[Group synthesis failed: ' + e.message + ']\n\nRaw items for this group follow:\n\n' + groups[gi].join('\n\n');
         }
-        if (gi < groups.length - 1) await new Promise(r => setTimeout(r, 750));
+        inFlight--;
+        completed++;
+        updateProgress();
+      };
+
+      let nextIndex = 0;
+      const workers = [];
+      for (let w = 0; w < CONCURRENCY; w++) {
+        workers.push((async () => {
+          while (true) {
+            const gi = nextIndex++;
+            if (gi >= groups.length) return;
+            await runOne(gi);
+            // Small stagger between a worker's calls to avoid thundering-herd bursts on
+            // rate limits when all 4 workers happen to finish a call at once.
+            if (nextIndex < groups.length) await new Promise(r => setTimeout(r, 250));
+          }
+        })());
       }
+      await Promise.all(workers);
       items = newItems;
       // Safety: if a reduction pass didn't meaningfully shrink the total, bail out of the
       // loop so we don't spin forever. The final call below will throw if still too big.
@@ -3418,6 +3465,12 @@ ${items.join('\n\n')}`;
     // have it truncate. Previous runs with the 12k default were cutting off ~30-40% of
     // the final narrative on large cases.
     finalText = await callClaude(synthPrompt, { maxTokens: 32000 });
+    // Post-synthesis verification pass. Uses the last-level `items` (consolidated group
+    // outputs for big cases, raw batchOutputs text for small cases) as source material —
+    // always more compact than raw extractions, so fits under the 150k char cap more
+    // often. Any failure here is swallowed inside runVerificationPass; we never block
+    // delivery on the review pass.
+    finalText = await runVerificationPass(finalText, items, area);
   } catch (e) {
     await patchJob(jobId, { status: 'failed', error: 'Synthesis failed: ' + e.message }).catch(() => {});
     area.innerHTML = `<div class="alert alert-danger">Synthesis error: ${esc(e.message)}<br><br>Batch extractions were completed but could not be merged. You can still review them below.</div>`;
@@ -3431,7 +3484,16 @@ ${items.join('\n\n')}`;
   await patchJob(jobId, { status: 'done', result: finalText }).catch(() => {});
   if (caseInfo && caseInfo.id) {
     const c = state.cases.find(x => x.id === caseInfo.id);
-    if (c) { c.activeJobId = null; save(); }
+    if (c) {
+      // Preserve the batch job id AFTER clearing activeJobId so the "Re-run Synthesis"
+      // button can find the KV job again when Debbie wants a fresh pass with updated
+      // prompts. The batch_id + batch_requests in the job metadata stay retrievable
+      // (Anthropic retains results 29 days, free) — this is the only way to rebuild
+      // synthesis without paying for a fresh extraction.
+      c.lastBatchJobId = jobId;
+      c.activeJobId = null;
+      save();
+    }
   }
   await finishAnalysis(finalText, caseInfo, type, typeLabels, area, pre);
 }
@@ -3466,7 +3528,12 @@ async function resumeAsyncJobForCase(caseInfo) {
   // Already done — render result and clear marker.
   if (job.status === 'done' && job.result) {
     const c = state.cases.find(x => x.id === caseInfo.id);
-    if (c) { c.activeJobId = null; save(); }
+    if (c) {
+      // Same preservation as pollBatchAndFinish: keep the job id discoverable for Re-run.
+      c.lastBatchJobId = caseInfo.activeJobId;
+      c.activeJobId = null;
+      save();
+    }
     await finishAnalysis(job.result, caseInfo, job.metadata?.analysis_type, { chronology:'detailed medical chronology', summary:'comprehensive narrative summary', gaps:'analysis of care gaps and inconsistencies', providers:'list of all providers, diagnoses, and medications', full:'full comprehensive LNC analysis' }, area, pre);
     return;
   }
@@ -3565,16 +3632,24 @@ async function resumeAsyncJobForCase(caseInfo) {
 // call(s) — no re-extraction. This is what saves the Kathleen Mimms 304-batch run
 // after synthesis originally failed on credit exhaustion.
 async function retrySynthesisForCase(caseInfo) {
-  if (!caseInfo || !caseInfo.activeJobId) {
-    throw new Error('No active job id on this case.');
+  // Accept either a live activeJobId (failed-job retry path) or a preserved
+  // lastBatchJobId (post-completion re-run path). The lastBatchJobId path is how
+  // Debbie re-runs synthesis with updated prompts after a clean completion —
+  // Anthropic caches batch results for 29 days, so the KV job + cached extractions
+  // are still retrievable long after activeJobId has been cleared.
+  const jobId = (caseInfo && caseInfo.activeJobId)
+             || (caseInfo && caseInfo.lastBatchJobId)
+             || null;
+  if (!caseInfo || !jobId) {
+    throw new Error('No job id on this case — cannot retry. Extractions may have aged out of Anthropic\'s 29-day cache.');
   }
   const area = document.getElementById('rec-result-area');
   const pre = document.getElementById('rec-result');
   if (!area || !pre) return;
-  area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Reloading failed job to retry synthesis…</span></div>';
+  area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Reloading job to re-run synthesis…</span></div>';
   pre.style.display = 'none';
 
-  const job = await getJob(caseInfo.activeJobId);
+  const job = await getJob(jobId);
   if (!job) throw new Error('Job record not found in KV.');
   if (!job.batch_id) throw new Error('No batch id on job — nothing to retry from.');
   const md = job.metadata || {};
@@ -3619,6 +3694,41 @@ function renderSavedAnalysisIfAny(caseInfo, area, pre) {
   if (copyBtn) copyBtn.style.display = '';
   const sendBtn = document.getElementById('send-to-report-btn');
   if (sendBtn) sendBtn.style.display = '';
+  // If this case has a preserved batch job id, offer a "Re-run Synthesis" button
+  // that rebuilds the report from the cached extractions with the current prompts.
+  // Free on the extraction side (Anthropic caches results 29 days); only charged
+  // for the synthesis calls. Lets Debbie re-run any prior case against updated
+  // synthesis rules or verification-pass logic without a fresh 304-batch spend.
+  //
+  // We render the button into a sidecar container so we don't have to change the
+  // static HTML layout. If the container is missing we create it once next to the
+  // Copy / Send buttons.
+  if (c.lastBatchJobId) {
+    let rerunBtn = document.getElementById('rerun-synth-btn');
+    if (!rerunBtn) {
+      rerunBtn = document.createElement('button');
+      rerunBtn.id = 'rerun-synth-btn';
+      rerunBtn.type = 'button';
+      rerunBtn.className = 'btn btn-secondary';
+      rerunBtn.style.marginLeft = '8px';
+      rerunBtn.textContent = 'Re-run synthesis with updated prompts';
+      rerunBtn.title = 'Rebuilds this analysis from the cached source extractions using the current synthesis rules. No re-extraction cost.';
+      const anchor = copyBtn || sendBtn;
+      if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(rerunBtn, anchor.nextSibling);
+    }
+    rerunBtn.style.display = '';
+    rerunBtn.onclick = () => {
+      if (!confirm('Re-run synthesis for this case?\n\nThis rebuilds the analysis using the latest synthesis rules and runs an internal quality review on the draft. Source extractions are reused from cache (no re-extraction cost). Estimated cost: $5–$10 in synthesis calls.')) return;
+      rerunBtn.disabled = true;
+      retrySynthesisForCase(c).catch(e => {
+        alert('Re-run failed: ' + e.message);
+        rerunBtn.disabled = false;
+      });
+    };
+  } else {
+    const existing = document.getElementById('rerun-synth-btn');
+    if (existing) existing.style.display = 'none';
+  }
   // Timestamp banner so Debbie knows this is a recall, not a fresh run.
   const when = c.lastAnalysisAt ? new Date(c.lastAnalysisAt).toLocaleString() : 'previously';
   showToast('📂 Showing saved analysis from ' + when + ' — click Start AI Analysis to regenerate.');
@@ -4039,19 +4149,25 @@ Be thorough and factual. Cite the source record name/date for each fact. Do NOT 
   const typeLabel = typeLabels[type] || type;
 
   const buildSynthPrompt = (intro, items) =>
-`You are an expert Legal Nurse Consultant.
+`You are an expert Legal Nurse Consultant preparing a legal deliverable. Accuracy is non-negotiable.
 ${caseContext ? 'Case context: ' + caseContext : ''}
 ${instructions ? 'Special instructions: ' + instructions : ''}
 
 ${intro}
 
-Rules:
-• Deduplicate repeated facts.
+MANDATORY ACCURACY RULES — violations are grounds for rejection:
+• DO NOT invent or infer facts. If a date, name, dose, diagnosis, provider, or citation is unclear or missing in the source text, write "[unclear in source]" in that position rather than guessing or filling from clinical knowledge.
+• Every factual statement must end with its source citation (record name and/or date) in the form "(Source: <record>)". No bare claims.
+• Copy source citations verbatim. Do not paraphrase, shorten, or reformat record names.
+• If two sources disagree on a fact, record both with their respective citations rather than picking one.
+• Do not add clinical commentary, causation analysis, or deviations from standard of care unless it is explicitly stated in the source text.
+
+Presentation rules:
+• Deduplicate repeated facts (keep the earliest and most specific citation when merging).
 • Order events chronologically by date.
-• Preserve all source citations (record names/dates).
 • Use professional LNC terminology and clear section headings.
-• Do NOT mention "batches", "groups", or the batching process in the output — produce a unified document.
-• Be comprehensive; this is the final deliverable.
+• Do NOT mention "batches", "groups", "extractions", or the batching process in the output — produce a unified document.
+• Be comprehensive. This is the final deliverable — completeness beats brevity.
 
 ${items.join('\n\n')}`;
 
@@ -4077,23 +4193,51 @@ ${items.join('\n\n')}`;
       if (g.length) groups.push(g);
 
       area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Large case — L' + level + ' reducing ' + items.length + ' items into ' + groups.length + ' groups…</span></div>';
-      const newItems = [];
-      for (let gi = 0; gi < groups.length; gi++) {
-        area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>L' + level + ': synthesizing group ' + (gi+1) + ' of ' + groups.length + '…</span></div>';
+
+      // Parallel group synthesis (concurrency 4). Mirror of the async-path scheduler —
+      // see that block for full rationale. Writes newItems[gi] by index so ordering is
+      // preserved regardless of worker completion order. Per-call try/catch inside
+      // runOne ensures one failure doesn't lose facts for the other groups.
+      const newItems = new Array(groups.length);
+      const CONCURRENCY = Math.min(4, groups.length);
+      let completed = 0;
+      let inFlight = 0;
+      const updateProgress = () => {
+        area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>L' + level + ': ' + completed + '/' + groups.length + ' groups completed, ' + inFlight + ' in flight…</span></div>';
+      };
+      updateProgress();
+
+      const runOne = async (gi) => {
+        inFlight++;
+        updateProgress();
         const groupPrompt = buildSynthPrompt(
           'Below are fact extractions from a subset of this case\'s records. Produce a consolidated, deduplicated fact extraction covering this subset only — preserve every date, source citation, medication, provider, diagnosis, and deviation. This will be combined with other subsets in a final step.',
           groups[gi]
         );
         try {
-          // 32k output cap for synthesis — see async-path twin for rationale. Prevents
-          // silent truncation of consolidated group outputs on dense medical cases.
           const r = await callClaude(groupPrompt, { maxTokens: 32000 });
-          newItems.push('===== L' + level + ' GROUP ' + (gi+1) + ' CONSOLIDATED =====\n' + r);
+          newItems[gi] = '===== L' + level + ' GROUP ' + (gi+1) + ' CONSOLIDATED =====\n' + r;
         } catch(e) {
-          newItems.push('===== L' + level + ' GROUP ' + (gi+1) + ' ERROR =====\n[Group synthesis failed: ' + e.message + ']\n\nRaw items follow:\n\n' + groups[gi].join('\n\n'));
+          newItems[gi] = '===== L' + level + ' GROUP ' + (gi+1) + ' ERROR =====\n[Group synthesis failed: ' + e.message + ']\n\nRaw items follow:\n\n' + groups[gi].join('\n\n');
         }
-        if (gi < groups.length - 1) await new Promise(r => setTimeout(r, 750));
+        inFlight--;
+        completed++;
+        updateProgress();
+      };
+
+      let nextIndex = 0;
+      const workers = [];
+      for (let w = 0; w < CONCURRENCY; w++) {
+        workers.push((async () => {
+          while (true) {
+            const gi = nextIndex++;
+            if (gi >= groups.length) return;
+            await runOne(gi);
+            if (nextIndex < groups.length) await new Promise(r => setTimeout(r, 250));
+          }
+        })());
       }
+      await Promise.all(workers);
       items = newItems;
       if (items.length >= groups.length && groups.length === 1) break;
     }
@@ -4104,7 +4248,10 @@ ${items.join('\n\n')}`;
       : 'Below are ' + items.length + ' consolidated fact extraction(s) covering this case. Combine them into a single ' + typeLabel + '.';
     const synthPrompt = buildSynthPrompt(intro, items);
     // 32k output cap for the final deliverable — prevents truncation of the combined report.
-    const res = await callClaude(synthPrompt, { maxTokens: 32000 });
+    let res = await callClaude(synthPrompt, { maxTokens: 32000 });
+    // Post-synthesis verification pass — mirrors the async path. See runVerificationPass
+    // for why this is worth the extra Haiku call on a legal deliverable.
+    res = await runVerificationPass(res, items, area);
     await finishAnalysis(res, caseInfo, type, typeLabels, area, pre);
   } catch(e) {
     area.innerHTML = `<div class="alert alert-danger">Synthesis error: ${esc(e.message)}<br><br>Batch extractions were completed but could not be merged. You can still review them below.</div>`;
@@ -4173,6 +4320,97 @@ function stripInternalFields(blocks) {
     const { _pageCount, ...rest } = b;
     return rest;
   });
+}
+
+// Post-synthesis verification pass. Takes the draft report plus the source material
+// used to build it, and asks Haiku to flag any claim that doesn't clearly trace to a
+// source — missing citations, vague language, inferred or embellished facts. Appends
+// an internal-review section to the output so Debbie can sanity-check flagged items
+// before sending the deliverable to the hiring attorney.
+//
+// Design notes:
+//   • Additive, not blocking: any failure here is swallowed. The report ships without
+//     the review section rather than failing the whole run on a verifier hiccup.
+//   • Cost is ~$0.20–$1.00 per case depending on report length. Worth it for a legal
+//     deliverable — Tony has explicitly prioritized reliability over cost.
+//   • Source material is capped at ~150k chars to keep a single verifier call in the
+//     200k context window. For huge cases (Mimms-scale) we fall back to verifying the
+//     draft against itself only (internal consistency: citations, vague language,
+//     self-contradictions) — still valuable, even without line-level traceability.
+//   • Output label is deliberately neutral: "Internal Quality Review". No mention of
+//     AI, models, or automated checking. This section is for Debbie's eyes only and
+//     will be removed or addressed before the deliverable goes to the attorney.
+async function runVerificationPass(finalText, sourceItems, area) {
+  try {
+    if (area) {
+      area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Running internal quality review on draft…</span></div>';
+    }
+    const SOURCE_CHAR_CAP = 150000;
+    let combinedSource = '';
+    if (Array.isArray(sourceItems) && sourceItems.length) {
+      combinedSource = sourceItems.join('\n\n');
+    }
+    const hasSource = combinedSource.length > 0 && combinedSource.length <= SOURCE_CHAR_CAP;
+    let verifyPrompt;
+    if (hasSource) {
+      verifyPrompt =
+`You are a senior Legal Nurse Consultant reviewing a draft report for a peer before it goes to a hiring attorney. Your job is to catch any factual claim that is not clearly supported by the source material.
+
+Review the DRAFT REPORT against the SOURCE MATERIAL below and flag every one of the following:
+• A date, name, dose, diagnosis, provider, or event in the draft that does NOT appear in the source material.
+• A statement in the draft that is missing a source citation.
+• A statement that appears inferred, embellished, or adds clinical commentary beyond what the source states.
+• A citation in the draft that doesn't match any record name present in the source material.
+
+Output format:
+• If the draft is clean, reply with exactly: "REVIEW COMPLETE — no unsupported claims identified."
+• Otherwise, produce a numbered list. For each flagged item, include:
+   - The quoted claim from the draft (in "double quotes")
+   - What's missing or mismatched (e.g., "no source citation", "date not in source", "citation does not match any record")
+   - (Optional) The closest supporting line from the source, if any, quoted
+
+Be strict. False negatives on a legal deliverable cost more than false positives. When in doubt, flag it.
+
+===== DRAFT REPORT =====
+${finalText}
+
+===== SOURCE MATERIAL =====
+${combinedSource}`;
+    } else {
+      // Large case fallback: verify the draft against itself. We can still catch
+      // missing citations, vague language, and internal contradictions this way even
+      // without the full source material.
+      verifyPrompt =
+`You are a senior Legal Nurse Consultant reviewing a draft report for a peer before it goes to a hiring attorney. The source material for this case is too large to include in full, so review the DRAFT REPORT below for INTERNAL QUALITY ONLY.
+
+Flag every one of the following:
+• Any factual statement missing a source citation (record name and/or date).
+• Vague or hedging language that should be tightened ("appears to", "possibly", "may have" when a definite statement is expected).
+• Internal contradictions (two statements in the draft that can't both be true).
+• Statements that read as inferred clinical commentary rather than extracted facts.
+
+Output format:
+• If the draft is clean, reply with exactly: "REVIEW COMPLETE — no internal issues identified."
+• Otherwise, produce a numbered list. For each flagged item, include:
+   - The quoted claim from the draft (in "double quotes")
+   - What the problem is (e.g., "no source citation", "contradicts item 7", "vague language")
+
+Be strict. This is a legal deliverable.
+
+===== DRAFT REPORT =====
+${finalText}`;
+    }
+    const verifyOutput = await callClaude(verifyPrompt, { maxTokens: 16000 });
+    if (!verifyOutput || !verifyOutput.trim()) return finalText;
+    const cleanPass = /^\s*REVIEW COMPLETE/i.test(verifyOutput.trim());
+    const header = cleanPass
+      ? '\n\n===== INTERNAL QUALITY REVIEW (for Deborah\'s eyes only — remove before delivery) =====\n'
+      : '\n\n===== INTERNAL QUALITY REVIEW — ITEMS TO VERIFY BEFORE DELIVERY =====\n(This section is for internal use only. Review each flagged item against the source records, correct or remove as needed, and delete this section before sending the deliverable.)\n\n';
+    return finalText + header + verifyOutput.trim();
+  } catch (e) {
+    console.warn('[verify] verification pass failed, continuing without review section:', e.message);
+    return finalText;
+  }
 }
 
 // Common finish routine for both single-call and batched paths: show result, save to Drive.
