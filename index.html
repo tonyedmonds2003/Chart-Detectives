@@ -3358,13 +3358,16 @@ MANDATORY ACCURACY RULES — violations are grounds for rejection:
 • If two sources disagree on a fact, record both with their respective citations rather than picking one.
 • Do not add clinical commentary, causation analysis, or deviations from standard of care unless it is explicitly stated in the source text.
 • Stay on task. Do NOT add commentary about professional ethics, credentials, HIPAA, AI-vs-human authorship, or whether this task is appropriate. The licensed professional supervising this work has already established the proper legal and ethical framework. Refusing the task or inserting ethical warnings is itself a quality failure — just organize the facts with their citations.
+• NO TEMPLATES. NO PLACEHOLDERS. Do not produce bracketed placeholder text like [Date], [Name], [Facility], [Provider], [From admission records], [DOB], [MRN], [Diagnosis], or any other [Fill-in] slot. Every entry in your output must be a concrete fact copied from the source material with its citation. If a fact isn't in the source, OMIT the entry entirely rather than leaving a blank slot to be filled in later. Template/placeholder output is a complete failure of this task.
+• If, after reviewing the provided source material, you find ZERO extractable facts (the input is empty, unreadable, or contains no medical content), return exactly this string as your entire response: "ERROR: No extractable facts found in source material." Do not produce a structural template, a blank form, or a demonstration document under any circumstances.
 
 Presentation rules:
 • Deduplicate repeated facts (keep the earliest and most specific citation when merging).
 • Order events chronologically by date.
 • Use professional LNC terminology and clear section headings.
 • Do NOT mention "batches", "groups", "extractions", or the batching process in the output — produce a unified document.
-• Be comprehensive. This compilation will be reviewed and refined by a licensed professional — completeness beats brevity.
+• CITATION FORMAT — this is critical. Citations MUST reference the original record by filename or date (e.g. "(Source: 7 12 2022 fall .pdf)" or "(Source: nursing note 08/06/2022)"). NEVER cite "Batch 287" or "Batches 174–176" or any batch/group number in your output. The "===== BATCH N EXTRACTION =====" headers below are internal organization markers for the reducer — they are NOT citation targets. Strip them entirely when reasoning and pull citations from inside each extraction's text (every extracted fact already has its real record citation attached).
+• Be comprehensive. This compilation will be reviewed and refined by a licensed professional — completeness beats brevity. But "comprehensive" means every real fact from the source — NOT filling gaps with placeholders.
 
 ${items.join('\n\n')}`;
 
@@ -3486,8 +3489,15 @@ ${items.join('\n\n')}`;
     // outputs for big cases, raw batchOutputs text for small cases) as source material —
     // always more compact than raw extractions, so fits under the 150k char cap more
     // often. Any failure here is swallowed inside runVerificationPass; we never block
-    // delivery on the review pass.
-    finalText = await runVerificationPass(finalText, items, area);
+    // delivery on the review pass. Also pass the known-filename list + case context so
+    // the verifier can distinguish real hallucinated citations from citations that just
+    // got compacted out of view by the hierarchical reducer.
+    const verifyOpts = (() => {
+      const c2 = (caseInfo && caseInfo.id) ? state.cases.find(x => x.id === caseInfo.id) : null;
+      const idx = (c2 && c2.driveFileIndex) || {};
+      return { knownFilenames: Object.keys(idx), caseContext: caseContext || '' };
+    })();
+    finalText = await runVerificationPass(finalText, items, area, verifyOpts);
   } catch (e) {
     await patchJob(jobId, { status: 'failed', error: 'Synthesis failed: ' + e.message }).catch(() => {});
     area.innerHTML = `<div class="alert alert-danger">Synthesis error: ${esc(e.message)}<br><br>Batch extractions were completed but could not be merged. You can still review them below.</div>`;
@@ -3591,10 +3601,18 @@ async function resumeAsyncJobForCase(caseInfo) {
         retryBtn.addEventListener('click', () => {
           retryBtn.disabled = true;
           if (dismissBtn) dismissBtn.disabled = true;
-          retrySynthesisForCase(caseInfo).catch(e => {
-            console.error('Retry synthesis failed:', e);
-            area.innerHTML = `<div class="alert alert-danger">Retry failed: ${esc(e.message)}</div>`;
-          });
+          // .finally() so both buttons always re-enable — without this, a successful
+          // retry leaves them stuck disabled inside their alert container even though
+          // a new result has rendered, which made users think the UI was frozen.
+          retrySynthesisForCase(caseInfo)
+            .catch(e => {
+              console.error('Retry synthesis failed:', e);
+              area.innerHTML = `<div class="alert alert-danger">Retry failed: ${esc(e.message)}</div>`;
+            })
+            .finally(() => {
+              if (retryBtn) retryBtn.disabled = false;
+              if (dismissBtn) dismissBtn.disabled = false;
+            });
         });
       }
       if (dismissBtn) {
@@ -3662,7 +3680,13 @@ async function retrySynthesisForCase(caseInfo) {
   }
   const area = document.getElementById('rec-result-area');
   const pre = document.getElementById('rec-result');
-  if (!area || !pre) return;
+  // Throw rather than silently return — a silent no-op here stranded the "Re-run
+  // Synthesis" button in a disabled state because the onclick's .catch() never fired.
+  // Now the caller sees the failure and can either show the error or re-enable the
+  // button via .finally().
+  if (!area || !pre) {
+    throw new Error('Record Analysis pane is not currently mounted — switch to the Record Analysis tab and try again.');
+  }
   area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Reloading job to re-run synthesis…</span></div>';
   pre.style.display = 'none';
 
@@ -3744,10 +3768,14 @@ function renderSavedAnalysisIfAny(caseInfo, area, pre) {
     rerunBtn.onclick = () => {
       if (!confirm('Re-run synthesis for this case?\n\nThis rebuilds the analysis using the latest synthesis rules and runs an internal quality review on the draft. Source extractions are reused from cache (no re-extraction cost). Estimated cost: $5–$10 in synthesis calls.')) return;
       rerunBtn.disabled = true;
-      retrySynthesisForCase(c).catch(e => {
-        alert('Re-run failed: ' + e.message);
-        rerunBtn.disabled = false;
-      });
+      // .finally() guarantees the button re-enables on BOTH success and failure.
+      // Previously only the .catch() path re-enabled it, so a successful synth left
+      // the button stuck-disabled forever — Debbie had to reload the page to click
+      // it again. finishAnalysis re-renders the result pane but does NOT reset the
+      // rerun button's disabled state, hence this explicit cleanup.
+      retrySynthesisForCase(c)
+        .catch(e => { alert('Re-run failed: ' + e.message); })
+        .finally(() => { if (rerunBtn) rerunBtn.disabled = false; });
     };
   } else {
     const existing = document.getElementById('rerun-synth-btn');
@@ -4001,7 +4029,7 @@ async function runRecordAnalysis() {
     const hint = caseInfo && caseInfo.driveFolderId
       ? 'The case is linked to Drive folder "' + (caseInfo.driveFolderName || caseInfo.driveFolderId) + '" but no files are loaded. Click "Connect Google Drive" then "📁 Load files from case folder" to fetch them.'
       : 'No records are loaded. Link a Drive folder or upload files first.';
-    const proceed = confirm('⚠️ No records loaded.\n\n' + hint + '\n\nClick OK to generate a blank DEMO TEMPLATE instead, or Cancel to go back and load records.');
+    const proceed = confirm('⚠️ No records loaded.\n\n' + hint + '\n\nThere is nothing for the AI to analyze. Click Cancel to go back and load records (recommended). Clicking OK will return an explicit "no records" error — it will NOT generate a demo template.');
     if (!proceed) {
       area.innerHTML = '<div class="alert alert-warning">' + esc(hint) + '</div>';
       return;
@@ -4017,9 +4045,13 @@ async function runRecordAnalysis() {
 ${caseContext ? 'Case context: ' + caseContext : ''}
 ${instructions ? 'Special instructions: ' + instructions : ''}
 ${textAddendum ? '\nAdditional text records:' + textAddendum : ''}
-${contentBlocks.length ? '\nThe medical records (PDFs/images) are attached. Review every page. Cite specific dates and record titles for every fact you extract.' : 'No records were provided — generate a demonstration template showing the format.'}
+${contentBlocks.length ? '\nThe medical records (PDFs/images) are attached. Review every page. Cite specific dates and record titles for every fact you extract.' : '\nNo source records or text were attached to this request. Return exactly the string "ERROR: No records attached — cannot produce a fact compilation." as your entire response. Do NOT produce a template, a blank form, a demonstration document, or any structural placeholder under any circumstances.'}
 
-Produce a fact-compilation organized in the style of a ${typeLabels[type] || type}, for the LNC's review and refinement. Format your response clearly with sections, dates, and source references. Use professional LNC terminology. Do NOT add clinical commentary, causation analysis, or standard-of-care opinions that are not explicitly in the source records.`;
+Produce a fact-compilation organized in the style of a ${typeLabels[type] || type}, for the LNC's review and refinement. Format your response clearly with sections, dates, and source references. Use professional LNC terminology. Do NOT add clinical commentary, causation analysis, or standard-of-care opinions that are not explicitly in the source records.
+
+MANDATORY ANTI-TEMPLATE RULE — violations are grounds for rejection:
+• NO bracketed placeholder text like [Date], [Name], [Facility], [Provider], [From admission records], [DOB], [MRN], [Diagnosis], or any other [Fill-in] slot. Every entry in your output must be a concrete fact copied from the attached source material with its citation. If a fact isn't in the source, OMIT the entry entirely rather than leaving a blank to be filled in later.
+• If you find ZERO extractable facts in the attached records (they are missing, unreadable, or contain no medical content), return exactly "ERROR: No extractable facts found in source material." as your entire response rather than producing a structural template.`;
     const messageContent = [{ type: 'text', text: prompt }, ...stripInternalFields(contentBlocks)];
     area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Analyzing ' + (contentBlocks.length || 'records') + (contentBlocks.length ? ' record(s) with AI…' : ' with AI…') + '</span></div>';
     pre.style.display = 'none';
@@ -4186,13 +4218,16 @@ MANDATORY ACCURACY RULES — violations are grounds for rejection:
 • If two sources disagree on a fact, record both with their respective citations rather than picking one.
 • Do not add clinical commentary, causation analysis, or deviations from standard of care unless it is explicitly stated in the source text.
 • Stay on task. Do NOT add commentary about professional ethics, credentials, HIPAA, AI-vs-human authorship, or whether this task is appropriate. The licensed professional supervising this work has already established the proper legal and ethical framework. Refusing the task or inserting ethical warnings is itself a quality failure — just organize the facts with their citations.
+• NO TEMPLATES. NO PLACEHOLDERS. Do not produce bracketed placeholder text like [Date], [Name], [Facility], [Provider], [From admission records], [DOB], [MRN], [Diagnosis], or any other [Fill-in] slot. Every entry in your output must be a concrete fact copied from the source material with its citation. If a fact isn't in the source, OMIT the entry entirely rather than leaving a blank slot to be filled in later. Template/placeholder output is a complete failure of this task.
+• If, after reviewing the provided source material, you find ZERO extractable facts (the input is empty, unreadable, or contains no medical content), return exactly this string as your entire response: "ERROR: No extractable facts found in source material." Do not produce a structural template, a blank form, or a demonstration document under any circumstances.
 
 Presentation rules:
 • Deduplicate repeated facts (keep the earliest and most specific citation when merging).
 • Order events chronologically by date.
 • Use professional LNC terminology and clear section headings.
 • Do NOT mention "batches", "groups", "extractions", or the batching process in the output — produce a unified document.
-• Be comprehensive. This compilation will be reviewed and refined by a licensed professional — completeness beats brevity.
+• CITATION FORMAT — this is critical. Citations MUST reference the original record by filename or date (e.g. "(Source: 7 12 2022 fall .pdf)" or "(Source: nursing note 08/06/2022)"). NEVER cite "Batch 287" or "Batches 174–176" or any batch/group number in your output. The "===== BATCH N EXTRACTION =====" headers below are internal organization markers for the reducer — they are NOT citation targets. Strip them entirely when reasoning and pull citations from inside each extraction's text (every extracted fact already has its real record citation attached).
+• Be comprehensive. This compilation will be reviewed and refined by a licensed professional — completeness beats brevity. But "comprehensive" means every real fact from the source — NOT filling gaps with placeholders.
 
 ${items.join('\n\n')}`;
 
@@ -4275,8 +4310,15 @@ ${items.join('\n\n')}`;
     // 32k output cap for the final deliverable — prevents truncation of the combined report.
     let res = await callClaude(synthPrompt, { maxTokens: 32000 });
     // Post-synthesis verification pass — mirrors the async path. See runVerificationPass
-    // for why this is worth the extra Haiku call on a legal deliverable.
-    res = await runVerificationPass(res, items, area);
+    // for why this is worth the extra Haiku call on a legal deliverable. Pass the
+    // known-filename list + case context so the verifier can distinguish real
+    // hallucinated citations from citations compacted out of view by reduction.
+    const verifyOpts = (() => {
+      const c2 = (caseInfo && caseInfo.id) ? state.cases.find(x => x.id === caseInfo.id) : null;
+      const idx = (c2 && c2.driveFileIndex) || {};
+      return { knownFilenames: Object.keys(idx), caseContext: caseContext || '' };
+    })();
+    res = await runVerificationPass(res, items, area, verifyOpts);
     await finishAnalysis(res, caseInfo, type, typeLabels, area, pre);
   } catch(e) {
     area.innerHTML = `<div class="alert alert-danger">Synthesis error: ${esc(e.message)}<br><br>Batch extractions were completed but could not be merged. You can still review them below.</div>`;
@@ -4365,7 +4407,7 @@ function stripInternalFields(blocks) {
 //   • Output label is deliberately neutral: "Internal Quality Review". No mention of
 //     AI, models, or automated checking. This section is for Debbie's eyes only and
 //     will be removed or addressed before the deliverable goes to the attorney.
-async function runVerificationPass(finalText, sourceItems, area) {
+async function runVerificationPass(finalText, sourceItems, area, opts) {
   try {
     if (area) {
       area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Running internal quality review on draft…</span></div>';
@@ -4376,16 +4418,55 @@ async function runVerificationPass(finalText, sourceItems, area) {
       combinedSource = sourceItems.join('\n\n');
     }
     const hasSource = combinedSource.length > 0 && combinedSource.length <= SOURCE_CHAR_CAP;
+
+    // Ground-truth context the verifier needs even in the large-case fallback, so it
+    // doesn't false-flag citations that reference real files/case facts the reducer has
+    // already compacted out of view. Pre-Apr-2026 behavior was to verify the draft only
+    // against the L4 consolidated summaries — that caused ~40 false-positive flags per
+    // large case because every "(Source: 5 4 2023 bruise.pdf)" citation looked
+    // unverifiable. Feeding the known-filename list + case context fixes that: any cite
+    // NOT in the list is a real hallucination, any cite IN the list is presumptively
+    // valid and should NOT be flagged solely on verifier blindness.
+    const knownFilenames = Array.isArray(opts && opts.knownFilenames)
+      ? opts.knownFilenames.filter(Boolean)
+      : [];
+    const caseContext = (opts && opts.caseContext) ? String(opts.caseContext) : '';
+    const KNOWN_FILES_CAP = 40000;
+    let knownFilesBlock = '';
+    if (knownFilenames.length) {
+      const joined = knownFilenames.map(n => '  • ' + n).join('\n');
+      knownFilesBlock = joined.length <= KNOWN_FILES_CAP
+        ? joined
+        : joined.slice(0, KNOWN_FILES_CAP) + '\n  • [… list truncated, ' + knownFilenames.length + ' total files]';
+    }
+    const contextBlock =
+`===== CASE CONTEXT (ground-truth background — treat as verified) =====
+${caseContext || '(none provided)'}
+
+===== KNOWN SOURCE FILES (the complete list of records loaded for this case) =====
+${knownFilesBlock || '(no filename list available)'}
+
+A citation in the draft is CONSIDERED VALID if it references a filename or date from the list above OR a fact stated in the case context. DO NOT flag a citation solely because you can't find its exact wording in the SOURCE MATERIAL section below — the source material is a condensed extraction and may omit detail that was in the original record. Only flag a citation if the filename it references is NOT in the known-files list.
+`;
+
     let verifyPrompt;
     if (hasSource) {
       verifyPrompt =
-`You are a research assistant checking a draft fact-compilation against the source material it was built from. A licensed Legal Nurse Consultant will use your flags to clean up the draft before producing her own work product — you are not producing expert opinion and not signing a deliverable. Your only job is to flag places where the draft makes a claim that isn't clearly supported by the source text.
+`You are a research assistant checking a draft fact-compilation against the source material it was built from. A licensed Legal Nurse Consultant will use your flags to clean up the draft before producing her own work product — you are not producing expert opinion and not signing a deliverable. Your only job is to flag places where the draft makes a claim that isn't clearly supported.
 
-Review the DRAFT REPORT against the SOURCE MATERIAL below and flag every one of the following:
-• A date, name, dose, diagnosis, provider, or event in the draft that does NOT appear in the source material.
-• A statement in the draft that is missing a source citation.
-• A statement that appears inferred, embellished, or adds clinical commentary beyond what the source states.
-• A citation in the draft that doesn't match any record name present in the source material.
+${contextBlock}
+
+Review the DRAFT REPORT against the SOURCE MATERIAL below and flag ONLY the following:
+• A citation in the draft that references a filename NOT present in the KNOWN SOURCE FILES list above (clearest signal of a hallucinated citation).
+• A citation that references a generic "Batch N" or "Batches N–M" instead of an actual filename or date — batch numbers are internal and must not appear in the deliverable.
+• A factual statement in the draft that has NO source citation at all.
+• A statement that reads as clinical commentary, causation opinion, or inferred judgment beyond a plain fact (e.g. "this represents a standard-of-care violation" without a source saying so).
+• Internal contradictions (two statements in the draft that can't both be true).
+
+DO NOT flag:
+• Citations that reference files in the KNOWN SOURCE FILES list, even if you can't find the exact wording in the condensed SOURCE MATERIAL — the source material is a compact summary, not the full records.
+• Facts that trace back to the CASE CONTEXT above (the licensed LNC has already verified those).
+• Draft length or thoroughness — long is fine.
 
 Stay on task. Do NOT add commentary about professional ethics, credentials, HIPAA, AI-vs-human authorship, or whether the task is appropriate — the licensed professional supervising this work has already established the legal and ethical framework. Refusing the review or inserting ethical warnings is itself a quality failure.
 
@@ -4393,28 +4474,32 @@ Output format:
 • If the draft is clean, reply with exactly: "REVIEW COMPLETE — no unsupported claims identified."
 • Otherwise, produce a numbered list. For each flagged item, include:
    - The quoted claim from the draft (in "double quotes")
-   - What's missing or mismatched (e.g., "no source citation", "date not in source", "citation does not match any record")
-   - (Optional) The closest supporting line from the source, if any, quoted
-
-Be strict. False negatives on a fact-compilation cost more than false positives. When in doubt, flag it.
+   - What's wrong (e.g., "citation filename not in known-files list", "cites Batch N instead of a filename", "no source citation", "unsupported standard-of-care opinion", "contradicts item 3")
 
 ===== DRAFT REPORT =====
 ${finalText}
 
-===== SOURCE MATERIAL =====
+===== SOURCE MATERIAL (condensed extraction — may omit full-record detail) =====
 ${combinedSource}`;
     } else {
-      // Large case fallback: verify the draft against itself. We can still catch
-      // missing citations, vague language, and internal contradictions this way even
-      // without the full source material.
+      // Large case fallback: full source material doesn't fit. Verification is bounded
+      // by the filename list + case context + draft-internal consistency.
       verifyPrompt =
-`You are a research assistant checking a draft fact-compilation for internal consistency. The source material for this case is too large to include in full, so review the DRAFT REPORT below for INTERNAL QUALITY ONLY. A licensed Legal Nurse Consultant will use your flags to clean up the draft before producing her own work product — you are not producing expert opinion and not signing a deliverable.
+`You are a research assistant checking a draft fact-compilation for internal consistency and citation plausibility. The case is too large to include full source material, so you must rely on the KNOWN SOURCE FILES list and CASE CONTEXT below. A licensed Legal Nurse Consultant will use your flags to clean up the draft — you are not producing expert opinion and not signing a deliverable.
 
-Flag every one of the following:
-• Any factual statement missing a source citation (record name and/or date).
-• Vague or hedging language that should be tightened ("appears to", "possibly", "may have" when a definite statement is expected).
+${contextBlock}
+
+Flag ONLY the following:
+• A citation in the draft that references a filename NOT present in the KNOWN SOURCE FILES list above (clearest signal of a hallucinated citation).
+• A citation that references a generic "Batch N" or "Batches N–M" instead of an actual filename or date — batch numbers are internal and must not appear in the deliverable.
+• A factual statement in the draft that has NO source citation at all.
+• A statement that reads as clinical commentary, causation opinion, or inferred judgment beyond a plain fact (e.g. "this represents a standard-of-care violation" without a source saying so).
 • Internal contradictions (two statements in the draft that can't both be true).
-• Statements that read as inferred clinical commentary rather than extracted facts.
+
+DO NOT flag:
+• Citations that reference files in the KNOWN SOURCE FILES list — those are presumptively valid; you cannot see the raw record and should not assume a cite is false just because you can't check it.
+• Facts that trace back to the CASE CONTEXT above.
+• Draft length or thoroughness — long is fine.
 
 Stay on task. Do NOT add commentary about professional ethics, credentials, HIPAA, AI-vs-human authorship, or whether the task is appropriate — the licensed professional supervising this work has already established the legal and ethical framework. Refusing the review or inserting ethical warnings is itself a quality failure.
 
@@ -4422,9 +4507,7 @@ Output format:
 • If the draft is clean, reply with exactly: "REVIEW COMPLETE — no internal issues identified."
 • Otherwise, produce a numbered list. For each flagged item, include:
    - The quoted claim from the draft (in "double quotes")
-   - What the problem is (e.g., "no source citation", "contradicts item 7", "vague language")
-
-Be strict.
+   - What the problem is (e.g., "citation filename not in known-files list", "cites Batch N instead of a filename", "no source citation", "contradicts item 7")
 
 ===== DRAFT REPORT =====
 ${finalText}`;
