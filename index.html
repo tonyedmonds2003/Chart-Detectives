@@ -1164,8 +1164,8 @@ tr:hover td { background: var(--gray-50); }
 // Format: YYYY.MM.DD.N where N is the Nth change on that day (1-indexed).
 // APP_VERSION_LABEL is a human-readable caption shown on hover.
 // ============================================================================
-const APP_VERSION       = '2026.04.22.8';
-const APP_VERSION_LABEL = 'Apr 22, 2026 (later x7) — Friendlier upload errors on oversized PDFs. A CORS-style error on /v1/files during Analyze Records was masking the real cause: Cloudflare\'s edge rejects POST bodies over 100MB before our Worker runs, so no CORS headers come back and Chrome reports "No Access-Control-Allow-Origin" instead of anything useful. Added a client-side 95MB pre-flight check in uploadFileToAnthropic with a specific message naming the offending file and the size, plus a wrapped try/catch around the fetch that hints at "file probably too big" when a bare network error hits a >50MB upload. Also logs every upload\'s filename + size via console.info(\'[upload] → ...\') so we can see from the console which chunk triggers a failure. Previous fixes (redeem URL decoding, redirect URI normalization, popup→redirect, driveFolderId guards, 🧹 Clear button, MSAL CDN fallback, root-folder self-heal) all still in place. Dropbox still stubbed.';
+const APP_VERSION       = '2026.04.22.9';
+const APP_VERSION_LABEL = 'Apr 22, 2026 (later x8) — Fix: Analyze Records appeared to do nothing when the case had a stale saved analysis. Root cause: renderSavedAnalysisIfAny hides rec-result-area (display:none) and shows rec-result instead on case re-select, but runRecordAnalysis writes its loading spinner and all progress updates into rec-result-area. Result: clicking Analyze silently updated a hidden div and Debbie saw no visual change. Added a reset block at the top of runRecordAnalysis that un-hides area, clears pre, and hides the prior result\'s action buttons (copy / send-to-report / rerun-synth) before any work starts — so the spinner is always visible and any stale output vanishes the moment Analyze is clicked. Previous fixes (upload size guard, redeem URL decoding, redirect URI normalization, popup→redirect, driveFolderId guards, 🧹 Clear button, MSAL CDN fallback, root-folder self-heal) all still in place. Dropbox still stubbed.';
 
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
 
@@ -5638,6 +5638,30 @@ async function runRecordAnalysis() {
   const instructions = document.getElementById('analysis-instructions').value;
   const area = document.getElementById('rec-result-area');
   const pre = document.getElementById('rec-result');
+
+  // Reset the result pane to the visible/empty state BEFORE we start streaming
+  // loading-spinner updates into it. When a case has a previously-saved analysis,
+  // renderSavedAnalysisIfAny hides `area` (display:none) and shows `pre` instead —
+  // so without this reset, every subsequent `area.innerHTML = spinner` call here
+  // silently updated a hidden div and Debbie saw nothing happen after clicking
+  // Analyze Records. Clearing `pre` too so the stale prior result doesn't keep
+  // showing underneath while the new run is in flight.
+  if (area) {
+    area.style.display = '';
+    area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Starting analysis…</span></div>';
+  }
+  if (pre) {
+    pre.style.display = 'none';
+    pre.innerHTML = '';
+    pre.textContent = '';
+  }
+  // Hide the per-result action buttons — we'll re-show them in finishAnalysis.
+  const copyBtnReset = document.getElementById('copy-rec-btn');
+  if (copyBtnReset) copyBtnReset.style.display = 'none';
+  const sendBtnReset = document.getElementById('send-to-report-btn');
+  if (sendBtnReset) sendBtnReset.style.display = 'none';
+  const rerunBtnReset = document.getElementById('rerun-synth-btn');
+  if (rerunBtnReset) rerunBtnReset.style.display = 'none';
 
   const caseInfo = caseId ? state.cases.find(c => c.id === caseId) : null;
   const caseContext = caseInfo ? `Patient: ${caseInfo.patient}, Case type: ${caseInfo.type}, Attorney: ${caseInfo.attorney}` : '';
