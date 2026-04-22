@@ -330,7 +330,6 @@ tr:hover td { background: var(--gray-50); }
         <path d="M885,178 C865,164 842,148 842,126 C842,114 852,105 862,105 C871,105 880,110 885,118 C890,110 899,105 908,105 C918,105 928,114 928,126 C928,148 905,164 885,178 Z" fill="none" stroke="#d41c1c" stroke-width="8" stroke-linejoin="round"/>
         <line x1="928" y1="228" x2="990" y2="288" stroke="#111111" stroke-width="26" stroke-linecap="round"/>
       </svg>
-      <p style="font-size:10px;">⚡ AI-powered by Claude</p>
     </div>
   </div>
 </div>
@@ -461,7 +460,7 @@ tr:hover td { background: var(--gray-50); }
 <div class="page" id="page-records">
   <div class="page-header">
     <div class="page-title">Medical Record Analysis</div>
-    <div class="page-subtitle">Upload medical records for AI-powered chronology and summary</div>
+    <div class="page-subtitle">Upload medical records for automated chronology and summary</div>
   </div>
   <div class="grid-2" style="align-items:start;">
     <div>
@@ -475,6 +474,34 @@ tr:hover td { background: var(--gray-50); }
           <button class="btn btn-gold btn-sm" id="drive-signin-btn" onclick="driveSignIn(true).catch(e=>alert(e.message))" style="flex:1">Connect Google Drive</button>
           <button class="btn btn-primary btn-sm" onclick="loadCaseDriveFiles()" style="flex:1">📁 Load files from case folder</button>
         </div>
+
+        <!-- Attorney link import — paste a Google Drive / OneDrive / Dropbox
+             share URL and mirror the files into Debbie's own Drive. The
+             mirrored copies are the citation source-of-truth forever after. -->
+        <div class="form-group" style="margin-top:4px;margin-bottom:8px;padding:10px;background:#fafafa;border:1px solid #e5e7eb;border-radius:6px;">
+          <label class="form-label" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+            <span>Import records from attorney's shared link</span>
+            <span id="attorney-source-badge" style="font-size:11px;color:var(--gray-500);"></span>
+          </label>
+          <div style="display:flex;gap:8px;">
+            <input type="url" id="attorney-link-input" class="form-control" style="flex:1;font-size:12px;"
+                   placeholder="Paste Google Drive / OneDrive / Dropbox folder link…" />
+            <button class="btn btn-primary btn-sm" onclick="importFromAttorneyLink()" style="white-space:nowrap;">📥 Import</button>
+            <button class="btn btn-gold btn-sm" onclick="refreshAttorneyLink()" id="attorney-refresh-btn" style="white-space:nowrap;display:none;">🔄 Refresh</button>
+          </div>
+          <div id="attorney-import-status" style="margin-top:6px;font-size:11px;color:var(--gray-500);"></div>
+        </div>
+
+        <!-- "Received more by email?" direct-to-Records upload. -->
+        <div style="display:flex;gap:8px;margin-bottom:10px;">
+          <button class="btn btn-secondary btn-sm" onclick="document.getElementById('direct-upload-input').click()" style="flex:1;">
+            ➕ Add more records (email attachments, etc.)
+          </button>
+          <input type="file" id="direct-upload-input" multiple
+                 accept=".pdf,.doc,.docx,.txt,.jpg,.jpeg,.png,.heic,.heif"
+                 style="display:none" onchange="handleDirectRecordsUpload(event)">
+        </div>
+
         <div class="upload-zone" id="upload-zone" onclick="document.getElementById('file-input').click()" style="padding:14px;">
           <p style="margin:0;font-size:12px;color:var(--gray-400);">…or click to upload local files (PDF, DOCX, TXT, JPG, PNG)</p>
         </div>
@@ -1129,8 +1156,8 @@ tr:hover td { background: var(--gray-50); }
 // Format: YYYY.MM.DD.N where N is the Nth change on that day (1-indexed).
 // APP_VERSION_LABEL is a human-readable caption shown on hover.
 // ============================================================================
-const APP_VERSION       = '2026.04.21.18';
-const APP_VERSION_LABEL = 'Apr 21, 2026 — Expanded citation linkification to cover the "LABEL: filename" form the model now emits. Previous build only linked bare labels ([AM], [BC]) and DM tokens; pieces like [AM: Deer Meadows Records Combined.pdf], [B: 3 7 2023 bruise -2976685.pdf], and [AM: Deer Meadows 002667--002670] fell through to bold plain text. generateDocx\'s parseInline now matches a LABEL_PREFIX_RX pattern (^[A-Z]{1,2}\\s*:\\s*\\S) on each comma/semicolon piece, looks up the label in caseInfo.recordsLabelIndex, and hyperlinks the ENTIRE piece (including the filename) to the underlying Drive record file. Bare labels and BATES_TO_URL hits still take precedence; order in the if/else chain preserves existing behavior.';
+const APP_VERSION       = '2026.04.22.1';
+const APP_VERSION_LABEL = 'Apr 22, 2026 — Big pipeline: (1) Attorney-link paste imports a shared Google Drive folder into Debbie\'s case Records folder, preserving the folder tree and recording a manifest on caseInfo.attorneyImport so a one-click Refresh later can pull in new/changed files without deleting anything. (2) Added a direct "➕ Add more records" button that uploads additional files straight into the case Records folder for when attorneys email records after the initial import. (3) OneDrive/SharePoint and Dropbox paste is stubbed with helpful "coming soon — awaiting app registration" messages. (4) Local-drag-drop uploads are now auto-pushed to the Records folder at the start of runRecordAnalysis so every citation resolves to a real Drive URL and the processed-cache benefits kick in on re-runs. (5) Records Reviewed table + citation label index now walk the folder tree recursively, preserve subfolder grouping in the markdown, disambiguate name collisions across subfolders, and register path-qualified keys in driveFileIndex/recordsLabelIndex so Claude\'s citations resolve even when folders matter. (6) renderAttorneyImportBadge wired into onRecCaseSelectChanged so Import/Refresh UI reflects the selected case. (7) Removed the sidebar tagline that mentioned the analysis engine — no engine-name references anywhere in the shipping UI.';
 
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
 
@@ -1374,12 +1401,129 @@ async function pickDriveFolder() {
 // List the non-trashed files in a Drive folder. Returns [{id, name, mimeType, size}].
 async function driveListFolder(folderId) {
   if (!_driveToken) await driveSignIn(false);
+  // We ask for modifiedTime + md5Checksum so callers that do diff/refresh
+  // (attorney-link sync) can detect which files changed since the last import.
   const q = encodeURIComponent(`'${folderId}' in parents and trashed = false`);
-  const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,mimeType,size)&pageSize=1000`;
+  const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,mimeType,size,modifiedTime,md5Checksum)&pageSize=1000`;
   const res = await fetch(url, { headers: { Authorization: 'Bearer ' + _driveToken } });
   if (!res.ok) throw new Error('Drive list failed: ' + res.status + ' ' + await res.text());
   const data = await res.json();
   return data.files || [];
+}
+
+// Recursive folder walk. Returns a nested tree of the form:
+//   [{ kind:'file',   id, name, mimeType, size, modifiedTime, md5Checksum, path }]
+//   [{ kind:'folder', id, name, path, children:[...] }]
+// `path` is the slash-joined relative path from the starting folder — empty
+// string for top-level files, "Altercare/2024" etc. for nested ones. This is
+// what lets us preserve the attorney's tree when mirroring into Debbie's Drive.
+async function driveListFolderRecursive(folderId, _relPath) {
+  const rel = _relPath || '';
+  const entries = await driveListFolder(folderId);
+  const result = [];
+  for (const f of entries) {
+    const childPath = rel ? (rel + '/' + f.name) : f.name;
+    if (f.mimeType === 'application/vnd.google-apps.folder') {
+      const children = await driveListFolderRecursive(f.id, childPath);
+      result.push({ kind: 'folder', id: f.id, name: f.name, path: childPath, children });
+    } else {
+      result.push({
+        kind: 'file',
+        id: f.id,
+        name: f.name,
+        mimeType: f.mimeType,
+        size: f.size,
+        modifiedTime: f.modifiedTime,
+        md5Checksum: f.md5Checksum,
+        path: rel // the FOLDER the file sits in, not including its own name
+      });
+    }
+  }
+  return result;
+}
+
+// Flatten a recursive tree into just its file leaves — used by the report
+// pipeline (flat Records Reviewed table) and by the citation label index.
+function flattenDriveTree(tree) {
+  const out = [];
+  (function walk(nodes) {
+    for (const n of nodes) {
+      if (n.kind === 'folder') walk(n.children || []);
+      else out.push(n);
+    }
+  })(tree);
+  return out;
+}
+
+// Server-side copy via Drive's native files.copy endpoint. No bytes travel
+// through the browser — Google duplicates the file entirely inside its own
+// infrastructure, which is the difference between seconds and minutes for
+// large medical-records PDFs. Works for any file the caller has read access
+// to (including files shared into the account by an attorney).
+async function driveCopyFile(sourceFileId, destParentId, newName) {
+  if (!_driveToken) await driveSignIn(false);
+  const body = { parents: [destParentId] };
+  if (newName) body.name = newName;
+  const url = 'https://www.googleapis.com/drive/v3/files/' + sourceFileId
+            + '/copy?fields=id,name,mimeType,size,modifiedTime,md5Checksum&supportsAllDrives=true';
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer ' + _driveToken,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(body)
+  });
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error('Drive copy failed: ' + res.status + ' ' + txt);
+  }
+  return res.json();
+}
+
+// Mirror an attorney's folder tree into a destination folder in Debbie's Drive,
+// preserving subfolder structure. `progressCb(done, total, currentName)` is
+// called on every file copy so the UI can show a live progress bar.
+//
+// Returns a flat array of the copies that were made:
+//   [{ sourceId, mirroredId, name, relPath, size, modifiedTime, md5Checksum }]
+// This is the raw material for the import manifest we persist on the case.
+async function mirrorDriveTreeTo(sourceTree, destParentId, progressCb) {
+  // Pre-count files so progressCb gets a stable total.
+  const allFiles = flattenDriveTree(sourceTree);
+  const total = allFiles.length;
+  let done = 0;
+  const copies = [];
+
+  async function walk(nodes, destFolderId, relPath) {
+    for (const n of nodes) {
+      if (n.kind === 'folder') {
+        const sub = await driveFindOrCreateFolder(destFolderId, n.name);
+        await walk(n.children || [], sub.id, relPath ? (relPath + '/' + n.name) : n.name);
+      } else {
+        if (progressCb) {
+          try { progressCb(done, total, n.name); } catch(_e) {}
+        }
+        const mirrored = await driveCopyFile(n.id, destFolderId, n.name);
+        copies.push({
+          sourceId: n.id,
+          mirroredId: mirrored.id,
+          name: mirrored.name,
+          relPath: relPath || '',
+          size: mirrored.size,
+          modifiedTime: mirrored.modifiedTime,
+          md5Checksum: mirrored.md5Checksum
+        });
+        done += 1;
+        if (progressCb) {
+          try { progressCb(done, total, n.name); } catch(_e) {}
+        }
+      }
+    }
+  }
+
+  await walk(sourceTree, destParentId, '');
+  return copies;
 }
 
 // Download file bytes as a base64 string (for sending to Claude as a content block).
@@ -3440,6 +3584,354 @@ function renderFileList() {
 }
 function removeFile(i) { uploadedFiles.splice(i,1); renderFileList(); }
 
+// ===== ATTORNEY-LINK IMPORT =====
+// Debbie pastes a shared-folder link from an attorney (Google Drive, OneDrive,
+// or Dropbox). We mirror the contents into her own Drive's Records folder for
+// this case so citations in generated reports always resolve back to files SHE
+// owns — even years later after the attorney's share has been revoked or they
+// have changed firms. The attorney's folder tree is preserved exactly; the
+// report pipeline still flattens it for the A/B/C Records Reviewed table.
+
+// Classify a pasted URL. Returns { provider, kind, id?, url } or null.
+function parseAttorneyLink(raw) {
+  if (!raw) return null;
+  const u = String(raw).trim();
+  if (!u) return null;
+
+  // Google Drive / Docs
+  //   https://drive.google.com/drive/folders/{id}
+  //   https://drive.google.com/drive/u/0/folders/{id}
+  //   https://drive.google.com/file/d/{id}/view
+  //   https://drive.google.com/open?id={id}
+  if (/drive\.google\.com|docs\.google\.com/i.test(u)) {
+    let m;
+    if ((m = u.match(/\/folders\/([a-zA-Z0-9_-]+)/))) return { provider: 'gdrive', kind: 'folder', id: m[1], url: u };
+    if ((m = u.match(/\/file\/d\/([a-zA-Z0-9_-]+)/)))  return { provider: 'gdrive', kind: 'file',   id: m[1], url: u };
+    if ((m = u.match(/[?&]id=([a-zA-Z0-9_-]+)/)))       return { provider: 'gdrive', kind: 'unknown',id: m[1], url: u };
+    return { provider: 'gdrive', kind: 'unknown', id: null, url: u };
+  }
+
+  // OneDrive / SharePoint / 1drv.ms
+  if (/onedrive\.live\.com|1drv\.ms|sharepoint\.com/i.test(u)) {
+    return { provider: 'onedrive', kind: 'share', id: null, url: u };
+  }
+
+  // Dropbox
+  if (/dropbox\.com|\bdb\.tt\b/i.test(u)) {
+    return { provider: 'dropbox', kind: 'share', id: null, url: u };
+  }
+
+  return null;
+}
+
+// Main import orchestrator — called when Debbie clicks "Import".
+async function importFromAttorneyLink() {
+  const caseId = document.getElementById('rec-case-select').value;
+  if (!caseId) { alert('Pick a case first — the records need somewhere to land.'); return; }
+  const caseInfo = state.cases.find(c => c.id === caseId);
+  if (!caseInfo) { alert('Case not found.'); return; }
+
+  const raw = document.getElementById('attorney-link-input').value;
+  const parsed = parseAttorneyLink(raw);
+  const statusEl = document.getElementById('attorney-import-status');
+  const setStatus = (html) => { if (statusEl) statusEl.innerHTML = html; };
+
+  if (!parsed) {
+    setStatus('<span style="color:#c94646;">That link doesn\'t look like a Google Drive, OneDrive, or Dropbox URL. Double-check and try again.</span>');
+    return;
+  }
+
+  // Provider dispatch. Google gets the real path; Microsoft and Dropbox show
+  // a "connect your account first" message until their OAuth apps are
+  // registered.
+  if (parsed.provider === 'onedrive') {
+    setStatus('<span style="color:#c94646;"><b>OneDrive / SharePoint import is coming soon.</b> '
+      + 'Tony needs to finish registering a Microsoft OAuth app for Chart Detectives first. '
+      + 'As a one-time workaround: download the files from the attorney\'s link to your computer, then click <b>➕ Add more records</b> above to push them straight into the case folder.</span>');
+    return;
+  }
+  if (parsed.provider === 'dropbox') {
+    setStatus('<span style="color:#c94646;"><b>Dropbox import is coming soon.</b> '
+      + 'Tony needs to finish registering a Dropbox OAuth app for Chart Detectives first. '
+      + 'As a one-time workaround: download the files from the attorney\'s link to your computer, then click <b>➕ Add more records</b> above to push them straight into the case folder.</span>');
+    return;
+  }
+  if (parsed.provider !== 'gdrive') {
+    setStatus('<span style="color:#c94646;">Unrecognized link type.</span>');
+    return;
+  }
+
+  // --- Google Drive import path ---
+  if (!_driveToken) {
+    try { await driveSignIn(true); }
+    catch(e) { setStatus('<span style="color:#c94646;">Could not connect to Google Drive: ' + esc(e.message) + '</span>'); return; }
+  }
+
+  // Make sure the case has a Records folder in Debbie's Drive.
+  if (!caseInfo.driveFolderId) {
+    try {
+      setStatus('Creating case folder in your Drive…');
+      const hier = await ensureCaseHierarchy(caseInfo);
+      caseInfo.driveFolderId = hier.records.id;
+      caseInfo.driveFolderName = hier.records.name;
+      save();
+    } catch(e) {
+      setStatus('<span style="color:#c94646;">Could not create case folder: ' + esc(e.message) + '</span>');
+      return;
+    }
+  }
+
+  // Resolve the attorney's link to either a folder tree or a single file.
+  let sourceTree;
+  let sourceKind;
+  try {
+    if (parsed.kind === 'file') {
+      const meta = await driveGetFileMeta(parsed.id);
+      sourceTree = [{ kind:'file', id:meta.id, name:meta.name, mimeType:meta.mimeType, size:meta.size, modifiedTime:meta.modifiedTime, path:'' }];
+      sourceKind = 'file';
+    } else {
+      // folder or unknown — try folder listing first, fall back to single-file if that 404s
+      setStatus('Reading attorney folder…');
+      try {
+        sourceTree = await driveListFolderRecursive(parsed.id, '');
+        sourceKind = 'folder';
+      } catch(e) {
+        const meta = await driveGetFileMeta(parsed.id);
+        sourceTree = [{ kind:'file', id:meta.id, name:meta.name, mimeType:meta.mimeType, size:meta.size, modifiedTime:meta.modifiedTime, path:'' }];
+        sourceKind = 'file';
+      }
+    }
+  } catch(e) {
+    setStatus('<span style="color:#c94646;">Could not read attorney link — ' + esc(e.message)
+      + '. If the share requires sign-in, make sure you\'re on the Google account the attorney shared with.</span>');
+    return;
+  }
+
+  const total = flattenDriveTree(sourceTree).length;
+  if (total === 0) {
+    setStatus('<span style="color:#c94646;">That attorney folder is empty. Nothing to import.</span>');
+    return;
+  }
+
+  if (!confirm('Found ' + total + ' file(s) in the attorney\'s link.\n\n'
+    + 'Mirror them into the "' + (caseInfo.driveFolderName || 'Records') + '" folder in your Drive?\n\n'
+    + 'The folder tree will be preserved. This can take a few minutes for large record sets.')) {
+    setStatus('Import cancelled.');
+    return;
+  }
+
+  setStatus('Importing 0 / ' + total + '…');
+  let copies;
+  try {
+    copies = await mirrorDriveTreeTo(sourceTree, caseInfo.driveFolderId, (done, tot, currentName) => {
+      setStatus('Importing ' + done + ' / ' + tot + ' — <span style="color:var(--gray-500);">' + esc(currentName) + '</span>');
+    });
+  } catch(e) {
+    setStatus('<span style="color:#c94646;">Import failed partway through: ' + esc(e.message)
+      + '. You can click Refresh to resume — already-copied files will be skipped.</span>');
+    return;
+  }
+
+  caseInfo.attorneyImport = {
+    provider: 'gdrive',
+    sourceUrl: parsed.url,
+    sourceKind: sourceKind,
+    sourceId: parsed.id,
+    importedAt: new Date().toISOString(),
+    files: copies.map(c => ({
+      sourceId: c.sourceId,
+      mirroredId: c.mirroredId,
+      name: c.name,
+      relPath: c.relPath,
+      size: c.size,
+      modifiedTime: c.modifiedTime,
+      md5Checksum: c.md5Checksum
+    }))
+  };
+  save();
+
+  setStatus('<span style="color:#227d3b;">✓ Imported ' + copies.length
+    + ' file(s) from the attorney\'s link into your Drive. Citations will point to your copies.</span>');
+  renderAttorneyImportBadge();
+  try { await loadCaseDriveFiles(); } catch(_e) {}
+}
+
+// Pick up new / updated files the attorney has added to the source folder
+// since the last import. Never deletes — Debbie keeps everything she's ever
+// received, which is the whole point of the "she owns her archive" model.
+async function refreshAttorneyLink() {
+  const caseId = document.getElementById('rec-case-select').value;
+  if (!caseId) return;
+  const caseInfo = state.cases.find(c => c.id === caseId);
+  if (!caseInfo) return;
+  const imp = caseInfo.attorneyImport;
+  if (!imp || imp.provider !== 'gdrive') {
+    alert('No attorney link has been imported for this case yet. Paste one above and click Import first.');
+    return;
+  }
+  if (!_driveToken) {
+    try { await driveSignIn(true); }
+    catch(e) { alert('Could not connect to Google Drive: ' + e.message); return; }
+  }
+
+  const statusEl = document.getElementById('attorney-import-status');
+  const setStatus = (html) => { if (statusEl) statusEl.innerHTML = html; };
+  setStatus('Checking attorney folder for new files…');
+
+  let sourceTree;
+  try {
+    if (imp.sourceKind === 'folder') {
+      sourceTree = await driveListFolderRecursive(imp.sourceId, '');
+    } else {
+      const meta = await driveGetFileMeta(imp.sourceId);
+      sourceTree = [{ kind:'file', id:meta.id, name:meta.name, mimeType:meta.mimeType, size:meta.size, modifiedTime:meta.modifiedTime, path:'' }];
+    }
+  } catch(e) {
+    setStatus('<span style="color:#c94646;">Could not re-read attorney link: ' + esc(e.message) + '</span>');
+    return;
+  }
+
+  // Diff against stored manifest (keyed by source file id).
+  const known = {};
+  for (const f of (imp.files || [])) known[f.sourceId] = f;
+  const allFiles = flattenDriveTree(sourceTree);
+  const toCopyIds = new Set();
+  let newCount = 0, updatedCount = 0;
+  for (const f of allFiles) {
+    const prev = known[f.id];
+    if (!prev) { toCopyIds.add(f.id); newCount++; }
+    else if (prev.modifiedTime && f.modifiedTime && prev.modifiedTime !== f.modifiedTime) {
+      toCopyIds.add(f.id); updatedCount++;
+    }
+  }
+
+  if (!toCopyIds.size) {
+    setStatus('<span style="color:#227d3b;">No changes — you already have everything the attorney has shared.</span>');
+    return;
+  }
+
+  // Prune the source tree to just the files we need to copy, preserving
+  // the subfolder structure so mirrorDriveTreeTo recreates the right hierarchy.
+  function pruneToCopy(nodes) {
+    const out = [];
+    for (const n of nodes) {
+      if (n.kind === 'folder') {
+        const kids = pruneToCopy(n.children || []);
+        if (kids.length) out.push(Object.assign({}, n, { children: kids }));
+      } else if (toCopyIds.has(n.id)) {
+        out.push(n);
+      }
+    }
+    return out;
+  }
+  const prunedTree = pruneToCopy(sourceTree);
+  const total = toCopyIds.size;
+
+  if (!confirm('Attorney folder has ' + total + ' new or updated file(s) since last import ('
+    + newCount + ' new, ' + updatedCount + ' updated).\n\nMirror them into your Drive now?')) {
+    setStatus('Refresh cancelled.');
+    return;
+  }
+
+  setStatus('Copying 0 / ' + total + '…');
+  let copies;
+  try {
+    copies = await mirrorDriveTreeTo(prunedTree, caseInfo.driveFolderId, (done, tot, currentName) => {
+      setStatus('Copying ' + done + ' / ' + tot + ' — <span style="color:var(--gray-500);">' + esc(currentName) + '</span>');
+    });
+  } catch(e) {
+    setStatus('<span style="color:#c94646;">Refresh failed partway through: ' + esc(e.message) + '. Click Refresh again to resume.</span>');
+    return;
+  }
+
+  // Merge into stored manifest. Keyed by sourceId so re-imports are idempotent.
+  const byId = {};
+  for (const f of (imp.files || [])) byId[f.sourceId] = f;
+  for (const c of copies) {
+    byId[c.sourceId] = {
+      sourceId: c.sourceId, mirroredId: c.mirroredId, name: c.name,
+      relPath: c.relPath, size: c.size, modifiedTime: c.modifiedTime,
+      md5Checksum: c.md5Checksum
+    };
+  }
+  imp.files = Object.values(byId);
+  imp.lastRefreshedAt = new Date().toISOString();
+  save();
+
+  setStatus('<span style="color:#227d3b;">✓ Refresh complete — ' + newCount + ' new, ' + updatedCount + ' updated.</span>');
+  renderAttorneyImportBadge();
+  try { await loadCaseDriveFiles(); } catch(_e) {}
+}
+
+// Keep the "✓ N files imported from Google Drive" badge in sync with the
+// selected case. Also shows/hides the Refresh button.
+function renderAttorneyImportBadge() {
+  const sel = document.getElementById('rec-case-select');
+  const caseId = sel && sel.value;
+  const caseInfo = caseId ? state.cases.find(c => c.id === caseId) : null;
+  const badge = document.getElementById('attorney-source-badge');
+  const input = document.getElementById('attorney-link-input');
+  const refreshBtn = document.getElementById('attorney-refresh-btn');
+  if (!badge || !input) return;
+  const imp = caseInfo && caseInfo.attorneyImport;
+  if (!imp) {
+    badge.textContent = '';
+    input.value = '';
+    if (refreshBtn) refreshBtn.style.display = 'none';
+    return;
+  }
+  const provLabel = imp.provider === 'gdrive' ? 'Google Drive' : imp.provider === 'onedrive' ? 'OneDrive' : 'Dropbox';
+  const count = (imp.files || []).length;
+  badge.textContent = '✓ ' + count + ' file(s) imported from ' + provLabel;
+  input.value = imp.sourceUrl || '';
+  if (refreshBtn) refreshBtn.style.display = '';
+}
+
+// Direct-to-Drive upload for emailed attachments. Pushes each picked file
+// straight into the case's Records folder (NOT Work). Used when an attorney
+// sends a one-off PDF by email after the original link was imported.
+async function handleDirectRecordsUpload(event) {
+  const files = Array.from(event.target.files || []);
+  event.target.value = '';
+  if (!files.length) return;
+  const caseId = document.getElementById('rec-case-select').value;
+  if (!caseId) { alert('Pick a case first.'); return; }
+  const caseInfo = state.cases.find(c => c.id === caseId);
+  if (!caseInfo) return;
+  if (!_driveToken) {
+    try { await driveSignIn(true); }
+    catch(e) { alert('Could not connect to Google Drive: ' + e.message); return; }
+  }
+  if (!caseInfo.driveFolderId) {
+    try {
+      const hier = await ensureCaseHierarchy(caseInfo);
+      caseInfo.driveFolderId = hier.records.id;
+      caseInfo.driveFolderName = hier.records.name;
+      save();
+    } catch(e) { alert('Could not create case folder: ' + e.message); return; }
+  }
+
+  const statusEl = document.getElementById('attorney-import-status');
+  const setStatus = (html) => { if (statusEl) statusEl.innerHTML = html; };
+
+  let done = 0;
+  const total = files.length;
+  setStatus('Uploading 0 / ' + total + '…');
+  for (const f of files) {
+    try {
+      setStatus('Uploading ' + (done+1) + ' / ' + total + ' — <span style="color:var(--gray-500);">' + esc(f.name) + '</span>');
+      const mime = f.type || 'application/octet-stream';
+      await driveUploadFile(caseInfo.driveFolderId, f.name, mime, f);
+      done += 1;
+    } catch(e) {
+      setStatus('<span style="color:#c94646;">Upload failed on "' + esc(f.name) + '": ' + esc(e.message) + '</span>');
+      return;
+    }
+  }
+  setStatus('<span style="color:#227d3b;">✓ Added ' + done + ' file(s) to the case Records folder.</span>');
+  try { await loadCaseDriveFiles(); } catch(_e) {}
+}
+
 // Called when the user picks a case on the Records page. Auto-loads the linked
 // Drive folder's files so the user doesn't have to remember to click "Load files".
 async function onRecCaseSelectChanged() {
@@ -3449,6 +3941,9 @@ async function onRecCaseSelectChanged() {
   const listEl = document.getElementById('drive-file-list');
   if (listEl) listEl.innerHTML = '';
   const caseId = document.getElementById('rec-case-select').value;
+  // Refresh the attorney-link badge whenever the case selector changes so the
+  // Import/Refresh UI always reflects the selected case's saved import state.
+  try { renderAttorneyImportBadge(); } catch(_) {}
   if (!caseId) return;
   const c = state.cases.find(x => x.id === caseId);
 
@@ -3508,8 +4003,18 @@ async function loadCaseDriveFiles() {
   const listEl = document.getElementById('drive-file-list');
   listEl.innerHTML = '<div style="padding:8px;color:var(--gray-400);font-size:12px;">Loading from Drive…</div>';
   try {
-    const files = await driveListFolder(c.driveFolderId);
-    driveFiles = files.filter(f => f.mimeType !== 'application/vnd.google-apps.folder');
+    // Walk the tree so records mirrored from an attorney link (which
+    // preserves folder structure) are visible alongside root-level files.
+    // We also skip our own underscore-prefixed folders (_Internal, _processed)
+    // so the checklist matches what an attorney would actually review.
+    const tree = await driveListFolderRecursive(c.driveFolderId, '');
+    const leaves = flattenDriveTree(tree).filter(f => {
+      if (!f || !f.name) return false;
+      if (/^_/.test(f.name)) return false;
+      if (f.path && f.path.split('/').some(seg => /^_/.test(seg))) return false;
+      return f.mimeType !== 'application/vnd.google-apps.folder';
+    });
+    driveFiles = leaves;
     // Default: every file checked
     driveFilesChecked = {};
     driveFiles.forEach(f => { driveFilesChecked[f.id] = true; });
@@ -3521,12 +4026,17 @@ async function loadCaseDriveFiles() {
     // extension) in the map so a citation like "Hospital_records" matches the same PDF
     // as "Hospital_records.pdf". Split-PDF chunk suffixes like " — pp. 1-40 of 120" are
     // also stripped when looking up, so every chunk cite resolves to the parent file.
+    // We also register the path-qualified form ("Altercare/Discharge_Summary.pdf")
+    // so citations that disambiguate by folder still resolve.
     c.driveFileIndex = {};
     for (const f of driveFiles) {
       const url = batesToDriveUrl(f.id);
       c.driveFileIndex[f.name] = url;
       const base = f.name.replace(/\.[^.]+$/, '');
       if (base && !c.driveFileIndex[base]) c.driveFileIndex[base] = url;
+      if (f.path) {
+        c.driveFileIndex[f.path + '/' + f.name] = url;
+      }
     }
     save();
     renderDriveFileList();
@@ -3553,11 +4063,17 @@ function renderDriveFileList() {
       <a href="#" onclick="toggleAllDriveFiles(false);return false;">None</a>
     </span>
   </div>`;
-  const items = driveFiles.map(f => `<label style="display:flex;align-items:center;gap:6px;padding:5px 8px;background:var(--gray-50);border-radius:var(--radius-sm);margin-bottom:3px;font-size:12px;cursor:pointer;">
+  const items = driveFiles.map(f => {
+    // When the file lives in a subfolder (imported from an attorney's
+    // shared link), show the folder breadcrumb in muted text so Debbie can
+    // tell apart two "Discharge_Summary.pdf" rows from different folders.
+    const breadcrumb = f.path ? `<span style="font-size:10px;color:var(--gray-500);margin-right:4px;">${esc(f.path)}/</span>` : '';
+    return `<label style="display:flex;align-items:center;gap:6px;padding:5px 8px;background:var(--gray-50);border-radius:var(--radius-sm);margin-bottom:3px;font-size:12px;cursor:pointer;">
     <input type="checkbox" ${driveFilesChecked[f.id]?'checked':''} onchange="driveFilesChecked['${f.id}']=this.checked">
-    <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">📄 ${esc(f.name)}</span>
+    <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">📄 ${breadcrumb}${esc(f.name)}</span>
     <span style="font-size:10px;color:var(--gray-400);">${driveFileKindLabel(f.mimeType)}</span>
-  </label>`).join('');
+  </label>`;
+  }).join('');
   listEl.innerHTML = header + items;
 }
 function toggleAllDriveFiles(v) { driveFiles.forEach(f => { driveFilesChecked[f.id] = v; }); renderDriveFileList(); }
@@ -4398,6 +4914,67 @@ async function runRecordAnalysis() {
   // Text from uploaded .txt files is appended to the instruction prompt.
   const contentBlocks = [];
   let textAddendum = '';
+
+  // (0) Phase 1 auto-upload: if Debbie dragged files directly into the Upload
+  // Records tile (uploadedFiles) AND the case has a linked Drive folder AND
+  // we're signed in, push those files to the case Records folder FIRST. This
+  // way they get Drive IDs, land in driveFiles alongside attorney-imported
+  // records, participate in the _processed cache on re-runs, and — most
+  // importantly — every "(Source: filename)" citation resolves to a real
+  // Drive URL Debbie can click. Without this, local drops only lived in RAM
+  // and citations came back blue-but-broken.
+  if (uploadedFiles.length && caseInfo && caseInfo.driveFolderId && _driveToken) {
+    area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Saving ' + uploadedFiles.length + ' uploaded file(s) to Drive…</span></div>';
+    const uploadedToDrive = [];
+    const stillLocal = [];
+    for (let ui = 0; ui < uploadedFiles.length; ui++) {
+      const f = uploadedFiles[ui];
+      try {
+        area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Saving to Drive ('+(ui+1)+'/'+uploadedFiles.length+'): ' + esc(f.name) + '…</span></div>';
+        const mime = f.type || 'application/octet-stream';
+        const up = await driveUploadFile(caseInfo.driveFolderId, f.name, mime, f);
+        // Synthesise the same shape driveListFolder returns so the downstream
+        // (1) selectedDrive block can process it identically.
+        uploadedToDrive.push({
+          id: up.id,
+          name: up.name || f.name,
+          mimeType: up.mimeType || mime,
+          size: (typeof up.size !== 'undefined') ? up.size : (f.size || 0),
+          modifiedTime: up.modifiedTime || new Date().toISOString(),
+          md5Checksum: up.md5Checksum || null
+        });
+      } catch(e) {
+        console.warn('[phase1-upload] failed for ' + f.name + ':', e);
+        // Fall back: keep the file in uploadedFiles so analysis still runs
+        // (just without a Drive-backed citation for this particular file).
+        stillLocal.push(f);
+      }
+    }
+    if (uploadedToDrive.length) {
+      // Merge the newly-uploaded records into driveFiles (skip any id already
+      // present — belt-and-braces in case Drive dedupes) and auto-check them.
+      const existingIds = new Set(driveFiles.map(f => f.id));
+      for (const nf of uploadedToDrive) {
+        if (!existingIds.has(nf.id)) {
+          driveFiles.push(nf);
+          driveFilesChecked[nf.id] = true;
+        }
+      }
+      // Refresh the filename → Drive URL map so brand-new citations resolve.
+      if (!caseInfo.driveFileIndex) caseInfo.driveFileIndex = {};
+      for (const nf of uploadedToDrive) {
+        const url = batesToDriveUrl(nf.id);
+        caseInfo.driveFileIndex[nf.name] = url;
+        const base = nf.name.replace(/\.[^.]+$/, '');
+        if (base && !caseInfo.driveFileIndex[base]) caseInfo.driveFileIndex[base] = url;
+      }
+      save();
+      try { renderDriveFileList(); } catch(_e) {}
+    }
+    // Whatever couldn't be uploaded stays in uploadedFiles for the (2) fallback
+    // block below. Cleared entries are gone so we don't re-upload on every run.
+    uploadedFiles = stillLocal;
+  }
 
   // (1) Selected files from the case Drive folder
   const selectedDrive = driveFiles.filter(f => driveFilesChecked[f.id]);
@@ -5623,13 +6200,23 @@ async function runReportDraft() {
   let recordsManifestLocked = false;
   try {
     if (caseInfo && caseInfo.driveFolderId) {
-      const allFiles = await driveListFolder(caseInfo.driveFolderId);
+      // Walk the case Records folder recursively so subfolders imported from
+      // an attorney link (e.g. Altercare/, Imaging/, Depositions/) show up
+      // alongside top-level files. flattenDriveTree returns leaf-file nodes
+      // with a .path property giving the slash-joined folder path the file
+      // sits in (empty string for root-level files).
+      const tree = await driveListFolderRecursive(caseInfo.driveFolderId, '');
+      const allFiles = flattenDriveTree(tree);
       // Only include record files (PDFs + images). Exclude our own generated
-      // outputs (.docx, .txt) and anything starting with "_" so the table
-      // matches what an attorney actually received.
+      // outputs (.docx, .txt) and anything under a folder starting with "_"
+      // (our private _Internal / _processed caches) so the table matches
+      // what an attorney actually received.
       const records = (allFiles || []).filter(f => {
         if (!f || !f.name) return false;
         if (/^_/.test(f.name)) return false;
+        // Filter out anything inside an underscore-prefixed folder anywhere
+        // in its path — catches _Internal, _processed, _drafts, etc.
+        if (f.path && f.path.split('/').some(seg => /^_/.test(seg))) return false;
         if (f.mimeType === 'application/vnd.google-apps.folder') return false;
         return /\.(pdf|png|jpe?g|tif?f|heic|heif|bmp|gif)$/i.test(f.name);
       });
@@ -5676,7 +6263,21 @@ async function runReportDraft() {
           }
         } catch(_e) { /* legacy cache lookup is best-effort */ }
       } catch(_e) { /* no cache yet — pages will display as "—" */ }
-      records.sort((a,b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+      // Sort by folder path first, then filename within each folder — this
+      // keeps imported subfolder groupings (e.g. all Altercare/ records
+      // together) intact in the Records Reviewed table rather than scattering
+      // them alphabetically across the whole set.
+      records.sort((a, b) => {
+        const pa = a.path || '';
+        const pb = b.path || '';
+        if (pa !== pb) return pa.localeCompare(pb, undefined, { numeric: true, sensitivity: 'base' });
+        return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+      });
+      // Detect filename collisions across subfolders so the citation index
+      // can disambiguate them. Without this, "Discharge_Summary.pdf" in two
+      // different subfolders would both resolve to the first one's letter.
+      const nameCounts = {};
+      for (const f of records) nameCounts[f.name] = (nameCounts[f.name] || 0) + 1;
       // Build the letter→file map at the same time we assign letters, so the
       // docx generator can turn bracketed citations like [AM], [BC], [W; X; Y]
       // into live Drive links back to the specific record. Without this, those
@@ -5693,7 +6294,17 @@ async function runReportDraft() {
           const second = (i - 26) % 26;
           letter = String.fromCharCode(65 + first) + String.fromCharCode(65 + second);
         }
-        labelIndex[letter] = { id: f.id, name: f.name };
+        // Store both the letter→file mapping and (for collision resolution)
+        // a path-qualified key like "Altercare/Discharge_Summary.pdf" so
+        // citations that include a folder hint can resolve unambiguously.
+        labelIndex[letter] = { id: f.id, name: f.name, path: f.path || '' };
+        if (f.path) {
+          const qualified = f.path + '/' + f.name;
+          // Keep an extra key so the citation resolver (see parseInline in
+          // generateDocx) can look up "Altercare/Discharge_Summary.pdf"
+          // directly when Claude disambiguates by folder.
+          labelIndex[qualified] = { id: f.id, name: f.name, path: f.path };
+        }
         const entry = processedEntries[f.id];
         const firstChunk = entry && entry.chunks && entry.chunks[0];
         // For PDFs the chunker stamps totalPages on each chunk. For images we
@@ -5705,8 +6316,16 @@ async function runReportDraft() {
           pages = 1;
         }
         const pagesDisplay = (pages != null) ? String(pages) : '—';
+        // Show the filename, prefixed with its relative folder path when the
+        // file sits in a subfolder. Name-collision files get the path prefix
+        // forced on, even if we'd otherwise hide it, so the rows are
+        // distinguishable in the printed report.
+        const collides = (nameCounts[f.name] || 0) > 1;
+        const displayName = (f.path && (collides || f.path !== ''))
+          ? (f.path + '/' + f.name)
+          : f.name;
         // Escape pipe characters in filenames so the markdown table doesn't break.
-        const safeName = String(f.name).replace(/\|/g, '\\|');
+        const safeName = String(displayName).replace(/\|/g, '\\|');
         return `| ${letter} | ${safeName} | ${pagesDisplay} |`;
       });
       if (rows.length) {
