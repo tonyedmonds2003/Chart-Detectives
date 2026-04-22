@@ -1164,8 +1164,8 @@ tr:hover td { background: var(--gray-50); }
 // Format: YYYY.MM.DD.N where N is the Nth change on that day (1-indexed).
 // APP_VERSION_LABEL is a human-readable caption shown on hover.
 // ============================================================================
-const APP_VERSION       = '2026.04.22.7';
-const APP_VERSION_LABEL = 'Apr 22, 2026 (later x6) — OneDrive "redeem" URL handling. After Azure SPA redirect URI was registered and sign-in succeeded, the import hit a new error: Graph /shares/ returned 400 Bad Request. Root cause: when an attorney emails a OneDrive share, Outlook / Gmail often rewrite the URL to a "redeem" form — https://onedrive.live.com/?redeem=<base64>&... — where the real addressable share URL is base64url-encoded inside the redeem query parameter. Graph doesn\'t dereference the outer wrapper; it only understands the inner URL. Added normalizeMsShareUrl that detects redeem=, base64url-decodes the inner URL, sanity-checks it starts with http(s), and hands THAT to encodeGraphShareId. Also added Prefer: redeemSharingLink header so Graph will accept fresh share links without requiring a prior browser click-through, and a fallback retry with the raw pasted URL if the normalized form fails. Previous fixes (redirect URI normalization, popup→redirect, driveFolderId guards, 🧹 Clear button, MSAL CDN fallback, root-folder self-heal) all still in place. Dropbox still stubbed.';
+const APP_VERSION       = '2026.04.22.8';
+const APP_VERSION_LABEL = 'Apr 22, 2026 (later x7) — Friendlier upload errors on oversized PDFs. A CORS-style error on /v1/files during Analyze Records was masking the real cause: Cloudflare\'s edge rejects POST bodies over 100MB before our Worker runs, so no CORS headers come back and Chrome reports "No Access-Control-Allow-Origin" instead of anything useful. Added a client-side 95MB pre-flight check in uploadFileToAnthropic with a specific message naming the offending file and the size, plus a wrapped try/catch around the fetch that hints at "file probably too big" when a bare network error hits a >50MB upload. Also logs every upload\'s filename + size via console.info(\'[upload] → ...\') so we can see from the console which chunk triggers a failure. Previous fixes (redeem URL decoding, redirect URI normalization, popup→redirect, driveFolderId guards, 🧹 Clear button, MSAL CDN fallback, root-folder self-heal) all still in place. Dropbox still stubbed.';
 
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
 
@@ -2913,15 +2913,55 @@ function base64ToBlob(b64, mime) {
   return new Blob([bytes], { type: mime || 'application/octet-stream' });
 }
 
+// Cloudflare Workers enforce a hard 100MB request-body limit on workers.dev
+// POSTs. When exceeded the edge rejects the request *before* our Worker code
+// runs, so no CORS headers come back and the browser surfaces a confusing
+// "No Access-Control-Allow-Origin" error instead of anything actionable.
+// We keep a safety margin below 100MB because multipart form-data adds its
+// own envelope (boundary markers + field headers + the filename) on top of
+// the file bytes — usually a few KB, but worth budgeting for.
+const UPLOAD_MAX_BYTES = 95 * 1024 * 1024; // 95 MB
+
 // Upload a PDF or image to Anthropic via the Worker. Returns the file_id.
 async function uploadFileToAnthropic(blob, filename) {
+  const size = blob && typeof blob.size === 'number' ? blob.size : 0;
+  const sizeMb = (size / (1024 * 1024)).toFixed(2);
+  try { console.info('[upload] →', filename || 'document', sizeMb + ' MB'); } catch (_) {}
+
+  // Pre-flight size guard. Surface a friendly, specific error instead of
+  // letting the fetch fail with a generic CORS message that doesn't tell
+  // Debbie anything useful. This ALSO catches the case where a chunk is
+  // larger than our splitter target (18MB) because something slipped past
+  // the batch packer — in practice that only happens on a single giant PDF
+  // that couldn't be split (e.g., one that's one huge image per page).
+  if (size > UPLOAD_MAX_BYTES) {
+    throw new Error(
+      'File "' + (filename || 'document') + '" is ' + sizeMb + ' MB, which is over the ' +
+      (UPLOAD_MAX_BYTES / (1024 * 1024)) + ' MB per-file upload limit. ' +
+      'Split this PDF into smaller sections (e.g., by provider or date range) in Drive and ' +
+      'rerun Analyze Records.'
+    );
+  }
+
   const fd = new FormData();
   fd.append('file', blob, filename || 'document');
-  const res = await fetch(`${PROXY_URL}/v1/files`, {
-    method: 'POST',
-    headers: { 'x-lnc-auth': LNC_AUTH },
-    body: fd
-  });
+  let res;
+  try {
+    res = await fetch(`${PROXY_URL}/v1/files`, {
+      method: 'POST',
+      headers: { 'x-lnc-auth': LNC_AUTH },
+      body: fd
+    });
+  } catch (netErr) {
+    // A bare network failure on a POST with a large body is almost always
+    // the edge rejecting the request mid-flight. Upgrade the message so
+    // Debbie sees "this file is probably too big" instead of "TypeError:
+    // Failed to fetch" or a CORS string with no context.
+    const hint = size > 50 * 1024 * 1024
+      ? ' (file is ' + sizeMb + ' MB — large uploads sometimes fail mid-transfer on slow connections; try again or split the PDF)'
+      : '';
+    throw new Error('Network error uploading "' + (filename || 'document') + '"' + hint + ': ' + (netErr && netErr.message ? netErr.message : netErr));
+  }
   if (!res.ok) {
     const txt = await res.text().catch(() => '');
     throw new Error(`File upload failed: HTTP ${res.status} ${txt.slice(0, 200)}`);
