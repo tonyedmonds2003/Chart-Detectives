@@ -1164,8 +1164,8 @@ tr:hover td { background: var(--gray-50); }
 // Format: YYYY.MM.DD.N where N is the Nth change on that day (1-indexed).
 // APP_VERSION_LABEL is a human-readable caption shown on hover.
 // ============================================================================
-const APP_VERSION       = '2026.04.22.11';
-const APP_VERSION_LABEL = 'Apr 22, 2026 (later x10) — Don\'t silently cancel when the tab is backgrounded. Chrome auto-suppresses window.confirm() on background tabs, returning false instantly. Our analysis kickoff had three cost-estimate confirm() calls that popped *after* the 70+ file upload phase completed — and because Debbie had inevitably switched tabs during the long upload, Chrome dismissed every one of them and the app reported "Analysis cancelled" as if she\'d clicked Cancel. Added confirmWhenVisible(message): if the tab is visible it behaves like normal confirm(); if hidden it waits for visibilitychange, updates document.title to "⚠ Waiting for you — …", shows a toast, then prompts after a 150ms settle delay. Wired it into all three analysis-path confirms (no-records warning, async cost estimate, sync cost estimate). Other confirm() calls (delete case, delete firm, etc.) are still plain confirm — those only fire from direct button clicks so the tab is always active. Previous fixes (upload retry, hidden-area reset, upload size guard, redeem URL decoding, redirect URI normalization, popup→redirect, driveFolderId guards, 🧹 Clear button, MSAL CDN fallback, root-folder self-heal) all still in place. Dropbox still stubbed.';
+const APP_VERSION       = '2026.04.22.12';
+const APP_VERSION_LABEL = 'Apr 22, 2026 (later x11) — Much longer upload retry + inter-upload pause. Previous 4-attempt / 10.5s-total backoff wasn\'t enough: Debbie hit a persistent mid-run failure on a 16.50 MB chunk at pp. 1613-1647 that blew all 4 retries with identical "Failed to fetch" errors while neighboring same-size chunks uploaded fine. Root cause almost certainly Chrome reusing a poisoned HTTP/2 connection — once an in-flight stream gets reset, every subsequent request on that same connection fails instantly until Chrome drops it and opens a fresh one, and 10.5 seconds isn\'t long enough for that to happen reliably. Bumped UPLOAD_MAX_ATTEMPTS 4→6 and UPLOAD_RETRY_BASE_MS 1500→3000 so total backoff is now 3s+6s+12s+24s+48s ≈ 93 seconds of recovery time between attempts 1 and 6. Also added a 500ms pause between sequential uploads in the async-analysis caller loop — about 35 extra seconds on a 70-file run, but gives Cloudflare a chance not to rate-limit us and gives Chrome a moment to notice stale connections before the next POST. If this STILL fails on the same chunk, the issue is deeper (Cloudflare Worker CPU/memory pressure or a Chrome bug specific to this file size) and we\'ll need to either upgrade the Worker plan or switch to Anthropic\'s direct-upload URL to bypass the Worker for /v1/files. Previous fixes (confirmWhenVisible, hidden-area reset, upload size guard, redeem URL decoding, redirect URI normalization, popup→redirect, driveFolderId guards, 🧹 Clear button, MSAL CDN fallback, root-folder self-heal) all still in place. Dropbox still stubbed.';
 
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
 
@@ -2961,8 +2961,18 @@ const UPLOAD_MAX_BYTES = 95 * 1024 * 1024; // 95 MB
 // hit a QUIC idle timeout, a stale keep-alive connection, or a momentary
 // ISP blip. Without retries, one "Failed to fetch" kills the entire run and
 // Debbie has to start over. With retries, a single hiccup is invisible.
-const UPLOAD_MAX_ATTEMPTS = 4;
-const UPLOAD_RETRY_BASE_MS = 1500;
+// Retry tuning. Bumped from 4 attempts (10.5s total backoff) to 6 attempts
+// (~3min total backoff) after Debbie hit persistent mid-run failures: a
+// specific chunk at pp. 1613-1647 (16.50 MB) blew all 4 retries with the
+// same "Failed to fetch" error while similar-sized chunks on either side
+// succeeded. Root cause appears to be Chrome reusing a broken HTTP/2 or
+// QUIC connection — once that connection is poisoned, every retry within
+// a short window fails instantly because Chrome hasn't dropped it yet.
+// Longer total backoff (3→6→12→24→48→96 seconds) gives Chrome time to
+// open a fresh connection and gives Cloudflare time to recover from any
+// rate-limiting it applied to our origin.
+const UPLOAD_MAX_ATTEMPTS = 6;
+const UPLOAD_RETRY_BASE_MS = 3000;
 
 // Upload a PDF or image to Anthropic via the Worker. Returns the file_id.
 // Automatically retries on transient network failures (Failed to fetch,
@@ -3008,7 +3018,8 @@ async function uploadFileToAnthropic(blob, filename) {
       const msg = (netErr && netErr.message) || String(netErr);
       console.warn('[upload] attempt ' + attempt + '/' + UPLOAD_MAX_ATTEMPTS + ' network error on "' + (filename || 'document') + '": ' + msg);
       if (attempt < UPLOAD_MAX_ATTEMPTS) {
-        const delay = UPLOAD_RETRY_BASE_MS * Math.pow(2, attempt - 1); // 1.5s, 3s, 6s
+        const delay = UPLOAD_RETRY_BASE_MS * Math.pow(2, attempt - 1); // 3s, 6s, 12s, 24s, 48s
+        console.warn('[upload] waiting ' + (delay / 1000) + 's before retry ' + (attempt + 1) + '/' + UPLOAD_MAX_ATTEMPTS);
         await new Promise(r => setTimeout(r, delay));
         continue;
       }
@@ -4947,6 +4958,12 @@ async function runAsyncRecordAnalysis(params) {
   } = params;
 
   // --- 1) Upload every chunk to Anthropic Files API ---
+  // Sequential uploads (not parallel) are intentional: Cloudflare's free tier
+  // and Chrome's HTTP/2 connection management both get grumpy with burst
+  // traffic. A 500ms pause between uploads gives Cloudflare a chance to not
+  // rate-limit us and gives Chrome time to notice if a connection is stale
+  // before the next request tries to reuse it.
+  const INTER_UPLOAD_PAUSE_MS = 500;
   area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Uploading ' + contentBlocks.length + ' file(s) to Claude (one-time per case)…</span></div>';
   const fileIdBlocks = [];
   const uploadedFileIds = [];
@@ -4966,6 +4983,12 @@ async function runAsyncRecordAnalysis(params) {
         ...(b.title ? { title: b.title } : {}),
         _pageCount: b._pageCount
       });
+      // Brief pause between uploads to avoid tripping Cloudflare rate-limits
+      // or piling requests onto a connection Chrome hasn't finished cleaning
+      // up. Cheap insurance — adds ~35 seconds to a 70-file run.
+      if (i < contentBlocks.length - 1) {
+        await new Promise(r => setTimeout(r, INTER_UPLOAD_PAUSE_MS));
+      }
     }
   } catch (e) {
     area.innerHTML = `<div class="alert alert-danger">Upload failed: ${esc(e.message)}<br><br>No batch was submitted. You can retry immediately.</div>`;
