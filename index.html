@@ -1164,8 +1164,8 @@ tr:hover td { background: var(--gray-50); }
 // Format: YYYY.MM.DD.N where N is the Nth change on that day (1-indexed).
 // APP_VERSION_LABEL is a human-readable caption shown on hover.
 // ============================================================================
-const APP_VERSION       = '2026.04.22.6';
-const APP_VERSION_LABEL = 'Apr 22, 2026 (later x5) — MSAL redirect URI normalization + diagnostic log. After swapping to the redirect flow, Microsoft reported invalid_request: "The provided value for the input parameter redirect_uri is not valid." Root cause was Azure-side (the URI our app sends isn\'t registered under the SPA platform in the app registration), but we also hardened the client: MS_REDIRECT_URI is now derived from window.location.origin + pathname, strips any trailing filename like index.html, and always ends with a trailing slash so what we send is predictable and copy-pasteable. The computed value is also logged via console.info(\'[msal] redirect URI this app will send to Microsoft:\', ...) so the exact string to register in Azure is visible. Previous fixes (popup→redirect, driveFolderId guards, 🧹 Clear button, MSAL CDN fallback, root-folder self-heal) all still in place. Dropbox still stubbed.';
+const APP_VERSION       = '2026.04.22.7';
+const APP_VERSION_LABEL = 'Apr 22, 2026 (later x6) — OneDrive "redeem" URL handling. After Azure SPA redirect URI was registered and sign-in succeeded, the import hit a new error: Graph /shares/ returned 400 Bad Request. Root cause: when an attorney emails a OneDrive share, Outlook / Gmail often rewrite the URL to a "redeem" form — https://onedrive.live.com/?redeem=<base64>&... — where the real addressable share URL is base64url-encoded inside the redeem query parameter. Graph doesn\'t dereference the outer wrapper; it only understands the inner URL. Added normalizeMsShareUrl that detects redeem=, base64url-decodes the inner URL, sanity-checks it starts with http(s), and hands THAT to encodeGraphShareId. Also added Prefer: redeemSharingLink header so Graph will accept fresh share links without requiring a prior browser click-through, and a fallback retry with the raw pasted URL if the normalized form fails. Previous fixes (redirect URI normalization, popup→redirect, driveFolderId guards, 🧹 Clear button, MSAL CDN fallback, root-folder self-heal) all still in place. Dropbox still stubbed.';
 
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
 
@@ -1594,16 +1594,77 @@ function encodeGraphShareId(shareUrl) {
   return 'u!' + b64;
 }
 
+// Normalize a pasted Microsoft share URL into a form Graph's /shares/ endpoint
+// understands. Two shapes in the wild cause 400 Bad Request:
+//   - "redeem" URLs:  https://onedrive.live.com/?redeem=<base64(share-url)>&...
+//     These are the URL format Outlook/Gmail use when the attorney's recipient
+//     receives the share notification email. The actual Graph-addressable URL
+//     is base64url-encoded inside the redeem query param.
+//   - "authkey" URLs: https://onedrive.live.com/?cid=...&id=...&authkey=...
+//     These already work directly — we leave them alone.
+// Anything else (1drv.ms short links, sharepoint.com links, raw OneDrive
+// /personal/... paths) we also leave alone — Graph handles them directly.
+function normalizeMsShareUrl(shareUrl) {
+  if (!shareUrl) return shareUrl;
+  let u = String(shareUrl).trim();
+  try {
+    const parsed = new URL(u);
+    // redeem= short-circuits everything: decode the inner URL and use that.
+    const redeem = parsed.searchParams.get('redeem');
+    if (redeem) {
+      // redeem values are base64url (maybe with URL encoding on top). Undo
+      // percent-encoding first, then swap URL-safe chars back, then decode.
+      let b64 = decodeURIComponent(redeem);
+      b64 = b64.replace(/-/g, '+').replace(/_/g, '/');
+      // Pad to a multiple of 4 so atob doesn't choke.
+      while (b64.length % 4) b64 += '=';
+      try {
+        const decoded = atob(b64);
+        // Sanity check — it should look like an https URL. If not, fall back.
+        if (/^https?:\/\//i.test(decoded)) {
+          console.info('[msal] decoded redeem URL →', decoded);
+          return decoded;
+        }
+      } catch (e) {
+        console.warn('[msal] could not decode redeem param; sending original URL:', e);
+      }
+    }
+  } catch (_) { /* not a parseable URL — leave it alone */ }
+  return u;
+}
+
 // Resolve a shared OneDrive/SharePoint link to the root driveItem it points
 // to. Returns { id, driveId, name, folder, file, ... } per Graph docs.
 async function msGraphGetShareItem(shareUrl) {
   const token = await msGetToken();
-  const sid = encodeGraphShareId(shareUrl);
+  const normalized = normalizeMsShareUrl(shareUrl);
+  const sid = encodeGraphShareId(normalized);
   const url = 'https://graph.microsoft.com/v1.0/shares/' + sid + '/driveItem' +
               '?$select=id,name,folder,file,size,lastModifiedDateTime,parentReference';
-  const res = await fetch(url, { headers: { Authorization: 'Bearer ' + token } });
+  const res = await fetch(url, {
+    headers: {
+      Authorization: 'Bearer ' + token,
+      // Prefer: redeemSharingLink lets Graph accept a freshly-redeemed URL
+      // (like the kind in attorney-forwarded share emails) without the user
+      // having to click through the browser first.
+      Prefer: 'redeemSharingLink'
+    }
+  });
   if (!res.ok) {
     const body = await res.text();
+    // If the normalized URL isn't the same as what was pasted, and we failed,
+    // try one more time with the raw URL. Covers edge cases where Graph does
+    // understand the outer onedrive.live.com?redeem=... form but rejects the
+    // decoded inner URL (rare but possible when the inner URL is an old format).
+    if (normalized !== shareUrl) {
+      const sid2 = encodeGraphShareId(shareUrl);
+      const url2 = 'https://graph.microsoft.com/v1.0/shares/' + sid2 + '/driveItem' +
+                   '?$select=id,name,folder,file,size,lastModifiedDateTime,parentReference';
+      const res2 = await fetch(url2, {
+        headers: { Authorization: 'Bearer ' + token, Prefer: 'redeemSharingLink' }
+      });
+      if (res2.ok) return res2.json();
+    }
     throw new Error('Graph shares lookup failed (' + res.status + '): ' + body.slice(0, 300));
   }
   return res.json();
