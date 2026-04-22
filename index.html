@@ -1160,8 +1160,8 @@ tr:hover td { background: var(--gray-50); }
 // Format: YYYY.MM.DD.N where N is the Nth change on that day (1-indexed).
 // APP_VERSION_LABEL is a human-readable caption shown on hover.
 // ============================================================================
-const APP_VERSION       = '2026.04.22.2';
-const APP_VERSION_LABEL = 'Apr 22, 2026 (later) — OneDrive / SharePoint attorney-link import is now live end-to-end. Added MSAL (SPA PKCE, no client secret) pointed at a multitenant + personal-accounts Azure app registration, Microsoft Graph helpers that resolve a share URL to a driveItem and walk the tree with pagination (msGraphGetShareItem / msGraphListChildren / msGraphListTreeRecursive / msGraphDownloadFile), and a mirrorGraphTreeToGdrive that streams each file through the browser into Debbie\'s Google Drive while preserving subfolder structure. importFromAttorneyLink now dispatches to importFromOneDriveLink on MS URLs (was a "coming soon" stub); refreshAttorneyLink is provider-aware and re-walks either source type, falling back to re-resolving the share URL if saved driveId/itemId are stale. The persisted caseInfo.attorneyImport manifest stores both sourceDriveId and sourceId for OneDrive cases. Graph file hashes (quickXorHash / sha1Hash) are used in place of md5Checksum for the change-detection diff. Dropbox is still stubbed — awaiting OAuth app registration.';
+const APP_VERSION       = '2026.04.22.3';
+const APP_VERSION_LABEL = 'Apr 22, 2026 (later x2) — Fix for imported files landing in the Chart Detectives root folder instead of the Firm / Attorney / Case subfolder. Both importFromOneDriveLink and the Google-Drive path in importFromAttorneyLink now (re)run ensureCaseHierarchy whenever caseInfo.driveFolderId is missing OR equals state.driveRootFolderId, so stale / partially-built cases heal themselves on the next import. A hard guard also refuses to mirror into the root even if the hierarchy call was skipped — the import now fails loudly with instructions to set a firm/attorney + click 🗂 Organize, rather than silently dumping files into the root. Idempotent: driveFindOrCreateFolder finds the existing case subfolder if it was already built. OneDrive / SharePoint attorney-link import remains live end-to-end via MSAL + Microsoft Graph. Dropbox still stubbed.';
 
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
 
@@ -3909,16 +3909,33 @@ async function importFromAttorneyLink() {
     catch(e) { setStatus('<span style="color:#c94646;">Could not connect to Google Drive: ' + esc(e.message) + '</span>'); return; }
   }
 
-  // Make sure the case has a Records folder in Debbie's Drive.
-  if (!caseInfo.driveFolderId) {
-    try {
-      setStatus('Creating case folder in your Drive…');
-      const hier = await ensureCaseHierarchy(caseInfo);
-      caseInfo.driveFolderId = hier.records.id;
-      caseInfo.driveFolderName = hier.records.name;
-      save();
-    } catch(e) {
-      setStatus('<span style="color:#c94646;">Could not create case folder: ' + esc(e.message) + '</span>');
+  // Make sure the case has a Records folder in Debbie's Drive. Also guard
+  // against the case accidentally pointing at the Chart Detectives root
+  // (legacy/stale data, aborted hierarchy build) — rebuilding is idempotent.
+  {
+    const needsHierarchy =
+      !caseInfo.driveFolderId ||
+      (state.driveRootFolderId && caseInfo.driveFolderId === state.driveRootFolderId);
+    if (needsHierarchy && caseInfo.firmId && state.driveRootFolderId) {
+      try {
+        setStatus('Verifying case folder in your Drive…');
+        const hier = await ensureCaseHierarchy(caseInfo);
+        caseInfo.driveFolderId = hier.records.id;
+        caseInfo.driveFolderName = hier.records.name;
+        caseInfo.driveWorkFolderId = caseInfo.driveWorkFolderId || hier.work.id;
+        caseInfo.driveWorkFolderName = caseInfo.driveWorkFolderName || hier.work.name;
+        save();
+      } catch(e) {
+        setStatus('<span style="color:#c94646;">Could not create case folder: ' + esc(e.message) + '</span>');
+        return;
+      }
+    }
+    if (!caseInfo.driveFolderId) {
+      setStatus('<span style="color:#c94646;">No Drive folder is linked to this case. Open Cases → 📁 Connect, or set a firm + attorney so the folder can be auto-created.</span>');
+      return;
+    }
+    if (state.driveRootFolderId && caseInfo.driveFolderId === state.driveRootFolderId) {
+      setStatus('<span style="color:#c94646;">Refusing to import into the Chart Detectives root folder. Set a firm + attorney on this case (and click 🗂 Organize on the Cases page) so the app can build a Firm/Attorney/Case subfolder first.</span>');
       return;
     }
   }
@@ -4012,17 +4029,39 @@ async function importFromOneDriveLink(caseInfo, parsed, setStatus) {
     try { await driveSignIn(true); }
     catch(e) { setStatus('<span style="color:#c94646;">Could not connect to Google Drive (needed as the destination): ' + esc(e.message) + '</span>'); return; }
   }
-  if (!caseInfo.driveFolderId) {
+  // Defensive: if driveFolderId is missing OR is pointing at the Chart
+  // Detectives root (which would dump imported files straight into the root,
+  // the exact bug Tony reported), synchronously (re)build the Firm/Attorney/
+  // Case hierarchy and land on the case-specific records folder. This is
+  // idempotent — driveFindOrCreateFolder returns the existing folder if it's
+  // already there — so it's safe to run on every import.
+  const needsHierarchy =
+    !caseInfo.driveFolderId ||
+    (state.driveRootFolderId && caseInfo.driveFolderId === state.driveRootFolderId);
+  if (needsHierarchy && caseInfo.firmId && state.driveRootFolderId) {
     try {
-      setStatus('Creating case folder in your Drive…');
+      setStatus('Verifying case folder in your Drive…');
       const hier = await ensureCaseHierarchy(caseInfo);
       caseInfo.driveFolderId = hier.records.id;
       caseInfo.driveFolderName = hier.records.name;
+      caseInfo.driveWorkFolderId = caseInfo.driveWorkFolderId || hier.work.id;
+      caseInfo.driveWorkFolderName = caseInfo.driveWorkFolderName || hier.work.name;
       save();
     } catch(e) {
       setStatus('<span style="color:#c94646;">Could not create case folder: ' + esc(e.message) + '</span>');
       return;
     }
+  }
+  if (!caseInfo.driveFolderId) {
+    setStatus('<span style="color:#c94646;">No Drive folder is linked to this case. Open Cases → 📁 Connect, or set a firm + attorney so the folder can be auto-created.</span>');
+    return;
+  }
+  // Hard guard: refuse to mirror into the Chart Detectives root. Even if the
+  // hierarchy call above was skipped (no firmId), we'd rather fail loudly than
+  // dump files into the root again.
+  if (state.driveRootFolderId && caseInfo.driveFolderId === state.driveRootFolderId) {
+    setStatus('<span style="color:#c94646;">Refusing to import into the Chart Detectives root folder. Set a firm + attorney on this case (and click 🗂 Organize on the Cases page) so the app can build a Firm/Attorney/Case subfolder first.</span>');
+    return;
   }
 
   // Sign in to Microsoft (popup) so we can resolve the share link. Attorneys
