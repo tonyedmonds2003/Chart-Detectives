@@ -215,8 +215,11 @@ tr:hover td { background: var(--gray-50); }
 <script src="https://apis.google.com/js/api.js" async defer></script>
 <!-- Microsoft Authentication Library (MSAL). Used for the OneDrive/SharePoint
      attorney-link import flow. PKCE-based public client — no secret needed,
-     safe to run entirely in the browser. -->
-<script src="https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js"></script>
+     safe to run entirely in the browser. Primary source is Microsoft's own
+     CDN; falls back to jsdelivr if that's slow/blocked (this is what tripped
+     the "Timed out waiting for library" error on slow connections). -->
+<script src="https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js"
+        onerror="var s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/@azure/msal-browser@2.38.3/lib/msal-browser.min.js';s.onerror=function(){var s2=document.createElement('script');s2.src='https://unpkg.com/@azure/msal-browser@2.38.3/lib/msal-browser.min.js';document.head.appendChild(s2);};document.head.appendChild(s);"></script>
 <!-- heic2any: converts iPhone HEIC/HEIF photos to JPEG in the browser so Claude can read them -->
 <script src="https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js"></script>
 <!-- pdf-lib: in-browser PDF splitting so large medical-record PDFs can be broken into page-range chunks -->
@@ -492,6 +495,7 @@ tr:hover td { background: var(--gray-50); }
                    placeholder="Paste Google Drive / OneDrive / Dropbox folder link…" />
             <button class="btn btn-primary btn-sm" onclick="importFromAttorneyLink()" style="white-space:nowrap;">📥 Import</button>
             <button class="btn btn-gold btn-sm" onclick="refreshAttorneyLink()" id="attorney-refresh-btn" style="white-space:nowrap;display:none;">🔄 Refresh</button>
+            <button class="btn btn-outline btn-sm" onclick="clearAttorneyImport()" id="attorney-clear-btn" style="white-space:nowrap;display:none;" title="Forget the saved attorney link + manifest on this case. Does not delete any Drive files.">🧹 Clear</button>
           </div>
           <div id="attorney-import-status" style="margin-top:6px;font-size:11px;color:var(--gray-500);"></div>
         </div>
@@ -1160,8 +1164,8 @@ tr:hover td { background: var(--gray-50); }
 // Format: YYYY.MM.DD.N where N is the Nth change on that day (1-indexed).
 // APP_VERSION_LABEL is a human-readable caption shown on hover.
 // ============================================================================
-const APP_VERSION       = '2026.04.22.3';
-const APP_VERSION_LABEL = 'Apr 22, 2026 (later x2) — Fix for imported files landing in the Chart Detectives root folder instead of the Firm / Attorney / Case subfolder. Both importFromOneDriveLink and the Google-Drive path in importFromAttorneyLink now (re)run ensureCaseHierarchy whenever caseInfo.driveFolderId is missing OR equals state.driveRootFolderId, so stale / partially-built cases heal themselves on the next import. A hard guard also refuses to mirror into the root even if the hierarchy call was skipped — the import now fails loudly with instructions to set a firm/attorney + click 🗂 Organize, rather than silently dumping files into the root. Idempotent: driveFindOrCreateFolder finds the existing case subfolder if it was already built. OneDrive / SharePoint attorney-link import remains live end-to-end via MSAL + Microsoft Graph. Dropbox still stubbed.';
+const APP_VERSION       = '2026.04.22.4';
+const APP_VERSION_LABEL = 'Apr 22, 2026 (later x3) — Round 2 on the attorney-import plumbing. (1) MSAL library load: primary alcdn.msauth.net was timing out on Tony\'s connection, so added jsdelivr + unpkg fallback CDNs on the <script> tag, bumped _initMsalInstance timeout from 10s → 30s, and replaced the generic "Timed out waiting for library" with a diagnostic message that names the network/firewall/ad-blocker as the usual cause. (2) Self-healing on case select: onRecCaseSelectChanged now detects when a case\'s driveFolderId accidentally equals state.driveRootFolderId (the Dottie Richards failure mode) and clears driveFolderId + any attorneyImport manifest captured against the broken id, so the Records page stops listing files that belong to other cases. (3) Added a 🧹 Clear button next to the attorney-link input (clearAttorneyImport) that wipes the saved manifest + URL on the selected case without touching any actual Drive files — the manual escape hatch when a wrong link was pasted or files were deleted from Drive. Previous fix (driveFolderId === root guard at import time) still in place. Dropbox still stubbed.';
 
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
 
@@ -1431,7 +1435,20 @@ async function pickDriveFolder() {
 // the instance. Safe to call repeatedly — returns the cached instance.
 async function _initMsalInstance() {
   if (_msalInstance) return _msalInstance;
-  await _waitFor(() => window.msal && window.msal.PublicClientApplication);
+  // 30-second ceiling for MSAL — the primary CDN (alcdn.msauth.net) is fronted
+  // by Akamai and can be slow to resolve on the first hit of a session. If the
+  // primary <script> fired onerror, the jsdelivr fallback is kicking in and
+  // needs a bit more runway. 10s was tripping on Tony's DSL.
+  try {
+    await _waitFor(() => window.msal && window.msal.PublicClientApplication, 30000);
+  } catch (e) {
+    throw new Error(
+      'Microsoft sign-in library did not load. This is almost always a network '
+      + 'problem — a corporate firewall, an ad/tracking blocker, or a slow DSL. '
+      + 'Check that alcdn.msauth.net or cdn.jsdelivr.net are reachable and try '
+      + 'again. If you\'re on a guest wifi, switch networks and retry.'
+    );
+  }
   _msalInstance = new msal.PublicClientApplication({
     auth: {
       clientId: MS_CLIENT_ID,
@@ -4310,7 +4327,7 @@ async function refreshAttorneyLink() {
 }
 
 // Keep the "✓ N files imported from Google Drive" badge in sync with the
-// selected case. Also shows/hides the Refresh button.
+// selected case. Also shows/hides the Refresh + Clear buttons.
 function renderAttorneyImportBadge() {
   const sel = document.getElementById('rec-case-select');
   const caseId = sel && sel.value;
@@ -4318,12 +4335,14 @@ function renderAttorneyImportBadge() {
   const badge = document.getElementById('attorney-source-badge');
   const input = document.getElementById('attorney-link-input');
   const refreshBtn = document.getElementById('attorney-refresh-btn');
+  const clearBtn = document.getElementById('attorney-clear-btn');
   if (!badge || !input) return;
   const imp = caseInfo && caseInfo.attorneyImport;
   if (!imp) {
     badge.textContent = '';
     input.value = '';
     if (refreshBtn) refreshBtn.style.display = 'none';
+    if (clearBtn) clearBtn.style.display = 'none';
     return;
   }
   const provLabel = imp.provider === 'gdrive' ? 'Google Drive' : imp.provider === 'onedrive' ? 'OneDrive' : 'Dropbox';
@@ -4331,6 +4350,37 @@ function renderAttorneyImportBadge() {
   badge.textContent = '✓ ' + count + ' file(s) imported from ' + provLabel;
   input.value = imp.sourceUrl || '';
   if (refreshBtn) refreshBtn.style.display = '';
+  if (clearBtn) clearBtn.style.display = '';
+}
+
+// Wipe the attorneyImport manifest on the selected case. Useful when a wrong
+// link was pasted (so the saved manifest references files that belong to
+// another case) or when files were deleted in Drive and the badge is lying.
+// Does NOT delete any actual Drive files — it only forgets the mapping. Case
+// data (analysis, reports, etc.) is untouched.
+function clearAttorneyImport() {
+  const sel = document.getElementById('rec-case-select');
+  const caseId = sel && sel.value;
+  if (!caseId) { alert('Pick a case first.'); return; }
+  const c = state.cases.find(x => x.id === caseId);
+  if (!c) return;
+  if (!c.attorneyImport) {
+    showToast('Nothing to clear — no attorney link is saved on this case.');
+    return;
+  }
+  const provLabel = c.attorneyImport.provider === 'gdrive' ? 'Google Drive'
+                  : c.attorneyImport.provider === 'onedrive' ? 'OneDrive' : 'Dropbox';
+  const n = (c.attorneyImport.files || []).length;
+  if (!confirm('Forget the ' + provLabel + ' attorney link saved on "' + (c.patient||c.id) + '"?\n\n'
+    + 'This clears the saved manifest (' + n + ' file(s)) and the pasted URL. '
+    + 'It does NOT delete any files from Google Drive — only the app\'s record '
+    + 'of which source they came from. You can paste a new link and re-import afterwards.')) return;
+  delete c.attorneyImport;
+  save();
+  renderAttorneyImportBadge();
+  const statusEl = document.getElementById('attorney-import-status');
+  if (statusEl) statusEl.textContent = '';
+  showToast('🧹 Cleared attorney link on ' + (c.patient||c.id) + '.');
 }
 
 // Direct-to-Drive upload for emailed attachments. Pushes each picked file
@@ -4387,11 +4437,26 @@ async function onRecCaseSelectChanged() {
   const listEl = document.getElementById('drive-file-list');
   if (listEl) listEl.innerHTML = '';
   const caseId = document.getElementById('rec-case-select').value;
+  if (!caseId) { try { renderAttorneyImportBadge(); } catch(_) {} return; }
+  const c = state.cases.find(x => x.id === caseId);
+  // Self-heal: if this case's driveFolderId accidentally points at the
+  // Chart Detectives root (the bug that landed Mimms files in Dottie's
+  // listing), clear it + any attorney-link manifest that was captured against
+  // that wrong destination. Users can re-import cleanly after this.
+  if (c && state.driveRootFolderId && c.driveFolderId === state.driveRootFolderId) {
+    console.warn('[drive] case', c.id, 'had driveFolderId === driveRootFolderId — clearing to force rebuild on next import/upload.');
+    c.driveFolderId = '';
+    c.driveFolderName = '';
+    // Any import that ran under the broken folder-id is untrustworthy — wipe
+    // the manifest so the "N files imported" badge doesn't lie, and the
+    // Records Reviewed table doesn't cite files that belong to another case.
+    if (c.attorneyImport) delete c.attorneyImport;
+    save();
+    try { showToast('🧹 Cleared a bad Drive link on ' + (c.patient||c.id) + ' — imported files from before the fix may have ended up on another case. Re-import to rebuild.'); } catch(_) {}
+  }
   // Refresh the attorney-link badge whenever the case selector changes so the
   // Import/Refresh UI always reflects the selected case's saved import state.
   try { renderAttorneyImportBadge(); } catch(_) {}
-  if (!caseId) return;
-  const c = state.cases.find(x => x.id === caseId);
 
   // If async flow is on and this case has an in-flight job, reconnect to it. The poll loop
   // renders status into the result area and finishes by calling finishAnalysis. Fire-and-forget
