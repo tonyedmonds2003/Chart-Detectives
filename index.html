@@ -1164,8 +1164,8 @@ tr:hover td { background: var(--gray-50); }
 // Format: YYYY.MM.DD.N where N is the Nth change on that day (1-indexed).
 // APP_VERSION_LABEL is a human-readable caption shown on hover.
 // ============================================================================
-const APP_VERSION       = '2026.04.22.5';
-const APP_VERSION_LABEL = 'Apr 22, 2026 (later x4) — MSAL popup → redirect flow. Microsoft\'s login.microsoftonline.com serves Cross-Origin-Opener-Policy headers that block the parent window from polling the popup, so loginPopup / acquireTokenPopup were reporting user_cancelled even when the user actually signed in. Swapped to loginRedirect + acquireTokenRedirect; _initMsalInstance now calls handleRedirectPromise() after initialize() to pick up the response when the page comes back. Added msStashPendingImport (stashes the selected case id + attorney URL in sessionStorage before redirect) and resumePendingMsImport (runs on init, jumps back to Records page, re-selects the case, re-populates the URL, and auto-fires importFromAttorneyLink) so Debbie doesn\'t have to re-navigate and re-click after signing in. 15-minute expiry on stashes; one-shot — reading clears it. Previous fixes (driveFolderId guards, 🧹 Clear button, MSAL CDN fallback, root-folder self-heal) all still in place. Dropbox still stubbed.';
+const APP_VERSION       = '2026.04.22.6';
+const APP_VERSION_LABEL = 'Apr 22, 2026 (later x5) — MSAL redirect URI normalization + diagnostic log. After swapping to the redirect flow, Microsoft reported invalid_request: "The provided value for the input parameter redirect_uri is not valid." Root cause was Azure-side (the URI our app sends isn\'t registered under the SPA platform in the app registration), but we also hardened the client: MS_REDIRECT_URI is now derived from window.location.origin + pathname, strips any trailing filename like index.html, and always ends with a trailing slash so what we send is predictable and copy-pasteable. The computed value is also logged via console.info(\'[msal] redirect URI this app will send to Microsoft:\', ...) so the exact string to register in Azure is visible. Previous fixes (popup→redirect, driveFolderId guards, 🧹 Clear button, MSAL CDN fallback, root-folder self-heal) all still in place. Dropbox still stubbed.';
 
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
 
@@ -1449,11 +1449,25 @@ async function _initMsalInstance() {
       + 'again. If you\'re on a guest wifi, switch networks and retry.'
     );
   }
+  // Compute a stable redirect URI — always a directory, never a filename. The
+  // Azure portal expects an exact-match URI, so /Chart-Detectives/ vs
+  // /Chart-Detectives/index.html (which are the same page on GitHub Pages)
+  // would otherwise collide.  Also forces a trailing slash for consistency.
+  const MS_REDIRECT_URI = (function() {
+    let u = window.location.origin + window.location.pathname;
+    // Strip a filename like "index.html" if the path points at one.
+    if (/\/[^/]*\.[^/]*$/.test(u)) u = u.replace(/[^/]*$/, '');
+    if (!u.endsWith('/')) u += '/';
+    return u;
+  })();
+  // Log once so Tony / Debbie can copy-paste the exact value into Azure when
+  // they see the "invalid_request: redirect_uri not registered" error.
+  try { console.info('[msal] redirect URI this app will send to Microsoft:', MS_REDIRECT_URI); } catch(_) {}
   _msalInstance = new msal.PublicClientApplication({
     auth: {
       clientId: MS_CLIENT_ID,
       authority: MS_AUTHORITY,
-      redirectUri: window.location.origin + window.location.pathname
+      redirectUri: MS_REDIRECT_URI
     },
     cache: {
       // sessionStorage scopes auth to a single tab — safer than localStorage
@@ -4173,12 +4187,27 @@ async function importFromOneDriveLink(caseInfo, parsed, setStatus) {
     return;
   }
 
-  // Sign in to Microsoft (popup) so we can resolve the share link. Attorneys
+  // Sign in to Microsoft (redirect) so we can resolve the share link. Attorneys
   // on personal OneDrive, M365 business, or SharePoint all flow through the
   // same /common authority — MS figures out which tenant the account lives in.
   setStatus('Connecting to Microsoft…');
   try { await msGetToken(); }
-  catch(e) { setStatus('<span style="color:#c94646;">Microsoft sign-in failed: ' + esc(e.message) + '</span>'); return; }
+  catch(e) {
+    const msg = (e && e.message) || String(e);
+    // Specific, actionable message when Microsoft rejects the redirect URI.
+    // This is an Azure app-registration problem, not something the user can
+    // fix in the app itself — so explain rather than let a raw error through.
+    if (/redirect_uri/i.test(msg) && /invalid/i.test(msg)) {
+      let expected = '';
+      try { expected = (typeof MS_REDIRECT_URI === 'string' && MS_REDIRECT_URI) ? MS_REDIRECT_URI : ''; } catch(_) {}
+      setStatus('<span style="color:#c94646;">Microsoft rejected our sign-in because the redirect URL isn\'t registered in the Azure app.'
+        + (expected ? '<br>The URL that needs to be added is: <code>' + esc(expected) + '</code>' : '')
+        + '<br>This is a one-time configuration step on the Azure portal — check the browser console for the exact URL, then add it under App registration → Authentication → Single-page application.</span>');
+      return;
+    }
+    setStatus('<span style="color:#c94646;">Microsoft sign-in failed: ' + esc(msg) + '</span>');
+    return;
+  }
 
   // Resolve the share URL → driveItem, then walk the tree if it's a folder.
   setStatus('Reading attorney folder…');
