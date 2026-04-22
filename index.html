@@ -1164,8 +1164,8 @@ tr:hover td { background: var(--gray-50); }
 // Format: YYYY.MM.DD.N where N is the Nth change on that day (1-indexed).
 // APP_VERSION_LABEL is a human-readable caption shown on hover.
 // ============================================================================
-const APP_VERSION       = '2026.04.22.4';
-const APP_VERSION_LABEL = 'Apr 22, 2026 (later x3) — Round 2 on the attorney-import plumbing. (1) MSAL library load: primary alcdn.msauth.net was timing out on Tony\'s connection, so added jsdelivr + unpkg fallback CDNs on the <script> tag, bumped _initMsalInstance timeout from 10s → 30s, and replaced the generic "Timed out waiting for library" with a diagnostic message that names the network/firewall/ad-blocker as the usual cause. (2) Self-healing on case select: onRecCaseSelectChanged now detects when a case\'s driveFolderId accidentally equals state.driveRootFolderId (the Dottie Richards failure mode) and clears driveFolderId + any attorneyImport manifest captured against the broken id, so the Records page stops listing files that belong to other cases. (3) Added a 🧹 Clear button next to the attorney-link input (clearAttorneyImport) that wipes the saved manifest + URL on the selected case without touching any actual Drive files — the manual escape hatch when a wrong link was pasted or files were deleted from Drive. Previous fix (driveFolderId === root guard at import time) still in place. Dropbox still stubbed.';
+const APP_VERSION       = '2026.04.22.5';
+const APP_VERSION_LABEL = 'Apr 22, 2026 (later x4) — MSAL popup → redirect flow. Microsoft\'s login.microsoftonline.com serves Cross-Origin-Opener-Policy headers that block the parent window from polling the popup, so loginPopup / acquireTokenPopup were reporting user_cancelled even when the user actually signed in. Swapped to loginRedirect + acquireTokenRedirect; _initMsalInstance now calls handleRedirectPromise() after initialize() to pick up the response when the page comes back. Added msStashPendingImport (stashes the selected case id + attorney URL in sessionStorage before redirect) and resumePendingMsImport (runs on init, jumps back to Records page, re-selects the case, re-populates the URL, and auto-fires importFromAttorneyLink) so Debbie doesn\'t have to re-navigate and re-click after signing in. 15-minute expiry on stashes; one-shot — reading clears it. Previous fixes (driveFolderId guards, 🧹 Clear button, MSAL CDN fallback, root-folder self-heal) all still in place. Dropbox still stubbed.';
 
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
 
@@ -1466,23 +1466,72 @@ async function _initMsalInstance() {
   if (typeof _msalInstance.initialize === 'function') {
     await _msalInstance.initialize();
   }
+  // If we just came back from a Microsoft-login redirect, pick up the response
+  // and make the account active. Doing this inside _initMsalInstance means
+  // every entry point (importFromAttorneyLink, refreshAttorneyLink, etc.)
+  // benefits — not just page load.
+  try {
+    const response = await _msalInstance.handleRedirectPromise();
+    if (response && response.account) {
+      _msalInstance.setActiveAccount(response.account);
+      _msToken = response.accessToken;
+    } else {
+      // No redirect response — but an existing account may be cached in
+      // sessionStorage from a prior tab; promote it to active so silent
+      // token acquisition works without another prompt.
+      const accts = _msalInstance.getAllAccounts();
+      if (accts.length && !_msalInstance.getActiveAccount()) {
+        _msalInstance.setActiveAccount(accts[0]);
+      }
+    }
+  } catch (e) {
+    console.warn('[msal] handleRedirectPromise error:', e);
+  }
   return _msalInstance;
 }
 
-// Interactive sign-in via popup. Resolves to an access token for MS_SCOPES.
+// ---- Pending-action stash ----
+// Microsoft sign-in uses a full-page redirect (popup is blocked by COOP on
+// modern browsers when the popup navigates to login.microsoftonline.com).
+// Before redirecting we stash the user's intent in sessionStorage so we can
+// resume automatically after they come back, rather than making them re-
+// select the case and re-paste the URL.
+const MS_PENDING_KEY = 'lnc_ms_pending';
+function msStashPendingImport() {
+  try {
+    const sel = document.getElementById('rec-case-select');
+    const urlEl = document.getElementById('attorney-link-input');
+    const pending = {
+      caseId: sel ? sel.value : '',
+      url: urlEl ? urlEl.value.trim() : '',
+      action: 'import-attorney-link',
+      ts: Date.now()
+    };
+    // Only stash if we have something worth resuming — a case + a URL.
+    if (pending.caseId && pending.url) {
+      sessionStorage.setItem(MS_PENDING_KEY, JSON.stringify(pending));
+    }
+  } catch(_e) {}
+}
+
+// Interactive sign-in via full-page redirect. Does not resolve in the current
+// page lifetime — the browser navigates away to login.microsoftonline.com,
+// and when it comes back handleRedirectPromise (inside _initMsalInstance)
+// picks up the token. Callers should treat this as "will not return".
 async function msSignIn() {
   const m = await _initMsalInstance();
+  msStashPendingImport();
   try {
-    const result = await m.loginPopup({ scopes: MS_SCOPES, prompt: 'select_account' });
-    if (result && result.account) m.setActiveAccount(result.account);
-    _msToken = result.accessToken;
-    return _msToken;
+    await m.loginRedirect({ scopes: MS_SCOPES, prompt: 'select_account' });
   } catch (e) {
     throw new Error('Microsoft sign-in failed: ' + (e.message || e));
   }
+  // loginRedirect navigates the page away; this line is only reached if the
+  // redirect itself failed (e.g. popup blocker on the top-level navigation).
+  throw new Error('Redirecting to Microsoft sign-in…');
 }
 
-// Get a valid access token, silently if possible, falling back to popup.
+// Get a valid access token, silently if possible, falling back to redirect.
 // Callers should always await this rather than caching _msToken themselves —
 // MSAL handles expiry and refresh internally.
 async function msGetToken() {
@@ -1495,11 +1544,14 @@ async function msGetToken() {
     _msToken = result.accessToken;
     return _msToken;
   } catch (e) {
-    // Silent failed (consent needed, session expired, etc.) — pop up for reconsent.
-    console.warn('[msal] silent token acquisition failed, falling back to popup:', e);
-    const result = await m.acquireTokenPopup({ scopes: MS_SCOPES, account });
-    _msToken = result.accessToken;
-    return _msToken;
+    // Silent failed (consent needed, session expired, new scopes, etc.).
+    // Popup flow reliably breaks under the COOP headers Microsoft serves on
+    // the login page, so we fall back to a full-page redirect.
+    console.warn('[msal] silent token acquisition failed, redirecting:', e);
+    msStashPendingImport();
+    await m.acquireTokenRedirect({ scopes: MS_SCOPES, account });
+    // acquireTokenRedirect navigates away; if it doesn't, something is wrong.
+    throw new Error('Redirecting to Microsoft sign-in…');
   }
 }
 
@@ -3118,8 +3170,48 @@ function init() {
   const invDue = document.getElementById('inv-due');
   if (invDue) invDue.value = due.toISOString().split('T')[0];
   addInvoiceLineItem();
+  // If we just returned from a Microsoft-login redirect with a pending
+  // attorney-link import, resume it automatically so Tony/Debbie don't have
+  // to re-navigate and re-paste. Runs after a short delay so MSAL's
+  // handleRedirectPromise (inside _initMsalInstance) has time to settle.
+  try { setTimeout(resumePendingMsImport, 300); } catch(_) {}
 }
 init();
+
+// Re-enter the OneDrive import flow if the Microsoft redirect stashed one.
+// The stash is one-shot — reading it clears it, so a page refresh after a
+// successful import doesn't re-fire.
+async function resumePendingMsImport() {
+  let pending;
+  try { pending = JSON.parse(sessionStorage.getItem(MS_PENDING_KEY) || 'null'); }
+  catch(_) { pending = null; }
+  if (!pending || !pending.caseId || !pending.url) return;
+  // Drop stashes older than 15 minutes — user walked away from the tab.
+  if (Date.now() - (pending.ts || 0) > 15 * 60 * 1000) {
+    sessionStorage.removeItem(MS_PENDING_KEY);
+    return;
+  }
+  sessionStorage.removeItem(MS_PENDING_KEY);
+  // Warm up MSAL so handleRedirectPromise completes before we call msGetToken.
+  try { await _initMsalInstance(); } catch(_) {}
+  // Only resume if MSAL now has an account (the redirect actually succeeded).
+  if (!_msalInstance || !_msalInstance.getAllAccounts().length) return;
+  // Jump to the Records page, select the case, pre-fill the URL.
+  try { showPage('records'); } catch(_) {}
+  const sel = document.getElementById('rec-case-select');
+  if (sel) {
+    sel.value = pending.caseId;
+    try { onRecCaseSelectChanged(); } catch(_) {}
+  }
+  const urlEl = document.getElementById('attorney-link-input');
+  if (urlEl) urlEl.value = pending.url;
+  const statusEl = document.getElementById('attorney-import-status');
+  if (statusEl) statusEl.innerHTML = '<span style="color:#227d3b;">✓ Signed into Microsoft — resuming import…</span>';
+  // Fire the import. We don't await so the user sees the status update first.
+  setTimeout(() => {
+    try { importFromAttorneyLink(); } catch(e) { console.warn('[msal] resume failed:', e); }
+  }, 200);
+}
 
 // ===== NAVIGATION =====
 function showPage(id) {
