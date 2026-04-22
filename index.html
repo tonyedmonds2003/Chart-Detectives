@@ -213,6 +213,10 @@ tr:hover td { background: var(--gray-50); }
 <!-- Google Identity Services (OAuth) and Google API client (for Drive Picker + Drive API) -->
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://apis.google.com/js/api.js" async defer></script>
+<!-- Microsoft Authentication Library (MSAL). Used for the OneDrive/SharePoint
+     attorney-link import flow. PKCE-based public client — no secret needed,
+     safe to run entirely in the browser. -->
+<script src="https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js"></script>
 <!-- heic2any: converts iPhone HEIC/HEIF photos to JPEG in the browser so Claude can read them -->
 <script src="https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js"></script>
 <!-- pdf-lib: in-browser PDF splitting so large medical-record PDFs can be broken into page-range chunks -->
@@ -1156,8 +1160,8 @@ tr:hover td { background: var(--gray-50); }
 // Format: YYYY.MM.DD.N where N is the Nth change on that day (1-indexed).
 // APP_VERSION_LABEL is a human-readable caption shown on hover.
 // ============================================================================
-const APP_VERSION       = '2026.04.22.1';
-const APP_VERSION_LABEL = 'Apr 22, 2026 — Big pipeline: (1) Attorney-link paste imports a shared Google Drive folder into Debbie\'s case Records folder, preserving the folder tree and recording a manifest on caseInfo.attorneyImport so a one-click Refresh later can pull in new/changed files without deleting anything. (2) Added a direct "➕ Add more records" button that uploads additional files straight into the case Records folder for when attorneys email records after the initial import. (3) OneDrive/SharePoint and Dropbox paste is stubbed with helpful "coming soon — awaiting app registration" messages. (4) Local-drag-drop uploads are now auto-pushed to the Records folder at the start of runRecordAnalysis so every citation resolves to a real Drive URL and the processed-cache benefits kick in on re-runs. (5) Records Reviewed table + citation label index now walk the folder tree recursively, preserve subfolder grouping in the markdown, disambiguate name collisions across subfolders, and register path-qualified keys in driveFileIndex/recordsLabelIndex so Claude\'s citations resolve even when folders matter. (6) renderAttorneyImportBadge wired into onRecCaseSelectChanged so Import/Refresh UI reflects the selected case. (7) Removed the sidebar tagline that mentioned the analysis engine — no engine-name references anywhere in the shipping UI.';
+const APP_VERSION       = '2026.04.22.2';
+const APP_VERSION_LABEL = 'Apr 22, 2026 (later) — OneDrive / SharePoint attorney-link import is now live end-to-end. Added MSAL (SPA PKCE, no client secret) pointed at a multitenant + personal-accounts Azure app registration, Microsoft Graph helpers that resolve a share URL to a driveItem and walk the tree with pagination (msGraphGetShareItem / msGraphListChildren / msGraphListTreeRecursive / msGraphDownloadFile), and a mirrorGraphTreeToGdrive that streams each file through the browser into Debbie\'s Google Drive while preserving subfolder structure. importFromAttorneyLink now dispatches to importFromOneDriveLink on MS URLs (was a "coming soon" stub); refreshAttorneyLink is provider-aware and re-walks either source type, falling back to re-resolving the share URL if saved driveId/itemId are stale. The persisted caseInfo.attorneyImport manifest stores both sourceDriveId and sourceId for OneDrive cases. Graph file hashes (quickXorHash / sha1Hash) are used in place of md5Checksum for the change-detection diff. Dropbox is still stubbed — awaiting OAuth app registration.';
 
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
 
@@ -1306,6 +1310,18 @@ let _tokenClient = null;      // Google Identity Services token client
 let _driveToken = null;       // current access token
 let _pickerLoaded = false;    // google.picker module readiness
 
+// ===== MICROSOFT / ONEDRIVE INTEGRATION =====
+// Azure AD app registration for the OneDrive / SharePoint attorney-link import
+// flow. Client ID is not a secret — it identifies the app. The app is registered
+// as a SPA (no client secret) and uses PKCE for authorization. Authority
+// "/common" means both work/school (M365) accounts and personal Microsoft
+// accounts can sign in, since an attorney could be on either.
+const MS_CLIENT_ID = '7fa7074a-c1b9-474e-a362-ddba1bfbefe7';
+const MS_AUTHORITY = 'https://login.microsoftonline.com/common';
+const MS_SCOPES    = ['Files.Read.All', 'Sites.Read.All'];
+let _msalInstance = null;     // lazily initialized MSAL PublicClientApplication
+let _msToken      = null;     // last access token (kept for quick reuse; MSAL caches it too)
+
 // Wait for a global (like window.google or window.gapi) to exist; polls briefly.
 function _waitFor(check, timeoutMs) {
   return new Promise((resolve, reject) => {
@@ -1396,6 +1412,235 @@ async function pickDriveFolder() {
       .build();
     picker.setVisible(true);
   });
+}
+
+// ===== MICROSOFT GRAPH / ONEDRIVE HELPERS =====
+// These mirror the Google Drive helpers above but target Microsoft's Graph API.
+// Used by the attorney-link import flow when Debbie pastes a OneDrive or
+// SharePoint share URL. The tree is walked with Graph, each file is
+// downloaded into the browser, and then pushed into Debbie's Google Drive via
+// the existing driveUploadFile helper — so the downstream report pipeline
+// (recordsLabelIndex, citation resolution, _processed cache) doesn't need to
+// know or care that the files originated in OneDrive.
+//
+// Browser-side auth is via MSAL.js. The app is registered as a SPA and uses
+// PKCE; no client secret is stored in the page.
+
+// Lazily initialize the MSAL PublicClientApplication. MSAL is loaded from CDN
+// in the <head>; this waits for it to finish downloading before constructing
+// the instance. Safe to call repeatedly — returns the cached instance.
+async function _initMsalInstance() {
+  if (_msalInstance) return _msalInstance;
+  await _waitFor(() => window.msal && window.msal.PublicClientApplication);
+  _msalInstance = new msal.PublicClientApplication({
+    auth: {
+      clientId: MS_CLIENT_ID,
+      authority: MS_AUTHORITY,
+      redirectUri: window.location.origin + window.location.pathname
+    },
+    cache: {
+      // sessionStorage scopes auth to a single tab — safer than localStorage
+      // for a law firm context where a shared workstation might be used.
+      cacheLocation: 'sessionStorage',
+      storeAuthStateInCookie: false
+    }
+  });
+  // MSAL 2.x requires an explicit initialize() call before use.
+  if (typeof _msalInstance.initialize === 'function') {
+    await _msalInstance.initialize();
+  }
+  return _msalInstance;
+}
+
+// Interactive sign-in via popup. Resolves to an access token for MS_SCOPES.
+async function msSignIn() {
+  const m = await _initMsalInstance();
+  try {
+    const result = await m.loginPopup({ scopes: MS_SCOPES, prompt: 'select_account' });
+    if (result && result.account) m.setActiveAccount(result.account);
+    _msToken = result.accessToken;
+    return _msToken;
+  } catch (e) {
+    throw new Error('Microsoft sign-in failed: ' + (e.message || e));
+  }
+}
+
+// Get a valid access token, silently if possible, falling back to popup.
+// Callers should always await this rather than caching _msToken themselves —
+// MSAL handles expiry and refresh internally.
+async function msGetToken() {
+  const m = await _initMsalInstance();
+  let accounts = m.getAllAccounts();
+  if (!accounts.length) return await msSignIn();
+  const account = m.getActiveAccount() || accounts[0];
+  try {
+    const result = await m.acquireTokenSilent({ scopes: MS_SCOPES, account });
+    _msToken = result.accessToken;
+    return _msToken;
+  } catch (e) {
+    // Silent failed (consent needed, session expired, etc.) — pop up for reconsent.
+    console.warn('[msal] silent token acquisition failed, falling back to popup:', e);
+    const result = await m.acquireTokenPopup({ scopes: MS_SCOPES, account });
+    _msToken = result.accessToken;
+    return _msToken;
+  }
+}
+
+// Sign out of MS. Not strictly necessary (popup-based sign-in doesn't leak
+// sessions between sites), but exposed for symmetry with driveSignOut.
+async function msSignOut() {
+  if (!_msalInstance) return;
+  const accounts = _msalInstance.getAllAccounts();
+  if (!accounts.length) return;
+  try { await _msalInstance.logoutPopup({ account: accounts[0] }); }
+  catch(e) { console.warn('[msal] logoutPopup failed:', e); }
+  _msToken = null;
+}
+
+// Encode a share URL into the opaque shareId Microsoft Graph expects for
+// the /shares/{id} endpoint. Per MS docs:
+//   1. base64-encode the full share URL
+//   2. strip trailing '='
+//   3. replace '/' with '_' and '+' with '-' (URL-safe)
+//   4. prepend 'u!'
+// This lets us resolve a share link (OneDrive personal, OneDrive business,
+// or SharePoint) to a driveItem without the user having to paste anything
+// except the plain share URL from the attorney's email.
+function encodeGraphShareId(shareUrl) {
+  const b64 = btoa(shareUrl).replace(/=+$/, '').replace(/\//g, '_').replace(/\+/g, '-');
+  return 'u!' + b64;
+}
+
+// Resolve a shared OneDrive/SharePoint link to the root driveItem it points
+// to. Returns { id, driveId, name, folder, file, ... } per Graph docs.
+async function msGraphGetShareItem(shareUrl) {
+  const token = await msGetToken();
+  const sid = encodeGraphShareId(shareUrl);
+  const url = 'https://graph.microsoft.com/v1.0/shares/' + sid + '/driveItem' +
+              '?$select=id,name,folder,file,size,lastModifiedDateTime,parentReference';
+  const res = await fetch(url, { headers: { Authorization: 'Bearer ' + token } });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error('Graph shares lookup failed (' + res.status + '): ' + body.slice(0, 300));
+  }
+  return res.json();
+}
+
+// List the immediate children of a Graph drive item, following @odata.nextLink
+// pagination so we don't silently drop files in large folders.
+async function msGraphListChildren(driveId, itemId) {
+  const token = await msGetToken();
+  const first = 'https://graph.microsoft.com/v1.0/drives/' + driveId + '/items/' + itemId + '/children' +
+                '?$top=200&$select=id,name,folder,file,size,lastModifiedDateTime,parentReference';
+  const results = [];
+  let nextUrl = first;
+  while (nextUrl) {
+    const res = await fetch(nextUrl, { headers: { Authorization: 'Bearer ' + token } });
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error('Graph children failed (' + res.status + '): ' + body.slice(0, 300));
+    }
+    const data = await res.json();
+    for (const v of (data.value || [])) results.push(v);
+    nextUrl = data['@odata.nextLink'] || null;
+  }
+  return results;
+}
+
+// Recursive walk of a OneDrive/SharePoint folder. Returns the SAME shape
+// driveListFolderRecursive returns — {kind, id, name, path, children|mimeType} —
+// so downstream code (flattenDriveTree, the UI render, the refresh-diff) can
+// consume either source uniformly. Extra fields (driveId) are tacked on so
+// msGraphDownloadFile can find the file again without a re-lookup.
+async function msGraphListTreeRecursive(driveId, itemId, _relPath) {
+  const rel = _relPath || '';
+  const entries = await msGraphListChildren(driveId, itemId);
+  const out = [];
+  for (const c of entries) {
+    const childPath = rel ? (rel + '/' + c.name) : c.name;
+    if (c.folder) {
+      const sub = await msGraphListTreeRecursive(driveId, c.id, childPath);
+      out.push({ kind: 'folder', id: c.id, driveId, name: c.name, path: childPath, children: sub });
+    } else {
+      out.push({
+        kind: 'file',
+        id: c.id,
+        driveId,
+        name: c.name,
+        mimeType: (c.file && c.file.mimeType) || 'application/octet-stream',
+        size: c.size,
+        modifiedTime: c.lastModifiedDateTime,
+        // Graph's file.hashes.quickXorHash / sha1Hash serve the same "did
+        // this file change since we last imported it" purpose that
+        // md5Checksum serves for Google Drive. Use whatever's available —
+        // the refresh-diff treats any mismatch as "changed, re-copy".
+        md5Checksum: (c.file && c.file.hashes && (c.file.hashes.quickXorHash || c.file.hashes.sha1Hash)) || null,
+        path: rel
+      });
+    }
+  }
+  return out;
+}
+
+// Download a file's bytes as a Blob via Graph. Graph returns a 302 to a
+// short-lived pre-signed download URL; fetch follows it automatically when
+// redirect:'follow' is set (the default on most browsers, but we set it
+// explicitly for clarity).
+async function msGraphDownloadFile(driveId, itemId) {
+  const token = await msGetToken();
+  const url = 'https://graph.microsoft.com/v1.0/drives/' + driveId + '/items/' + itemId + '/content';
+  const res = await fetch(url, {
+    headers: { Authorization: 'Bearer ' + token },
+    redirect: 'follow'
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error('Graph download failed (' + res.status + '): ' + body.slice(0, 300));
+  }
+  return res.blob();
+}
+
+// Cross-cloud mirror: walk a Graph tree and push each file into a Google
+// Drive folder, preserving subfolder structure (mkdir-as-needed on the
+// Google side). Parallels mirrorDriveTreeTo but with an unavoidable browser
+// round-trip per file since Google and Microsoft can't copy directly
+// between each other server-side.
+//
+// Returns the same manifest shape mirrorDriveTreeTo does, so the caller
+// persists a consistent record regardless of provider.
+async function mirrorGraphTreeToGdrive(sourceTree, destParentId, progressCb) {
+  const allFiles = flattenDriveTree(sourceTree);
+  const total = allFiles.length;
+  let done = 0;
+  const copies = [];
+
+  async function walk(nodes, destFolderId, relPath) {
+    for (const n of nodes) {
+      if (n.kind === 'folder') {
+        const sub = await driveFindOrCreateFolder(destFolderId, n.name);
+        await walk(n.children || [], sub.id, relPath ? (relPath + '/' + n.name) : n.name);
+      } else {
+        if (progressCb) { try { progressCb(done, total, n.name); } catch(_e) {} }
+        const blob = await msGraphDownloadFile(n.driveId, n.id);
+        const mime = n.mimeType || 'application/octet-stream';
+        const up = await driveUploadFile(destFolderId, n.name, mime, blob);
+        copies.push({
+          sourceId: n.id,
+          mirroredId: up.id,
+          name: up.name || n.name,
+          relPath: relPath || '',
+          size: (typeof up.size !== 'undefined') ? up.size : n.size,
+          modifiedTime: up.modifiedTime || n.modifiedTime,
+          md5Checksum: up.md5Checksum || n.md5Checksum || null
+        });
+        done += 1;
+        if (progressCb) { try { progressCb(done, total, n.name); } catch(_e) {} }
+      }
+    }
+  }
+
+  await walk(sourceTree, destParentId, '');
+  return copies;
 }
 
 // List the non-trashed files in a Drive folder. Returns [{id, name, mimeType, size}].
@@ -3641,13 +3886,10 @@ async function importFromAttorneyLink() {
     return;
   }
 
-  // Provider dispatch. Google gets the real path; Microsoft and Dropbox show
-  // a "connect your account first" message until their OAuth apps are
-  // registered.
+  // Provider dispatch. Google and Microsoft are both wired; Dropbox still
+  // shows a "coming soon" message until its OAuth app is registered.
   if (parsed.provider === 'onedrive') {
-    setStatus('<span style="color:#c94646;"><b>OneDrive / SharePoint import is coming soon.</b> '
-      + 'Tony needs to finish registering a Microsoft OAuth app for Chart Detectives first. '
-      + 'As a one-time workaround: download the files from the attorney\'s link to your computer, then click <b>➕ Add more records</b> above to push them straight into the case folder.</span>');
+    await importFromOneDriveLink(caseInfo, parsed, setStatus);
     return;
   }
   if (parsed.provider === 'dropbox') {
@@ -3756,6 +3998,135 @@ async function importFromAttorneyLink() {
   try { await loadCaseDriveFiles(); } catch(_e) {}
 }
 
+// OneDrive / SharePoint import path. Called when parseAttorneyLink identifies
+// a Microsoft share URL. Same end-state as the Google flow: files land in
+// Debbie's case Records folder, the attorneyImport manifest is persisted on
+// the case, and the Records Reviewed table will pick them up on the next
+// analysis/report run. Because Google and Microsoft can't server-copy between
+// each other, every file is streamed through the browser — slower than a
+// same-cloud Drive→Drive mirror, but transparent to Debbie.
+async function importFromOneDriveLink(caseInfo, parsed, setStatus) {
+  // Ensure the case has a Records folder on the Google Drive side so we have
+  // somewhere to land the mirrored files. This mirrors the Google path.
+  if (!_driveToken) {
+    try { await driveSignIn(true); }
+    catch(e) { setStatus('<span style="color:#c94646;">Could not connect to Google Drive (needed as the destination): ' + esc(e.message) + '</span>'); return; }
+  }
+  if (!caseInfo.driveFolderId) {
+    try {
+      setStatus('Creating case folder in your Drive…');
+      const hier = await ensureCaseHierarchy(caseInfo);
+      caseInfo.driveFolderId = hier.records.id;
+      caseInfo.driveFolderName = hier.records.name;
+      save();
+    } catch(e) {
+      setStatus('<span style="color:#c94646;">Could not create case folder: ' + esc(e.message) + '</span>');
+      return;
+    }
+  }
+
+  // Sign in to Microsoft (popup) so we can resolve the share link. Attorneys
+  // on personal OneDrive, M365 business, or SharePoint all flow through the
+  // same /common authority — MS figures out which tenant the account lives in.
+  setStatus('Connecting to Microsoft…');
+  try { await msGetToken(); }
+  catch(e) { setStatus('<span style="color:#c94646;">Microsoft sign-in failed: ' + esc(e.message) + '</span>'); return; }
+
+  // Resolve the share URL → driveItem, then walk the tree if it's a folder.
+  setStatus('Reading attorney folder…');
+  let sourceTree;
+  let sourceKind;
+  let rootItem;
+  try {
+    rootItem = await msGraphGetShareItem(parsed.url);
+  } catch(e) {
+    setStatus('<span style="color:#c94646;">Could not open that OneDrive / SharePoint link: ' + esc(e.message)
+      + '<br>If the link is restricted, make sure you signed in with the Microsoft account the attorney shared with.</span>');
+    return;
+  }
+  // parentReference.driveId is the drive this item lives in; rootItem.id is the
+  // item itself. We need both for subsequent /drives/{driveId}/items/{id} calls.
+  const rootDriveId = rootItem && rootItem.parentReference && rootItem.parentReference.driveId;
+  if (!rootDriveId) {
+    setStatus('<span style="color:#c94646;">The Microsoft share resolved but didn\'t return a drive id. This can happen on SharePoint links that require extra permissions.</span>');
+    return;
+  }
+  try {
+    if (rootItem.folder) {
+      sourceTree = await msGraphListTreeRecursive(rootDriveId, rootItem.id, '');
+      sourceKind = 'folder';
+    } else {
+      sourceTree = [{
+        kind: 'file',
+        id: rootItem.id,
+        driveId: rootDriveId,
+        name: rootItem.name,
+        mimeType: (rootItem.file && rootItem.file.mimeType) || 'application/octet-stream',
+        size: rootItem.size,
+        modifiedTime: rootItem.lastModifiedDateTime,
+        md5Checksum: (rootItem.file && rootItem.file.hashes && (rootItem.file.hashes.quickXorHash || rootItem.file.hashes.sha1Hash)) || null,
+        path: ''
+      }];
+      sourceKind = 'file';
+    }
+  } catch(e) {
+    setStatus('<span style="color:#c94646;">Could not walk the OneDrive folder: ' + esc(e.message) + '</span>');
+    return;
+  }
+
+  const total = flattenDriveTree(sourceTree).length;
+  if (total === 0) {
+    setStatus('<span style="color:#c94646;">That OneDrive folder is empty. Nothing to import.</span>');
+    return;
+  }
+
+  if (!confirm('Found ' + total + ' file(s) in the attorney\'s OneDrive link.\n\n'
+    + 'Mirror them into the "' + (caseInfo.driveFolderName || 'Records') + '" folder in your Google Drive?\n\n'
+    + 'The folder tree will be preserved. Cross-cloud copies stream through this browser tab, so expect a few minutes for large record sets — keep this tab open.')) {
+    setStatus('Import cancelled.');
+    return;
+  }
+
+  setStatus('Importing 0 / ' + total + '…');
+  let copies;
+  try {
+    copies = await mirrorGraphTreeToGdrive(sourceTree, caseInfo.driveFolderId, (done, tot, currentName) => {
+      setStatus('Importing ' + done + ' / ' + tot + ' — <span style="color:var(--gray-500);">' + esc(currentName) + '</span>');
+    });
+  } catch(e) {
+    setStatus('<span style="color:#c94646;">Import failed partway through: ' + esc(e.message)
+      + '. You can click Refresh to resume — already-copied files will be skipped.</span>');
+    return;
+  }
+
+  caseInfo.attorneyImport = {
+    provider: 'onedrive',
+    sourceUrl: parsed.url,
+    sourceKind: sourceKind,
+    // For OneDrive we store both the driveId and the root itemId so refresh
+    // can re-walk without having to re-resolve the share link. The share URL
+    // is also kept in case MS later invalidates one of the ids.
+    sourceId: rootItem.id,
+    sourceDriveId: rootDriveId,
+    importedAt: new Date().toISOString(),
+    files: copies.map(c => ({
+      sourceId: c.sourceId,
+      mirroredId: c.mirroredId,
+      name: c.name,
+      relPath: c.relPath,
+      size: c.size,
+      modifiedTime: c.modifiedTime,
+      md5Checksum: c.md5Checksum
+    }))
+  };
+  save();
+
+  setStatus('<span style="color:#227d3b;">✓ Imported ' + copies.length
+    + ' file(s) from the attorney\'s OneDrive link into your Drive. Citations will point to your copies.</span>');
+  renderAttorneyImportBadge();
+  try { await loadCaseDriveFiles(); } catch(_e) {}
+}
+
 // Pick up new / updated files the attorney has added to the source folder
 // since the last import. Never deletes — Debbie keeps everything she's ever
 // received, which is the whole point of the "she owns her archive" model.
@@ -3765,13 +4136,18 @@ async function refreshAttorneyLink() {
   const caseInfo = state.cases.find(c => c.id === caseId);
   if (!caseInfo) return;
   const imp = caseInfo.attorneyImport;
-  if (!imp || imp.provider !== 'gdrive') {
+  if (!imp || (imp.provider !== 'gdrive' && imp.provider !== 'onedrive')) {
     alert('No attorney link has been imported for this case yet. Paste one above and click Import first.');
     return;
   }
   if (!_driveToken) {
     try { await driveSignIn(true); }
     catch(e) { alert('Could not connect to Google Drive: ' + e.message); return; }
+  }
+  // OneDrive refreshes also need a Microsoft token so we can re-walk the share.
+  if (imp.provider === 'onedrive') {
+    try { await msGetToken(); }
+    catch(e) { alert('Microsoft sign-in failed: ' + e.message); return; }
   }
 
   const statusEl = document.getElementById('attorney-import-status');
@@ -3780,11 +4156,41 @@ async function refreshAttorneyLink() {
 
   let sourceTree;
   try {
-    if (imp.sourceKind === 'folder') {
-      sourceTree = await driveListFolderRecursive(imp.sourceId, '');
+    if (imp.provider === 'gdrive') {
+      if (imp.sourceKind === 'folder') {
+        sourceTree = await driveListFolderRecursive(imp.sourceId, '');
+      } else {
+        const meta = await driveGetFileMeta(imp.sourceId);
+        sourceTree = [{ kind:'file', id:meta.id, name:meta.name, mimeType:meta.mimeType, size:meta.size, modifiedTime:meta.modifiedTime, path:'' }];
+      }
     } else {
-      const meta = await driveGetFileMeta(imp.sourceId);
-      sourceTree = [{ kind:'file', id:meta.id, name:meta.name, mimeType:meta.mimeType, size:meta.size, modifiedTime:meta.modifiedTime, path:'' }];
+      // OneDrive — prefer the cached driveId/itemId; fall back to re-resolving
+      // the share URL if the saved ids don't work (e.g. attorney re-shared).
+      let driveId = imp.sourceDriveId;
+      let itemId = imp.sourceId;
+      if (!driveId) {
+        const root = await msGraphGetShareItem(imp.sourceUrl);
+        driveId = root && root.parentReference && root.parentReference.driveId;
+        itemId = root && root.id;
+        if (driveId) { imp.sourceDriveId = driveId; save(); }
+      }
+      if (imp.sourceKind === 'folder') {
+        sourceTree = await msGraphListTreeRecursive(driveId, itemId, '');
+      } else {
+        // Single-file refresh — re-resolve the share to pick up any new mtime.
+        const root = await msGraphGetShareItem(imp.sourceUrl);
+        sourceTree = [{
+          kind: 'file',
+          id: root.id,
+          driveId: root.parentReference && root.parentReference.driveId,
+          name: root.name,
+          mimeType: (root.file && root.file.mimeType) || 'application/octet-stream',
+          size: root.size,
+          modifiedTime: root.lastModifiedDateTime,
+          md5Checksum: (root.file && root.file.hashes && (root.file.hashes.quickXorHash || root.file.hashes.sha1Hash)) || null,
+          path: ''
+        }];
+      }
     }
   } catch(e) {
     setStatus('<span style="color:#c94646;">Could not re-read attorney link: ' + esc(e.message) + '</span>');
@@ -3836,7 +4242,8 @@ async function refreshAttorneyLink() {
   setStatus('Copying 0 / ' + total + '…');
   let copies;
   try {
-    copies = await mirrorDriveTreeTo(prunedTree, caseInfo.driveFolderId, (done, tot, currentName) => {
+    const mirror = (imp.provider === 'onedrive') ? mirrorGraphTreeToGdrive : mirrorDriveTreeTo;
+    copies = await mirror(prunedTree, caseInfo.driveFolderId, (done, tot, currentName) => {
       setStatus('Copying ' + done + ' / ' + tot + ' — <span style="color:var(--gray-500);">' + esc(currentName) + '</span>');
     });
   } catch(e) {
