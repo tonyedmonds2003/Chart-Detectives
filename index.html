@@ -1164,8 +1164,8 @@ tr:hover td { background: var(--gray-50); }
 // Format: YYYY.MM.DD.N where N is the Nth change on that day (1-indexed).
 // APP_VERSION_LABEL is a human-readable caption shown on hover.
 // ============================================================================
-const APP_VERSION       = '2026.04.22.10';
-const APP_VERSION_LABEL = 'Apr 22, 2026 (later x9) — Retry transient upload failures. Dottie\'s run successfully uploaded 70+ chunks (sizes up to 17.98MB) and then failed on a single 8.73MB chunk with "Failed to fetch" — a classic QUIC-idle-timeout / stale-keep-alive hiccup, not a real problem with the file. Added exponential-backoff retry (4 attempts, 1.5s → 3s → 6s) in uploadFileToAnthropic that retries on network errors, 5xx, and 429, but NOT on 4xx (those are real errors). FormData is rebuilt each attempt because a consumed stream can\'t be reused. Successful retries log "[upload] ✓ succeeded on attempt N" so we can tell retries from clean runs. Previous fixes (hidden-area reset, upload size guard, redeem URL decoding, redirect URI normalization, popup→redirect, driveFolderId guards, 🧹 Clear button, MSAL CDN fallback, root-folder self-heal) all still in place. Dropbox still stubbed.';
+const APP_VERSION       = '2026.04.22.11';
+const APP_VERSION_LABEL = 'Apr 22, 2026 (later x10) — Don\'t silently cancel when the tab is backgrounded. Chrome auto-suppresses window.confirm() on background tabs, returning false instantly. Our analysis kickoff had three cost-estimate confirm() calls that popped *after* the 70+ file upload phase completed — and because Debbie had inevitably switched tabs during the long upload, Chrome dismissed every one of them and the app reported "Analysis cancelled" as if she\'d clicked Cancel. Added confirmWhenVisible(message): if the tab is visible it behaves like normal confirm(); if hidden it waits for visibilitychange, updates document.title to "⚠ Waiting for you — …", shows a toast, then prompts after a 150ms settle delay. Wired it into all three analysis-path confirms (no-records warning, async cost estimate, sync cost estimate). Other confirm() calls (delete case, delete firm, etc.) are still plain confirm — those only fire from direct button clicks so the tab is always active. Previous fixes (upload retry, hidden-area reset, upload size guard, redeem URL decoding, redirect URI normalization, popup→redirect, driveFolderId guards, 🧹 Clear button, MSAL CDN fallback, root-folder self-heal) all still in place. Dropbox still stubbed.';
 
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
 
@@ -2871,6 +2871,40 @@ function showToast(msg, isError) {
   t.textContent = msg;
   document.body.appendChild(t);
   setTimeout(() => t.remove(), 4000);
+}
+
+// Chrome auto-cancels window.confirm()/alert() dialogs on background tabs —
+// they return false instantly with no indication to the code that anything
+// was skipped. For the cost-estimate dialogs in the analysis kickoff this was
+// a disaster: Debbie switched tabs during the file-upload phase, the dialog
+// popped up after uploads completed, Chrome suppressed it, and we silently
+// reported "Analysis cancelled" even though she never clicked anything.
+//
+// This helper waits until the tab is actually visible before invoking
+// confirm(), AND pings a toast + title tweak so the user knows to come back.
+// Returns a Promise<boolean> the caller can await like a normal confirm.
+async function confirmWhenVisible(message) {
+  if (document.visibilityState === 'visible') {
+    return confirm(message);
+  }
+  // Tab is hidden. Wait for it to come back, then prompt.
+  const originalTitle = document.title;
+  try { document.title = '⚠ Waiting for you — ' + originalTitle; } catch(_) {}
+  try { showToast('Click back into this tab to confirm the analysis cost.'); } catch(_) {}
+  await new Promise(resolve => {
+    const onChange = () => {
+      if (document.visibilityState === 'visible') {
+        document.removeEventListener('visibilitychange', onChange);
+        resolve();
+      }
+    };
+    document.addEventListener('visibilitychange', onChange);
+  });
+  try { document.title = originalTitle; } catch(_) {}
+  // Tiny delay so the confirm renders after the tab is fully focused — some
+  // browsers still suppress the first prompt right on the visibility flip.
+  await new Promise(r => setTimeout(r, 150));
+  return confirm(message);
 }
 
 // ===== PROXY CONFIG =====
@@ -6010,7 +6044,7 @@ async function runRecordAnalysis() {
     const hint = caseInfo && caseInfo.driveFolderId
       ? 'The case is linked to Drive folder "' + (caseInfo.driveFolderName || caseInfo.driveFolderId) + '" but no files are loaded. Click "Connect Google Drive" then "📁 Load files from case folder" to fetch them.'
       : 'No records are loaded. Link a Drive folder or upload files first.';
-    const proceed = confirm('⚠️ No records loaded.\n\n' + hint + '\n\nThere is nothing for the AI to analyze. Click Cancel to go back and load records (recommended). Clicking OK will return an explicit "no records" error — it will NOT generate a demo template.');
+    const proceed = await confirmWhenVisible('⚠️ No records loaded.\n\n' + hint + '\n\nThere is nothing for the AI to analyze. Click Cancel to go back and load records (recommended). Clicking OK will return an explicit "no records" error — it will NOT generate a demo template.');
     if (!proceed) {
       area.innerHTML = '<div class="alert alert-warning">' + esc(hint) + '</div>';
       return;
@@ -6062,7 +6096,7 @@ MANDATORY ANTI-TEMPLATE RULE — violations are grounds for rejection:
     // unexpectedly expensive — no surprise bills.
     const estBatches = Math.max(1, Math.ceil(totalPages / SAFE_SINGLE_CALL_PAGES));
     const cost = estimateAnalysisCost(totalPages, estBatches);
-    const proceed = confirm(
+    const proceed = await confirmWhenVisible(
       'This case has ' + contentBlocks.length + ' file(s) totaling ~' + totalMB.toFixed(0) + ' MB (~' + totalPages + ' pages).\n\n' +
       'Estimated API cost: ' + fmtUsd(cost.low) + '–' + fmtUsd(cost.high) + '\n' +
       '  • Extraction (batch, 50% off): ' + fmtUsd(cost.extraction) + '\n' +
@@ -6099,7 +6133,7 @@ MANDATORY ANTI-TEMPLATE RULE — violations are grounds for rejection:
   const syncExtraction = syncCost.extraction / BATCH_DISCOUNT;
   const syncLow  = syncExtraction + syncCost.synthesisLow;
   const syncHigh = syncExtraction + syncCost.synthesisHigh;
-  const ok = confirm(
+  const ok = await confirmWhenVisible(
     'This case has ' + contentBlocks.length + ' file(s) totaling ~' + totalMB.toFixed(0) + ' MB (~' + totalPages + ' pages) — too much for a single AI call.\n\n' +
     'I can split them into ' + batches.length + ' batch(es), extract facts from each, then synthesize a final ' + (typeLabels[type] || type) + '.\n\n' +
     'Estimated API cost: ' + fmtUsd(syncLow) + '–' + fmtUsd(syncHigh) + ' (sync mode, no batch discount)\n' +
