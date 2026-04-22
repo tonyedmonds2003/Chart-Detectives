@@ -1164,8 +1164,8 @@ tr:hover td { background: var(--gray-50); }
 // Format: YYYY.MM.DD.N where N is the Nth change on that day (1-indexed).
 // APP_VERSION_LABEL is a human-readable caption shown on hover.
 // ============================================================================
-const APP_VERSION       = '2026.04.22.9';
-const APP_VERSION_LABEL = 'Apr 22, 2026 (later x8) — Fix: Analyze Records appeared to do nothing when the case had a stale saved analysis. Root cause: renderSavedAnalysisIfAny hides rec-result-area (display:none) and shows rec-result instead on case re-select, but runRecordAnalysis writes its loading spinner and all progress updates into rec-result-area. Result: clicking Analyze silently updated a hidden div and Debbie saw no visual change. Added a reset block at the top of runRecordAnalysis that un-hides area, clears pre, and hides the prior result\'s action buttons (copy / send-to-report / rerun-synth) before any work starts — so the spinner is always visible and any stale output vanishes the moment Analyze is clicked. Previous fixes (upload size guard, redeem URL decoding, redirect URI normalization, popup→redirect, driveFolderId guards, 🧹 Clear button, MSAL CDN fallback, root-folder self-heal) all still in place. Dropbox still stubbed.';
+const APP_VERSION       = '2026.04.22.10';
+const APP_VERSION_LABEL = 'Apr 22, 2026 (later x9) — Retry transient upload failures. Dottie\'s run successfully uploaded 70+ chunks (sizes up to 17.98MB) and then failed on a single 8.73MB chunk with "Failed to fetch" — a classic QUIC-idle-timeout / stale-keep-alive hiccup, not a real problem with the file. Added exponential-backoff retry (4 attempts, 1.5s → 3s → 6s) in uploadFileToAnthropic that retries on network errors, 5xx, and 429, but NOT on 4xx (those are real errors). FormData is rebuilt each attempt because a consumed stream can\'t be reused. Successful retries log "[upload] ✓ succeeded on attempt N" so we can tell retries from clean runs. Previous fixes (hidden-area reset, upload size guard, redeem URL decoding, redirect URI normalization, popup→redirect, driveFolderId guards, 🧹 Clear button, MSAL CDN fallback, root-folder self-heal) all still in place. Dropbox still stubbed.';
 
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
 
@@ -2922,7 +2922,18 @@ function base64ToBlob(b64, mime) {
 // the file bytes — usually a few KB, but worth budgeting for.
 const UPLOAD_MAX_BYTES = 95 * 1024 * 1024; // 95 MB
 
+// Retries for transient network failures during upload. A typical case has
+// 70+ sequential uploads in a single analysis run, and any one of them can
+// hit a QUIC idle timeout, a stale keep-alive connection, or a momentary
+// ISP blip. Without retries, one "Failed to fetch" kills the entire run and
+// Debbie has to start over. With retries, a single hiccup is invisible.
+const UPLOAD_MAX_ATTEMPTS = 4;
+const UPLOAD_RETRY_BASE_MS = 1500;
+
 // Upload a PDF or image to Anthropic via the Worker. Returns the file_id.
+// Automatically retries on transient network failures (Failed to fetch,
+// socket resets, Cloudflare 502/503/504) with exponential backoff. Does NOT
+// retry on 4xx — those are permanent (bad auth, payload too large, etc.).
 async function uploadFileToAnthropic(blob, filename) {
   const size = blob && typeof blob.size === 'number' ? blob.size : 0;
   const sizeMb = (size / (1024 * 1024)).toFixed(2);
@@ -2943,32 +2954,66 @@ async function uploadFileToAnthropic(blob, filename) {
     );
   }
 
-  const fd = new FormData();
-  fd.append('file', blob, filename || 'document');
-  let res;
-  try {
-    res = await fetch(`${PROXY_URL}/v1/files`, {
-      method: 'POST',
-      headers: { 'x-lnc-auth': LNC_AUTH },
-      body: fd
-    });
-  } catch (netErr) {
-    // A bare network failure on a POST with a large body is almost always
-    // the edge rejecting the request mid-flight. Upgrade the message so
-    // Debbie sees "this file is probably too big" instead of "TypeError:
-    // Failed to fetch" or a CORS string with no context.
-    const hint = size > 50 * 1024 * 1024
-      ? ' (file is ' + sizeMb + ' MB — large uploads sometimes fail mid-transfer on slow connections; try again or split the PDF)'
-      : '';
-    throw new Error('Network error uploading "' + (filename || 'document') + '"' + hint + ': ' + (netErr && netErr.message ? netErr.message : netErr));
-  }
-  if (!res.ok) {
+  let lastErr = null;
+  for (let attempt = 1; attempt <= UPLOAD_MAX_ATTEMPTS; attempt++) {
+    // Rebuild FormData each attempt — a FormData with a consumed stream can't
+    // be reused on retry. Cheap to rebuild since it just wraps the blob.
+    const fd = new FormData();
+    fd.append('file', blob, filename || 'document');
+    let res;
+    try {
+      res = await fetch(`${PROXY_URL}/v1/files`, {
+        method: 'POST',
+        headers: { 'x-lnc-auth': LNC_AUTH },
+        body: fd
+      });
+    } catch (netErr) {
+      // Transient: retry with backoff. "Failed to fetch" covers QUIC idle
+      // timeouts, stale keep-alive connections, ISP blips, and tab throttling.
+      lastErr = netErr;
+      const msg = (netErr && netErr.message) || String(netErr);
+      console.warn('[upload] attempt ' + attempt + '/' + UPLOAD_MAX_ATTEMPTS + ' network error on "' + (filename || 'document') + '": ' + msg);
+      if (attempt < UPLOAD_MAX_ATTEMPTS) {
+        const delay = UPLOAD_RETRY_BASE_MS * Math.pow(2, attempt - 1); // 1.5s, 3s, 6s
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+      // Out of retries — surface a useful message.
+      throw new Error('Network error uploading "' + (filename || 'document') + '" after ' + UPLOAD_MAX_ATTEMPTS + ' attempts: ' + msg + ' (check your internet connection and retry)');
+    }
+    if (res.ok) {
+      let data;
+      try { data = await res.json(); } catch (e) {
+        // Rare: 200 but non-JSON body. Treat as transient, retry.
+        lastErr = e;
+        console.warn('[upload] attempt ' + attempt + ' returned non-JSON on "' + (filename || 'document') + '": ' + (e && e.message));
+        if (attempt < UPLOAD_MAX_ATTEMPTS) {
+          await new Promise(r => setTimeout(r, UPLOAD_RETRY_BASE_MS * attempt));
+          continue;
+        }
+        throw new Error('File upload returned unparseable response for "' + (filename || 'document') + '"');
+      }
+      if (!data.id) {
+        // Unusual — a 200 with valid JSON but no file id. Don't retry blind.
+        throw new Error('File upload returned no id for "' + (filename || 'document') + '"');
+      }
+      if (attempt > 1) console.info('[upload] ✓ succeeded on attempt ' + attempt + ' for "' + (filename || 'document') + '"');
+      return data.id;
+    }
+    // Non-OK HTTP. 5xx / 429 = transient, retry. 4xx = permanent.
     const txt = await res.text().catch(() => '');
-    throw new Error(`File upload failed: HTTP ${res.status} ${txt.slice(0, 200)}`);
+    const transient = res.status >= 500 || res.status === 429;
+    if (transient && attempt < UPLOAD_MAX_ATTEMPTS) {
+      console.warn('[upload] attempt ' + attempt + ' HTTP ' + res.status + ' on "' + (filename || 'document') + '", retrying…');
+      const delay = UPLOAD_RETRY_BASE_MS * Math.pow(2, attempt - 1);
+      await new Promise(r => setTimeout(r, delay));
+      continue;
+    }
+    throw new Error('File upload failed: HTTP ' + res.status + ' ' + txt.slice(0, 200));
   }
-  const data = await res.json();
-  if (!data.id) throw new Error('File upload returned no id');
-  return data.id;
+  // Shouldn't reach here — the loop either returns, throws on final failure,
+  // or continues. Belt-and-braces.
+  throw lastErr || new Error('Upload failed for unknown reason');
 }
 
 // Best-effort cleanup. Silent on failure.
