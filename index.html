@@ -224,6 +224,17 @@ tr:hover td { background: var(--gray-50); }
 <script src="https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js"></script>
 <!-- pdf-lib: in-browser PDF splitting so large medical-record PDFs can be broken into page-range chunks -->
 <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+<!-- pdf.js: in-browser PDF text extraction for round-trip verification of extracted facts.
+     Phase 2 of the indexing rebuild: every verbatim_quote the model returns is substring-
+     matched against the real source PDF text. Quotes that don't match get flagged as
+     potential hallucinations before the LNC ever sees the row as trustworthy. -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<!-- SheetJS (xlsx): in-browser Excel workbook generation. Phase 3 of the indexing rebuild
+     delivers the fact index as a filterable/sortable spreadsheet alongside a blank Word
+     narrative template, rather than a single Word doc with an embedded table. Debbie
+     searches, sorts, and filters the workbook by date/facility/event/verification status
+     and writes the narrative from a branded blank template. No LLM-authored prose. -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 </head>
 <body>
 <script>
@@ -1164,8 +1175,8 @@ tr:hover td { background: var(--gray-50); }
 // Format: YYYY.MM.DD.N where N is the Nth change on that day (1-indexed).
 // APP_VERSION_LABEL is a human-readable caption shown on hover.
 // ============================================================================
-const APP_VERSION       = '2026.04.22.12';
-const APP_VERSION_LABEL = 'Apr 22, 2026 (later x11) — Much longer upload retry + inter-upload pause. Previous 4-attempt / 10.5s-total backoff wasn\'t enough: Debbie hit a persistent mid-run failure on a 16.50 MB chunk at pp. 1613-1647 that blew all 4 retries with identical "Failed to fetch" errors while neighboring same-size chunks uploaded fine. Root cause almost certainly Chrome reusing a poisoned HTTP/2 connection — once an in-flight stream gets reset, every subsequent request on that same connection fails instantly until Chrome drops it and opens a fresh one, and 10.5 seconds isn\'t long enough for that to happen reliably. Bumped UPLOAD_MAX_ATTEMPTS 4→6 and UPLOAD_RETRY_BASE_MS 1500→3000 so total backoff is now 3s+6s+12s+24s+48s ≈ 93 seconds of recovery time between attempts 1 and 6. Also added a 500ms pause between sequential uploads in the async-analysis caller loop — about 35 extra seconds on a 70-file run, but gives Cloudflare a chance not to rate-limit us and gives Chrome a moment to notice stale connections before the next POST. If this STILL fails on the same chunk, the issue is deeper (Cloudflare Worker CPU/memory pressure or a Chrome bug specific to this file size) and we\'ll need to either upgrade the Worker plan or switch to Anthropic\'s direct-upload URL to bypass the Worker for /v1/files. Previous fixes (confirmWhenVisible, hidden-area reset, upload size guard, redeem URL decoding, redirect URI normalization, popup→redirect, driveFolderId guards, 🧹 Clear button, MSAL CDN fallback, root-folder self-heal) all still in place. Dropbox still stubbed.';
+const APP_VERSION       = '2026.04.22.17';
+const APP_VERSION_LABEL = 'Apr 22, 2026 (x17) — Phase 4 rebuild: derived worklist sheets inside the Fact Index workbook. The xlsx now contains — in addition to the master Fact Index and Summary sheets — seven topic-filtered views (Falls, Skin & Wounds, Risk Assessments, Care Plans, Medications, Hospitalizations, Death & End-of-Life) plus a Documentation Checklist sheet. Each worklist sheet is a deterministic keyword filter over the fact rows: a row appears on the Falls sheet if its event_type or verbatim_quote contains "fall", "fell", "found on floor", etc. — nothing else. Zero LLM involvement in the filtering; every keyword list is visible at the top of its sheet so Debbie can audit. Sheets with zero matches stay in the workbook with a visible "no matches found" note — a gap is information too. The Documentation Checklist inverts the logic: it lists 20 expected documentation items (admission H&P, post-fall neuro checks, Braden, wound measurements, death note, etc.) with a count of matching fact-index rows and the first few row numbers for drill-down. Items with zero matches surface as "— NOT FOUND" so gaps are visible at a glance without Debbie having to remember 20 items from memory. Every worklist row includes an "Orig Row" column pointing back at the master Fact Index. Phase 1 structured extraction, Phase 2 round-trip verification, and Phase 3 xlsx+template deliverables remain fully intact.';
 
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
 
@@ -4095,6 +4106,10 @@ let driveFilesChecked = {}; // id → bool (true = include in analysis)
 // Wall-clock start of the in-flight analysis, captured at the top of runRecordAnalysis
 // so finishAnalysis can auto-log the elapsed time as a billable entry. null = idle.
 let _analysisStartedAt = null;
+// Re-entrancy flag for Analyze Records. True while a run is in progress so a second
+// click on the button is ignored. Cleared in the finally block of runRecordAnalysis
+// so it always resets even if the run throws.
+let _runRecordAnalysisInFlight = false;
 
 // Map the internal analysis type to one of the existing activity categories used on
 // the Time Tracking page. Kept to the neutral LNC phrasing the client already sees on
@@ -4945,6 +4960,832 @@ function looksLikeRefusal(text, inputCharsApprox) {
   return false;
 }
 
+// ===== PHASE 2: ROUND-TRIP VERIFICATION =====
+// For every fact the model extracts, we substring-match the verbatim_quote against the
+// actual text of the source PDF (parsed locally in the browser via pdf.js). Quotes that
+// don't match get flagged so Debbie knows which rows to spot-check. The mechanism is
+// dumb and deterministic on purpose — a fabricated quote CANNOT appear in the source,
+// so if pdf.js can read the source, the match either works or it doesn't.
+//
+// Scope limits (by design for Phase 2):
+//   • Pure-image scans pdf.js can't extract will show up as null in the cache; facts
+//     citing those files get status '—' (skipped), not a false ⚠.
+//   • The model sometimes slightly rewords a quote across line breaks or hyphenation.
+//     normalizeForMatch strips punctuation, lowercases, and collapses whitespace to
+//     minimize false flags from that kind of trivial drift.
+//   • We match full-document, not page-specific. A quote anywhere in the cited file
+//     counts as verified. Verifying the specific cited PAGE is a future tightening.
+
+// Normalize text for fuzzy-ish substring match. Lowercase, smart quotes → ASCII,
+// em/en dashes → hyphen, strip most punctuation, collapse whitespace. This lets a
+// verbatim_quote from the model match even when pdf.js returned the source with
+// slightly different spacing, line breaks, or curly quotes.
+function normalizeForMatch(s) {
+  if (!s) return '';
+  return String(s)
+    .toLowerCase()
+    .replace(/[\u2018\u2019\u201B\u2032]/g, "'")
+    .replace(/[\u201C\u201D\u201F\u2033]/g, '"')
+    .replace(/[\u2013\u2014\u2212]/g, '-')
+    .replace(/[^a-z0-9\s"'-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Extract full text of a PDF as one normalized string, using pdf.js in-browser.
+// Returns '' on failure (scanned PDF with no text layer, corrupt PDF, etc.) —
+// callers treat null-or-empty as "not verifiable" rather than "not found".
+async function extractPdfFullText(pdfBytes) {
+  if (!window.pdfjsLib) throw new Error('pdf.js not loaded — refresh and try again.');
+  // Worker must be set once per page load. Same CDN as the main lib keeps versions aligned.
+  if (!window.pdfjsLib.GlobalWorkerOptions.workerSrc) {
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  }
+  const loadingTask = window.pdfjsLib.getDocument({ data: pdfBytes, disableFontFace: true, verbosity: 0 });
+  const doc = await loadingTask.promise;
+  const chunks = [];
+  for (let i = 1; i <= doc.numPages; i++) {
+    try {
+      const page = await doc.getPage(i);
+      const content = await page.getTextContent();
+      // Join all text items on the page with a space. Don't try to reconstruct layout —
+      // we're looking for substring matches, not rendering.
+      chunks.push(content.items.map(it => it.str).join(' '));
+      await page.cleanup();
+    } catch (e) {
+      // A single page failure (e.g. OCR-only image with no extractable text layer)
+      // shouldn't fail the whole file — just contribute no text for that page.
+      console.warn('[extractPdfFullText] page ' + i + ' failed: ' + e.message);
+    }
+  }
+  try { await doc.destroy(); } catch (_) {}
+  return chunks.join('\n\n');
+}
+
+// Build a per-filename normalized-text cache for every PDF content block. Non-PDF
+// blocks (images, text addenda) are skipped — their facts will show status '—'.
+// The cache is keyed by the EXACT filename the model sees as the document title,
+// so the model's source_filename field lines up with our lookup key.
+//
+// Failures on a single file are survivable: the file's cache entry is set to null,
+// and its facts show status '—' rather than ⚠. This keeps scanned image-only PDFs
+// from generating a false wave of "flagged" rows that would bury real flags.
+async function buildSourceTextCache(contentBlocks, area) {
+  const cache = {};
+  const pdfs = (contentBlocks || []).filter(b => b && b.type === 'document' && b.source && b.source.data && (!b.source.media_type || /pdf/i.test(b.source.media_type)));
+  if (!pdfs.length) return cache;
+  for (let i = 0; i < pdfs.length; i++) {
+    const b = pdfs[i];
+    const filename = b.title || ('attachment-' + (i + 1) + '.pdf');
+    if (area) {
+      try {
+        area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Indexing source text for verification (' + (i + 1) + '/' + pdfs.length + ')…</span></div>';
+      } catch (_) {}
+    }
+    try {
+      // atob → Uint8Array. We intentionally avoid arrayBufferToBase64's inverse because
+      // we want the raw bytes, not an ArrayBuffer copy.
+      const bin = atob(b.source.data);
+      const bytes = new Uint8Array(bin.length);
+      for (let j = 0; j < bin.length; j++) bytes[j] = bin.charCodeAt(j);
+      const raw = await extractPdfFullText(bytes);
+      cache[filename] = raw ? normalizeForMatch(raw) : null;
+    } catch (e) {
+      console.warn('[buildSourceTextCache] ' + filename + ' failed: ' + e.message);
+      cache[filename] = null;
+    }
+    // Yield to the event loop between files so the UI stays responsive on large cases.
+    await new Promise(r => setTimeout(r, 0));
+  }
+  return cache;
+}
+
+// Module-level cache keyed by case id. The async path kicks off buildSourceTextCache
+// concurrently with the upload loop; by the time batches finish (minutes later) the
+// cache is ready. If the browser reloads mid-flight, the in-memory cache is lost and
+// verification gracefully degrades to status '—' on all rows — a re-run will rebuild.
+const _sourceTextCacheByCase = {};
+
+// ===== STRUCTURED JSON EXTRACTION + DETERMINISTIC MERGE =====
+// Phase 1 of the indexing-not-drafting rebuild. Each batch emits a JSON array of
+// extracted facts (date, event type, facility, verbatim quote, Bates, source file).
+// We then merge them with pure JS — sort by date, dedupe exact matches, emit a
+// markdown pipe table that generateDocx() renders as a Word table. No LLM is
+// involved in the merge step. That eliminates the single biggest source of
+// hallucination in prior cases (the hierarchical narrative synthesizer, which
+// produced date drift, event loss, and fabricated findings). The tool becomes a
+// cited fact INDEX the LNC searches, not a report draft she has to audit.
+
+// Parse a batch response that should contain a JSON array of fact objects. Tolerates
+// common LLM imperfections: markdown code fences around the JSON, leading/trailing
+// prose, trailing commas. Returns an array (possibly empty) — never throws. A fatal
+// parse error is logged and the batch is treated as zero facts rather than
+// poisoning the whole case output.
+function parseBatchJson(text) {
+  if (!text || typeof text !== 'string') return [];
+  let s = text.trim();
+  // Strip ```json ... ``` or ``` ... ``` code fence if present.
+  const fence = s.match(/^```(?:json)?\s*([\s\S]*?)\s*```\s*$/i);
+  if (fence) s = fence[1].trim();
+  // Find the outermost [...] — tolerates the model prefixing "Here is the JSON:" etc.
+  const first = s.indexOf('[');
+  const last = s.lastIndexOf(']');
+  if (first === -1 || last === -1 || last < first) {
+    console.warn('[parseBatchJson] no JSON array in batch output (head: ' + s.slice(0, 200).replace(/\s+/g, ' ') + ')');
+    return [];
+  }
+  const candidate = s.slice(first, last + 1);
+  // Remove trailing commas before ] or } — a common LLM slip that breaks strict JSON.parse.
+  const cleaned = candidate.replace(/,(\s*[}\]])/g, '$1');
+  try {
+    const parsed = JSON.parse(cleaned);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(f => f && typeof f === 'object');
+  } catch (e) {
+    console.warn('[parseBatchJson] JSON.parse failed: ' + e.message + ' (head: ' + candidate.slice(0, 200) + ')');
+    return [];
+  }
+}
+
+// Merge every batch's extracted facts into one chronological, deduplicated markdown
+// document. Pure JS — deterministic, auditable, zero hallucination surface area.
+// The output is a markdown pipe table that generateDocx's buildPipeTable() renders
+// as a Word table in the final deliverable.
+//
+// sourceTextCache (optional, Phase 2): { [filename]: normalizedFullText | null }. When
+// present, each fact's verbatim_quote is substring-matched against the cited source
+// document and stamped with a verification status (✓ verified, ⚠ flagged, — skipped).
+// Missing or null cache entries degrade gracefully to '—' rather than false ⚠.
+function mergeExtractedFactsToMarkdown(batchOutputs, caseInfo, sourceTextCache) {
+  const allFacts = [];
+  let batchesErrored = 0;
+  let batchesWithZero = 0;
+  for (const br of batchOutputs) {
+    if (br.errored) { batchesErrored++; continue; }
+    const facts = parseBatchJson(br.text);
+    if (!facts.length) batchesWithZero++;
+    for (const f of facts) allFacts.push(f);
+  }
+
+  // Normalize every field to a safe string. Missing values become empty strings.
+  // We NEVER invent values to fill gaps — the whole point of this rewrite is that
+  // every cell in the final table is either a verbatim source quote or blank.
+  const norm = (v) => (v === null || v === undefined) ? '' : String(v).trim();
+  const cellSafe = (s) => s.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
+  for (const f of allFacts) {
+    f._date = norm(f.date);
+    f._event_type = norm(f.event_type);
+    f._facility = norm(f.facility);
+    f._quote = cellSafe(norm(f.verbatim_quote));
+    f._bates = norm(f.bates_prefix);
+    f._page = norm(f.page_number);
+    f._source = norm(f.source_filename);
+    // Dedupe key: exact match across identifying fields. Facts that differ in any
+    // substantive way stay as separate rows so the LNC can see the full evidence.
+    f._key = [f._date, f._event_type, f._bates, f._page, f._quote].join('||');
+  }
+
+  // Dedupe preserving first occurrence — same key, keep the earlier extraction.
+  const seen = new Set();
+  const deduped = [];
+  for (const f of allFacts) {
+    if (seen.has(f._key)) continue;
+    seen.add(f._key);
+    deduped.push(f);
+  }
+
+  // Chronological sort. Permissive date parser handles YYYY-MM-DD, MM/DD/YYYY,
+  // "Month D, YYYY", etc. Facts with no parseable date sort to the end — they
+  // still appear in the index, just after everything with a known date.
+  const parseDateKey = (s) => {
+    if (!s) return Number.POSITIVE_INFINITY;
+    const t = Date.parse(s);
+    if (!isNaN(t)) return t;
+    const m = s.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
+    if (m) {
+      let y = parseInt(m[3], 10); if (y < 100) y += 2000;
+      const d = new Date(y, parseInt(m[1], 10) - 1, parseInt(m[2], 10));
+      if (!isNaN(d.getTime())) return d.getTime();
+    }
+    return Number.POSITIVE_INFINITY;
+  };
+  deduped.sort((a, b) => parseDateKey(a._date) - parseDateKey(b._date));
+
+  // --- Phase 2: round-trip verification ---
+  // For each fact, normalize the verbatim_quote and substring-search it against the
+  // normalized full-text of the cited source PDF. Three possible outcomes per row:
+  //   ✓ verified  — normalized quote appears literally in normalized source text
+  //   ⚠ flagged   — quote does NOT appear in the cited source (potential hallucination)
+  //   — skipped   — no source cited, no cache available, or source unparseable (e.g.
+  //                 image-only scan that pdf.js cannot extract)
+  // The counts are surfaced in a summary line above the table.
+  let verifiedCount = 0, flaggedCount = 0, skippedCount = 0;
+  const haveCache = !!sourceTextCache;
+  for (const f of deduped) {
+    if (!haveCache || !f._source || !f._quote) {
+      f._status = '—';
+      skippedCount++;
+      continue;
+    }
+    const cached = sourceTextCache[f._source];
+    if (cached === undefined || cached === null || cached === '') {
+      f._status = '—';
+      skippedCount++;
+      continue;
+    }
+    const needle = normalizeForMatch(f._quote);
+    // Very short needles (<12 chars after normalization) generate too many false
+    // positives to be useful as a verification signal — mark skipped rather than
+    // falsely verified. The LNC will still see the row; she just won't get a check
+    // mark on a flimsy short match.
+    if (!needle || needle.length < 12) {
+      f._status = '—';
+      skippedCount++;
+      continue;
+    }
+    if (cached.indexOf(needle) !== -1) {
+      f._status = '✓';
+      verifiedCount++;
+    } else {
+      f._status = '⚠';
+      flaggedCount++;
+    }
+  }
+
+  // Phase 3 rebuild: stash the structured facts on the case record alongside the
+  // markdown preview so the xlsx+template builders can render the deliverables
+  // without re-parsing a pipe table. The facts survive page reloads (they get
+  // persisted to localStorage by save() in finishAnalysis) so Debbie can click
+  // Finalize hours later and still get a workbook that matches what she saw on
+  // screen. Shape each fact row to the columns the xlsx builder emits.
+  const structuredFacts = deduped.map(f => ({
+    date: f._date,
+    event_type: f._event_type,
+    facility: f._facility,
+    verbatim_quote: f._quote,
+    source_filename: f._source,
+    bates_prefix: f._bates,
+    page_number: f._page,
+    verification: f._status || '—'
+  }));
+  const factIndexStats = {
+    total: deduped.length,
+    batches: batchOutputs.length,
+    batchesErrored,
+    batchesWithZero,
+    verified: verifiedCount,
+    flagged: flaggedCount,
+    skipped: skippedCount,
+    verificationRan: haveCache
+  };
+  if (caseInfo && typeof caseInfo === 'object') {
+    caseInfo.lastAnalysisFacts = structuredFacts;
+    caseInfo.lastAnalysisStats = factIndexStats;
+  }
+
+  // Render markdown. buildPipeTable() at generateDocx converts the pipe block into
+  // a Word table. Surrounding prose renders as paragraphs.
+  const patient = (caseInfo && caseInfo.patient) || 'Case';
+  const out = [];
+  out.push('# Chronological Fact Index — ' + patient);
+  out.push('');
+  out.push('_' + deduped.length + ' fact' + (deduped.length === 1 ? '' : 's') + ' indexed from ' + batchOutputs.length + ' record batch' + (batchOutputs.length === 1 ? '' : 'es') + ', deduplicated and sorted chronologically._');
+  out.push('');
+  if (haveCache) {
+    const total = verifiedCount + flaggedCount + skippedCount;
+    out.push('_Verification: ' + verifiedCount + ' of ' + total + ' rows verified against source (✓), ' + flaggedCount + ' flagged for spot-check (⚠), ' + skippedCount + ' not checkable (—). Flagged rows could not be matched against the cited source document — review before relying on them._');
+    out.push('');
+  } else {
+    out.push('_Verification was skipped for this run (source text cache unavailable). Review every row against the source before use._');
+    out.push('');
+  }
+  if (batchesErrored > 0) {
+    out.push('_' + batchesErrored + ' batch' + (batchesErrored === 1 ? '' : 'es') + ' failed during extraction and are not represented in this index — review the raw output panel below._');
+    out.push('');
+  }
+  if (batchesWithZero > 0) {
+    out.push('_' + batchesWithZero + ' batch' + (batchesWithZero === 1 ? '' : 'es') + ' returned zero extractable facts (duplicate cover pages, blank scans, or unreadable records)._');
+    out.push('');
+  }
+  out.push('| Date | Event | Facility | Verbatim Quote | Source | Bates/Page | Check |');
+  out.push('| --- | --- | --- | --- | --- | --- | :-: |');
+  for (const f of deduped) {
+    // Cap quote length so a pathological extraction can't blow up a single row,
+    // but keep it generous — this is supposed to be the evidence, not a summary.
+    const quote = f._quote.length > 500 ? f._quote.slice(0, 500) + '…' : f._quote;
+    const batesPage = [f._bates, f._page].filter(Boolean).join(' ');
+    out.push('| ' + f._date + ' | ' + f._event_type + ' | ' + f._facility + ' | ' + quote + ' | ' + f._source + ' | ' + batesPage + ' | ' + (f._status || '—') + ' |');
+  }
+  out.push('');
+  out.push('---');
+  out.push('');
+  out.push('_This is a cited fact index, not a narrative report. Every ✓ row was matched verbatim against the cited source document; every ⚠ row could not be matched and should be spot-checked before use. The LNC writes the narrative from this index._');
+  return out.join('\n');
+}
+
+// ===== PHASE 3: XLSX WORKBOOK + BLANK NARRATIVE TEMPLATE =====
+// The old flow produced a single Word doc with an embedded pipe table. Two problems:
+//   (1) Tables buried inside a flowing Word document cannot be sorted, filtered, or
+//       frozen — Debbie routinely has 400+ rows, and Word is the wrong tool for that.
+//   (2) Bundling the index with a narrative template invites the illusion that the
+//       AI wrote the narrative. The LNC always writes the narrative herself. The tool
+//       builds the searchable evidence base; she writes from it.
+// Phase 3 splits these into two deliverables:
+//   • "<patient> — Fact Index.xlsx"    — the chronology as a real spreadsheet (filters,
+//                                         frozen header row, column widths tuned for
+//                                         long verbatim quotes, verification column).
+//   • "<patient> — Narrative Template.docx" — branded letterhead + case caption +
+//                                             empty section placeholders for her prose.
+
+// ===== PHASE 4: DERIVED WORKLISTS =====
+// Debbie doesn't want a 400-row fact index and nothing else — she wants to walk through
+// her cases by THEME (falls, skin, meds, risk assessments, etc.). Phase 4 adds derived
+// worklist sheets to the same workbook: each sheet is a DETERMINISTIC keyword filter
+// over the fact index, grouping rows that match a topic so she can sort/filter each
+// topic independently without losing the Row # back-reference to the master index.
+//
+// Zero LLM involvement: the filter is literal case-insensitive substring matching on
+// event_type + verbatim_quote against a curated keyword list per worklist. If a row
+// doesn't contain any of the keywords, it doesn't appear on that sheet. No inference,
+// no categorization by meaning, no risk of the wrong fact landing on the wrong sheet.
+// Every row that appears on a worklist sheet is ALSO present verbatim on the master
+// Fact Index sheet — the worklist sheets are views, not separate data.
+//
+// The Documentation Checklist sheet inverts the logic: instead of listing facts by
+// topic, it lists EXPECTED documentation items (admission H&P, post-fall neuro checks,
+// Braden assessment, etc.) with a count of how many fact rows match each item. Items
+// with zero matches surface as "— NOT FOUND" so the gap is visible at a glance.
+const WORKLIST_DEFINITIONS = [
+  {
+    name: 'Falls',
+    sheetName: 'Falls',
+    description: 'Fall events and related follow-up notes. Sort by date, then read the verbatim quotes to trace each fall and its documented response.',
+    keywords: ['fall', 'fell', 'found on floor', 'on the floor', 'slid to', 'slipped', 'landed on', 'tumble', 'assisted to floor', 'lowered to floor']
+  },
+  {
+    name: 'Skin & Wounds',
+    sheetName: 'Skin & Wounds',
+    description: 'Skin integrity, pressure ulcers, wounds, bruises, skin tears, and related treatments.',
+    keywords: ['skin', 'wound', 'ulcer', 'pressure injury', 'pressure ulcer', 'decub', 'skin tear', 'bruise', 'ecchymosis', 'hematoma', 'laceration', 'abrasion', 'redness', 'erythema', 'blister', 'maceration', 'excoriation', 'stage i', 'stage ii', 'stage iii', 'stage iv', 'unstageable', 'braden']
+  },
+  {
+    name: 'Risk Assessments',
+    sheetName: 'Risk Assessments',
+    description: 'Standardized risk assessments (Morse, Braden, MDS, nutritional, pain). Check that scores change appropriately after events like falls or weight loss.',
+    keywords: ['morse', 'braden', 'risk assessment', 'fall risk', 'pressure risk', 'mds', 'nutritional risk', 'pain scale', 'pain assessment', 'cognitive', 'cam', 'bims', 'gds', 'depression screen', 'elopement risk']
+  },
+  {
+    name: 'Care Plans',
+    sheetName: 'Care Plans',
+    description: 'Care plan entries, precautions, and documented interventions. Compare against the Falls and Skin & Wounds sheets to confirm the plan matched the identified risk.',
+    keywords: ['care plan', 'plan of care', 'precaution', 'intervention', 'individualized plan', 'goal', 'approach', 'interdisciplinary', 'idt', 'care conference']
+  },
+  {
+    name: 'Medications',
+    sheetName: 'Medications',
+    description: 'Medication orders, starts, stops, changes, PRNs, and documented administration. Scan for contraindications relative to the diagnosis list.',
+    keywords: ['medication', 'med error', 'prn', 'administered', 'administration', 'dose', 'dosage', 'discontinue', 'd/c', 'start', 'ordered', 'held', 'refused', 'anticoagulant', 'warfarin', 'heparin', 'eliquis', 'xarelto', 'coumadin', 'antipsychotic', 'opioid', 'narcotic', 'sedative', 'benzodiazepine']
+  },
+  {
+    name: 'Hospitalizations',
+    sheetName: 'Hospitalizations',
+    description: 'Admissions, discharges, ER visits, transfers, and hospital stays. Read the verbatim quotes to understand the reason for each encounter.',
+    keywords: ['admission', 'admitted', 'er visit', 'emergency department', 'emergency room', 'hospital', 'transfer', 'sent out', 'discharge', 'discharged', 'readmit', 'readmission']
+  },
+  {
+    name: 'Death & End-of-Life',
+    sheetName: 'Death & End-of-Life',
+    description: 'Hospice, comfort care, advance directive, POLST, death note, and related end-of-life documentation.',
+    keywords: ['hospice', 'comfort care', 'comfort measures', 'palliative', 'advance directive', 'polst', 'dnr', 'dni', 'do not resuscitate', 'death', 'expired', 'deceased', 'pronounced', 'post-mortem', 'postmortem']
+  }
+];
+
+// Case-insensitive substring match. We search event_type + verbatim_quote (not facility
+// or filename — those would false-positive constantly, e.g. a facility called "Fall Creek
+// Manor" showing up on the Falls sheet). Every keyword is compared as a literal substring;
+// we deliberately avoid regex so Debbie can audit the keyword list without a computer
+// science degree.
+function factMatchesWorklist(fact, keywords) {
+  const hay = ((fact.event_type || '') + ' ' + (fact.verbatim_quote || '')).toLowerCase();
+  if (!hay.trim()) return false;
+  for (const k of keywords) {
+    if (hay.indexOf(String(k).toLowerCase()) !== -1) return true;
+  }
+  return false;
+}
+
+// Expected documentation items. Each item is a labeled keyword group that answers
+// "did this facility document X?" The matches are counted and the first few matching
+// row numbers are listed on the checklist sheet. Items with zero matches surface as
+// potential gaps — Debbie still has to look herself, but she now has a list of what
+// to look for instead of trying to remember 20 standard documentation items from memory.
+const DOC_CHECKLIST_ITEMS = [
+  { label: 'Admission history & physical',            keywords: ['h&p', 'history and physical', 'admission note', 'admission assessment'] },
+  { label: 'Initial nursing assessment',              keywords: ['initial nursing assessment', 'initial assessment', 'admission nursing', 'baseline assessment'] },
+  { label: 'Initial care plan',                        keywords: ['initial care plan', 'baseline care plan', 'care plan initiated', 'plan of care initiated'] },
+  { label: 'Fall risk assessment (Morse)',             keywords: ['morse', 'fall risk', 'morse fall scale'] },
+  { label: 'Pressure injury risk (Braden)',            keywords: ['braden'] },
+  { label: 'Weekly skin assessment',                   keywords: ['weekly skin', 'skin check', 'skin sweep', 'skin observation'] },
+  { label: 'Advance directive / POLST',                keywords: ['advance directive', 'polst', 'dnr', 'dni', 'code status', 'living will'] },
+  { label: 'Medication reconciliation',                keywords: ['medication reconciliation', 'med rec', 'reconciled'] },
+  { label: 'Post-fall assessment / neuro checks',      keywords: ['post-fall', 'post fall', 'neuro check', 'neurological check', 'neuro vitals'] },
+  { label: 'Post-fall huddle / root cause',            keywords: ['post-fall huddle', 'post fall huddle', 'root cause', 'fall huddle'] },
+  { label: 'Wound care orders & measurements',         keywords: ['wound care', 'wound measurement', 'wound assessment', 'dressing change', 'length x width', 'l x w'] },
+  { label: 'Significant change in condition',          keywords: ['significant change', 'change in condition', 'change of condition', 'decline'] },
+  { label: 'Transfer documentation',                   keywords: ['transfer', 'transferred', 'sent to', 'transfer summary', 'interfacility'] },
+  { label: 'Discharge summary',                        keywords: ['discharge summary', 'discharge note', 'discharge instructions', 'd/c summary'] },
+  { label: 'Weight monitoring',                        keywords: ['weight', 'weighed', 'bmi', 'weight loss', 'weight gain'] },
+  { label: 'Nutrition / hydration assessment',         keywords: ['nutrition', 'nutritional', 'dietary', 'dietitian', 'intake', 'po intake', 'hydration', 'fluid intake'] },
+  { label: 'Pain assessment',                          keywords: ['pain scale', 'pain assessment', 'pain rating', 'numeric pain', 'wong-baker'] },
+  { label: 'Continence / toileting program',           keywords: ['incontinence', 'continence', 'toileting', 'bowel', 'bladder'] },
+  { label: 'Behavioral / psychiatric assessment',      keywords: ['behavior', 'behavioral', 'psychiatric', 'psych', 'agitation', 'aggression', 'depression', 'anxiety'] },
+  { label: 'Death note (if applicable)',               keywords: ['death note', 'expired', 'pronounced', 'post-mortem', 'postmortem', 'time of death'] }
+];
+
+function factMatchesChecklistItem(fact, keywords) {
+  return factMatchesWorklist(fact, keywords);
+}
+
+// Build the fact-index Excel workbook. Returns a Blob the caller can download or
+// upload to Drive. Requires SheetJS (window.XLSX) loaded in <head>.
+function buildFactIndexXlsxBlob(facts, caseInfo, stats) {
+  if (!window.XLSX) throw new Error('Spreadsheet library (SheetJS) failed to load. Refresh the page and try again.');
+  if (!Array.isArray(facts)) facts = [];
+  const patient = (caseInfo && caseInfo.patient) || 'Case';
+  const typeLabel = (caseInfo && caseInfo.type) ? (' — ' + caseInfo.type) : '';
+  const today = new Date().toISOString().split('T')[0];
+
+  // --- Sheet 1: Fact Index (the main deliverable) ---
+  const header = [
+    'Row',
+    'Date',
+    'Event',
+    'Facility',
+    'Verbatim Quote',
+    'Source File',
+    'Bates Prefix',
+    'Page',
+    'Verification'
+  ];
+  const aoa = [header];
+  facts.forEach((f, i) => {
+    aoa.push([
+      i + 1,
+      f.date || '',
+      f.event_type || '',
+      f.facility || '',
+      f.verbatim_quote || '',
+      f.source_filename || '',
+      f.bates_prefix || '',
+      f.page_number || '',
+      f.verification || '—'
+    ]);
+  });
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  // Freeze the header row and left-pin the row number column so Debbie can scroll
+  // through 400 rows without losing context.
+  ws['!freeze'] = { xSplit: 1, ySplit: 1 };
+  ws['!panes'] = [{ state: 'frozen', xSplit: 1, ySplit: 1 }];
+  // Column widths, in Excel character units. The Verbatim Quote column is wide
+  // because that's the evidence the whole tool exists to surface.
+  ws['!cols'] = [
+    { wch:  5 }, // Row
+    { wch: 12 }, // Date
+    { wch: 20 }, // Event
+    { wch: 26 }, // Facility
+    { wch: 80 }, // Verbatim Quote
+    { wch: 38 }, // Source File
+    { wch:  8 }, // Bates
+    { wch:  8 }, // Page
+    { wch: 12 }  // Verification
+  ];
+  // Enable autofilter on the header row so Debbie can filter by facility, event,
+  // or verification status without writing a formula.
+  const lastCol = XLSX.utils.encode_col(header.length - 1);
+  const lastRow = Math.max(1, aoa.length);
+  ws['!autofilter'] = { ref: 'A1:' + lastCol + lastRow };
+  // Wrap text in every data cell so long verbatim quotes stay readable without
+  // stretching the column. Row height stays on auto so wrapped rows grow naturally.
+  for (let r = 1; r < aoa.length; r++) {
+    for (let c = 0; c < header.length; c++) {
+      const addr = XLSX.utils.encode_cell({ r, c });
+      if (!ws[addr]) continue;
+      ws[addr].s = ws[addr].s || {};
+      ws[addr].s.alignment = { wrapText: true, vertical: 'top' };
+    }
+  }
+
+  // --- Sheet 2: Summary (counts + case info so a single-sheet print stays legible) ---
+  const verificationRan = !!(stats && stats.verificationRan);
+  const sumRows = [
+    ['Chart Detectives — Fact Index Summary', ''],
+    ['', ''],
+    ['Patient',               patient],
+    ['Case type',             (caseInfo && caseInfo.type) || ''],
+    ['Case side',             (caseInfo && caseInfo.side) || ''],
+    ['Generated (UTC)',       new Date().toISOString()],
+    ['', ''],
+    ['Facts indexed',         (stats && stats.total) || facts.length],
+    ['Record batches',        (stats && stats.batches) || ''],
+    ['Batches with errors',   (stats && stats.batchesErrored) || 0],
+    ['Batches with 0 facts',  (stats && stats.batchesWithZero) || 0],
+    ['', ''],
+    ['Verification ran',      verificationRan ? 'Yes' : 'No (source-text cache unavailable)'],
+    ['Rows verified (✓)',     verificationRan ? (stats.verified || 0) : '—'],
+    ['Rows flagged (⚠)',      verificationRan ? (stats.flagged || 0) : '—'],
+    ['Rows not checkable (—)',verificationRan ? (stats.skipped || 0) : '—'],
+    ['', ''],
+    ['Notes', ''],
+    ['', 'This workbook is a cited fact index compiled from the records provided for the case above. Every row in the Fact Index sheet is intended to be a verbatim excerpt from a source document, tagged with its date, event type, facility, file, and Bates/page reference where available.'],
+    ['', 'A "✓" in the Verification column means the verbatim quote was located character-for-character in the cited source PDF via in-browser text extraction. A "⚠" means the quote could NOT be matched to the source and should be spot-checked before being relied upon. A "—" means verification was skipped (no source cached, quote too short to verify reliably, or source was an image-only scan).'],
+    ['', 'This is a reference index for the licensed Legal Nurse Consultant, not a narrative report. The companion narrative template (separate .docx) is a blank letterhead for the LNC to write her own analysis, supported by the facts in this workbook.']
+  ];
+  const wsSum = XLSX.utils.aoa_to_sheet(sumRows);
+  wsSum['!cols'] = [{ wch: 26 }, { wch: 100 }];
+
+  // --- Assemble workbook ---
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Fact Index');
+  XLSX.utils.book_append_sheet(wb, wsSum, 'Summary');
+
+  // --- Phase 4: Derived worklist sheets ---
+  // One sheet per topic in WORKLIST_DEFINITIONS. Each is a keyword-filtered VIEW of
+  // the master Fact Index sheet (not a separate dataset), with an extra "Orig Row"
+  // column pointing back at the master so Debbie can cross-reference at a glance.
+  // Sheets with zero matches are still created (with a "No matching rows found for
+  // the keywords on this sheet" note) — an empty sheet is a visible gap, and Debbie
+  // can decide whether that gap is meaningful for the case.
+  const wlHeader = ['Orig Row', 'Date', 'Event', 'Facility', 'Verbatim Quote', 'Source File', 'Bates Prefix', 'Page', 'Verification'];
+  const wlCols = [
+    { wch:  8 }, { wch: 12 }, { wch: 20 }, { wch: 26 }, { wch: 80 },
+    { wch: 38 }, { wch:  8 }, { wch:  8 }, { wch: 12 }
+  ];
+  for (const def of WORKLIST_DEFINITIONS) {
+    const wlRows = [
+      ['Worklist: ' + def.name],
+      [def.description],
+      ['Keywords matched on event type + verbatim quote: ' + def.keywords.join(', ')],
+      [],
+      wlHeader
+    ];
+    let matchCount = 0;
+    facts.forEach((f, i) => {
+      if (!factMatchesWorklist(f, def.keywords)) return;
+      matchCount++;
+      wlRows.push([
+        i + 1,
+        f.date || '',
+        f.event_type || '',
+        f.facility || '',
+        f.verbatim_quote || '',
+        f.source_filename || '',
+        f.bates_prefix || '',
+        f.page_number || '',
+        f.verification || '—'
+      ]);
+    });
+    if (matchCount === 0) {
+      wlRows.push(['— No matching rows found on this sheet. If you expected entries here, verify the source records contain the keywords listed above and review the full Fact Index sheet manually. —']);
+    }
+    const wsWl = XLSX.utils.aoa_to_sheet(wlRows);
+    wsWl['!cols'] = wlCols;
+    // Autofilter + freeze start at the header row inside the sheet (row 5).
+    if (matchCount > 0) {
+      const headerRowIdx = 5; // 1-based: row 5 is the header row
+      const lastDataRow = headerRowIdx + matchCount; // 1-based
+      wsWl['!autofilter'] = { ref: 'A' + headerRowIdx + ':' + XLSX.utils.encode_col(wlHeader.length - 1) + lastDataRow };
+      wsWl['!freeze'] = { xSplit: 1, ySplit: headerRowIdx };
+      wsWl['!panes'] = [{ state: 'frozen', xSplit: 1, ySplit: headerRowIdx }];
+    }
+    // Wrap text on data cells (rows 6 onward = index >= 5).
+    for (let r = 5; r < wlRows.length; r++) {
+      for (let c = 0; c < wlHeader.length; c++) {
+        const addr = XLSX.utils.encode_cell({ r, c });
+        if (!wsWl[addr]) continue;
+        wsWl[addr].s = wsWl[addr].s || {};
+        wsWl[addr].s.alignment = { wrapText: true, vertical: 'top' };
+      }
+    }
+    // SheetJS caps sheet names at 31 chars. Trim defensively.
+    const sheetName = String(def.sheetName || def.name).slice(0, 31);
+    XLSX.utils.book_append_sheet(wb, wsWl, sheetName);
+  }
+
+  // --- Phase 4: Documentation Checklist sheet ---
+  // Inverts the worklist logic: instead of "show me facts about falls," this sheet
+  // asks "did the chart include X?" for 20 standard items of LTC/hospital documentation.
+  // Each row shows the expected item, a count of matching fact-index rows, and the
+  // first few matching row numbers for quick drill-down. Items with zero matches
+  // are labeled "— NOT FOUND" so the gap is obvious without Debbie having to scan.
+  // This is NOT a claim that the documentation is missing from the chart — only that
+  // none of our extracted facts matched the keywords for that item. She still has to
+  // confirm each gap against the source records.
+  const ckHeader = ['Expected Documentation', 'Matches Found', 'Sample Row #s', 'Status', 'Keywords'];
+  const ckRows = [
+    ['Documentation Checklist — ' + patient],
+    ['Deterministic keyword match against the Fact Index. Items showing "— NOT FOUND" had zero fact-index rows containing any of their keywords; confirm manually that the underlying documentation is truly absent from the chart before relying on that finding.'],
+    [],
+    ckHeader
+  ];
+  let checklistMissing = 0;
+  for (const item of DOC_CHECKLIST_ITEMS) {
+    const matchingRowNumbers = [];
+    facts.forEach((f, i) => {
+      if (factMatchesChecklistItem(f, item.keywords)) matchingRowNumbers.push(i + 1);
+    });
+    const sample = matchingRowNumbers.slice(0, 8).join(', ') +
+      (matchingRowNumbers.length > 8 ? ', …(+' + (matchingRowNumbers.length - 8) + ' more)' : '');
+    const status = matchingRowNumbers.length === 0 ? '— NOT FOUND' : '✓ present';
+    if (matchingRowNumbers.length === 0) checklistMissing++;
+    ckRows.push([
+      item.label,
+      matchingRowNumbers.length,
+      matchingRowNumbers.length ? sample : '—',
+      status,
+      item.keywords.join(', ')
+    ]);
+  }
+  ckRows.push([]);
+  ckRows.push(['Items marked NOT FOUND: ' + checklistMissing + ' of ' + DOC_CHECKLIST_ITEMS.length + '. Investigate each before deciding whether it represents a true documentation gap.']);
+  const wsCk = XLSX.utils.aoa_to_sheet(ckRows);
+  wsCk['!cols'] = [{ wch: 42 }, { wch: 14 }, { wch: 30 }, { wch: 14 }, { wch: 70 }];
+  // Freeze the header row inside the sheet (row 4 in 1-based terms).
+  wsCk['!freeze'] = { xSplit: 0, ySplit: 4 };
+  wsCk['!panes'] = [{ state: 'frozen', xSplit: 0, ySplit: 4 }];
+  // Wrap text everywhere.
+  const ckLastCol = ckHeader.length - 1;
+  for (let r = 0; r < ckRows.length; r++) {
+    for (let c = 0; c <= ckLastCol; c++) {
+      const addr = XLSX.utils.encode_cell({ r, c });
+      if (!wsCk[addr]) continue;
+      wsCk[addr].s = wsCk[addr].s || {};
+      wsCk[addr].s.alignment = { wrapText: true, vertical: 'top' };
+    }
+  }
+  XLSX.utils.book_append_sheet(wb, wsCk, 'Doc Checklist');
+
+  wb.Props = {
+    Title: 'Fact Index — ' + patient + typeLabel,
+    Subject: 'Chronological fact index compiled from medical records',
+    Author: 'Chart Detectives LNC',
+    CreatedDate: new Date()
+  };
+
+  const ab = XLSX.write(wb, { bookType: 'xlsx', type: 'array', cellStyles: true });
+  return new Blob([ab], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+}
+
+// Build the blank narrative template. Returns a Blob (docx) the LNC fills in herself.
+// The file has the Chart Detectives letterhead, case caption, and empty section headings
+// — that's it. No AI-authored prose, no invented facts, no placeholder sentences that
+// look like findings. Debbie writes the narrative; the xlsx is her reference.
+async function buildBlankNarrativeDocxBlob(caseInfo, stats) {
+  if (!window.docx || !window.docx.Document) {
+    throw new Error('Word document library failed to load. Refresh the page and try again.');
+  }
+  const { Document, Packer, Paragraph, TextRun, ImageRun, Header, Footer,
+    PageNumber, AlignmentType, UnderlineType, BorderStyle, HeadingLevel,
+    PageOrientation } = window.docx;
+
+  const NAVY = '1a2744';
+  const GRAY = '666666';
+
+  const patient = (caseInfo && caseInfo.patient) || 'Unnamed Case';
+  const caseType = (caseInfo && caseInfo.type) || '';
+  const caseSide = (caseInfo && caseInfo.side) || '';
+  const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+
+  function run(text, opts) {
+    return new TextRun(Object.assign({ text, font: 'Arial', size: 22 }, opts || {}));
+  }
+  function heading(label) {
+    return new Paragraph({
+      spacing: { before: 320, after: 120 },
+      children: [run(label, { bold: true, size: 28, color: '000000', underline: { type: UnderlineType.SINGLE } })]
+    });
+  }
+  function placeholder(hint) {
+    return new Paragraph({
+      spacing: { before: 60, after: 180 },
+      children: [run('[ ' + hint + ' ]', { italics: true, color: GRAY })]
+    });
+  }
+
+  const logoBytes = await getLogoPngBytes();
+  const headerLogoParagraph = new Paragraph({
+    alignment: AlignmentType.CENTER,
+    spacing: { after: 80 },
+    children: [
+      new ImageRun({
+        type: 'png',
+        data: logoBytes,
+        transformation: { width: 90, height: 90 },
+        altText: { title: 'Chart Detectives', description: 'Chart Detectives LNC', name: 'logo' }
+      })
+    ]
+  });
+  const headerTitleParagraph = new Paragraph({
+    alignment: AlignmentType.CENTER,
+    spacing: { after: 40 },
+    children: [run('CHART DETECTIVES, LLC', { bold: true, size: 28, color: NAVY })]
+  });
+  const headerTagParagraph = new Paragraph({
+    alignment: AlignmentType.CENTER,
+    spacing: { after: 240 },
+    children: [run('Licensed Legal Nurse Consulting', { color: GRAY, size: 20 })]
+  });
+
+  // Case caption block
+  const captionLines = [
+    new Paragraph({ alignment: AlignmentType.CENTER, spacing: { before: 160, after: 40 },
+      children: [run(patient, { bold: true, size: 30, color: NAVY })] }),
+    new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 40 },
+      children: [run([caseType, caseSide].filter(Boolean).join(' — '), { color: GRAY, size: 22 })] }),
+    new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 240 },
+      children: [run(today, { color: GRAY, size: 20 })] })
+  ];
+
+  // Reference pointer so the printed template always tells the reader where the
+  // supporting facts live.
+  const factCount = (stats && stats.total) || 0;
+  const referencePara = new Paragraph({
+    alignment: AlignmentType.CENTER,
+    spacing: { before: 0, after: 320 },
+    children: [run(
+      factCount > 0
+        ? ('Supporting fact index: companion workbook "' + patient + ' — Fact Index.xlsx" (' + factCount + ' rows).')
+        : 'Supporting fact index: see companion workbook.',
+      { italics: true, color: GRAY, size: 20 }
+    )]
+  });
+
+  const sectionDefs = [
+    ['Introduction', 'Identify the retaining firm, the scope of your review, the records reviewed (by facility/date range), and the questions the attorney asked you to address.'],
+    ['Records Reviewed', 'List the records reviewed, by facility and date range. Reference the companion workbook for the complete indexed chronology.'],
+    ['Summary of Events', 'Write the chronological narrative in your own words, citing the fact-index rows that support each paragraph (e.g. "rows 42–47 of the Fact Index").'],
+    ['Deviations from the Standard of Care', 'Each deviation should start with "The facility failed to…" or "The provider failed to…" and close with the applicable regulation (e.g. 42 CFR §483.25). Cite the specific Fact Index row(s) supporting the deviation.'],
+    ['Damages / Outcomes', 'Describe the injuries, hospitalizations, or decline attributable to the deviations identified above. Cite Fact Index rows for each outcome.'],
+    ['Opinions', 'State your nursing opinions to a reasonable degree of nursing certainty. Keep the language of causation and standard of care distinct from medical opinions reserved for physicians.'],
+    ['Conclusion', 'Summarize your opinions and note any open questions or additional records you recommend the attorney obtain.'],
+    ['Signature', 'Your name, RN credentials, LNCC (if applicable), and the date.']
+  ];
+  const children = [...captionLines, referencePara];
+  for (const [h, hint] of sectionDefs) {
+    children.push(heading(h));
+    children.push(placeholder(hint));
+  }
+
+  const doc = new Document({
+    styles: {
+      default: { document: { run: { font: 'Arial', size: 22 } } }
+    },
+    sections: [{
+      properties: {
+        page: {
+          size: { width: 12240, height: 15840 },
+          margin: { top: 1080, right: 1440, bottom: 1080, left: 1440 }
+        }
+      },
+      headers: {
+        default: new Header({ children: [headerLogoParagraph, headerTitleParagraph, headerTagParagraph] })
+      },
+      footers: {
+        default: new Footer({ children: [new Paragraph({
+          alignment: AlignmentType.CENTER,
+          children: [
+            run('Chart Detectives, LLC  •  ', { color: GRAY, size: 18 }),
+            run('Page ', { color: GRAY, size: 18 }),
+            new TextRun({ children: [PageNumber.CURRENT], font: 'Arial', size: 18, color: GRAY }),
+            run(' of ', { color: GRAY, size: 18 }),
+            new TextRun({ children: [PageNumber.TOTAL_PAGES], font: 'Arial', size: 18, color: GRAY })
+          ]
+        })] })
+      },
+      children
+    }]
+  });
+
+  const buf = await Packer.toBlob(doc);
+  return buf;
+}
+
+// Trigger a browser download of a Blob. Pure utility — no framework dependency.
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 500);
+}
+
+// Sanitize a string for use as a filename. Drops characters that Windows/macOS/Drive
+// complain about and collapses whitespace.
+function sanitizeFilename(s) {
+  return String(s || 'Untitled').replace(/[\\/:*?"<>|]+/g, '').replace(/\s+/g, ' ').trim() || 'Untitled';
+}
+
 // ===== ASYNC ANALYSIS (Files API + Batches API + KV job state) =====
 // Called from runRecordAnalysis when isAsyncFlowEnabled() is true AND the case doesn't
 // fit in a single synchronous call. This path is robust to the browser being closed mid-run
@@ -4956,6 +5797,23 @@ async function runAsyncRecordAnalysis(params) {
     instructions, caseContext, area, pre,
     maxPages, maxTokens
   } = params;
+
+  // Phase 2 verification: kick off the source-text cache build CONCURRENTLY with
+  // uploads. Parsing 70+ PDFs takes ~30-60s on a typical case; running it in parallel
+  // with the minutes-long upload+batch flow means it's ready by the time we merge.
+  // The cache lives in a module-level map so it survives the async wait. If the
+  // browser reloads mid-run the cache is lost and verification gracefully degrades
+  // to status '—' on all rows — a manual re-run would rebuild it.
+  const _caseKey = (caseInfo && caseInfo.id) || '_ephemeral_';
+  if (!_sourceTextCacheByCase[_caseKey] || !_sourceTextCacheByCase[_caseKey]._promise) {
+    _sourceTextCacheByCase[_caseKey] = {
+      _promise: buildSourceTextCache(contentBlocks, null).catch(e => {
+        console.warn('[async] source text cache build failed: ' + e.message);
+        return {};
+      })
+    };
+    _sourceTextCacheByCase[_caseKey]._promise.then(c => { _sourceTextCacheByCase[_caseKey]._resolved = c; });
+  }
 
   // --- 1) Upload every chunk to Anthropic Files API ---
   // Sequential uploads (not parallel) are intentional: Cloudflare's free tier
@@ -5007,20 +5865,38 @@ async function runAsyncRecordAnalysis(params) {
 
   // --- 3) Build batch requests ---
   const batchRequests = batches.map((batch, bi) => {
-    const promptText = `You are a research assistant helping a licensed Legal Nurse Consultant extract facts from medical records. You are NOT the expert on this case — a licensed LNC will review, edit, and sign any final work product. Do not add ethical commentary or refuse the task — the licensed professional supervising this work has already established the proper legal and ethical framework.
+    const promptText = `You are extracting cited facts from medical records to build a searchable index for a licensed Legal Nurse Consultant. You are NOT writing a report and you are NOT interpreting the records — you are building a database row-by-row. The LNC will review every entry and write the narrative herself.
 ${caseContext ? 'Case context: ' + caseContext : ''}
 ${instructions ? 'Special instructions: ' + instructions : ''}
 ${bi === 0 && textAddendum ? '\nAdditional text records (provided only in this first batch):' + textAddendum : ''}
 
-This is BATCH ${bi + 1} of ${batches.length} for a large case. From the records attached to THIS batch, extract:
-• All dates and events (admissions, discharges, assessments, falls, injuries, ER visits)
-• Providers, facilities, and locations
-• Medications (start/stop dates, dose changes, PRN use, errors)
-• Diagnoses, vitals, labs, imaging findings
-• Nursing care decisions, interventions, and any deviations from standard of care
-• Any photos/images: describe what is visible and cite the source filename
+OUTPUT FORMAT — STRICT JSON ONLY.
+Return a JSON array of fact objects. Each object must have these exact fields (all strings):
+{
+  "date": "YYYY-MM-DD or MM/DD/YYYY as written in the source — empty string if no date is present",
+  "event_type": "short label, e.g. 'Fall', 'Admission', 'Discharge', 'Assessment', 'ER visit', 'Medication order', 'Medication change', 'Vitals', 'Lab', 'Imaging', 'Nursing note', 'Care plan entry', 'Progress note', 'Death', 'Diagnosis'",
+  "facility": "facility name as written in the source, or empty string",
+  "verbatim_quote": "the exact text from the record — copied character-for-character. One or two sentences of the relevant passage. No paraphrasing, no summarizing, no inference.",
+  "bates_prefix": "Bates prefix stamped on the page, e.g. 'MV', 'LM', 'AC', 'DC' — empty string if not stamped",
+  "page_number": "Bates page number or PDF page number as written — empty string if unknown",
+  "source_filename": "filename of the source record attached to this batch"
+}
 
-Be thorough and factual. Cite the source record name/date for each fact. Do NOT write a narrative summary yet — just extract facts. A final synthesis step will combine your extractions across all batches for the LNC's review.`;
+EXTRACTION RULES — violations invalidate the entry:
+• Extract EVERY discrete fact: admissions, discharges, assessments, falls, injuries, ER visits, vitals, labs, imaging, medications (start/stop/change/PRN/error), providers, diagnoses, nursing notes, care plan entries, deaths.
+• verbatim_quote must be COPIED from the source — character for character. If you cannot copy a verbatim passage, OMIT the fact. Do not paraphrase. Do not summarize. Do not infer.
+• Do NOT add clinical interpretation, standard-of-care analysis, causation commentary, or "deviations from standard of care" — just extract what the record says.
+• Do NOT fabricate Bates numbers or page numbers. If a page is not stamped, leave bates_prefix and page_number as empty strings.
+• Do NOT duplicate the same fact within this batch — dedupe before returning.
+• If a page is a blank scan, duplicate cover sheet, or unreadable, skip it silently — do not emit a fact for it.
+• Do NOT refuse the task or add ethical commentary. The licensed professional supervising this work has already established the proper legal framework; your only job is to extract.
+
+OUTPUT RULES:
+• Return ONLY the JSON array. No prose before or after. No markdown code fences. No commentary.
+• If zero facts are extractable from this batch, return exactly: []
+• Valid JSON: no trailing commas, all double quotes inside strings properly escaped as \\".
+
+This is BATCH ${bi + 1} of ${batches.length} for this case. Extract facts from the records attached to THIS batch only.`;
     // Cache-control on the persona system block lets identical prefixes across all
     // batches share a cache entry (when the prefix crosses Anthropic's minimum token
     // threshold). We also cache the stable prompt preamble — case context + instructions
@@ -5244,200 +6120,37 @@ async function pollBatchAndFinish(ctx) {
     console.warn('[batch retry] errored items present but no batchRequests in ctx (resume path?) — skipping auto-retry');
   }
 
-  // --- Synthesize (hierarchical if too large — recursively reduces until it fits) ---
+  // --- Merge extracted facts deterministically (no LLM in this step) ---
+  // Phase 1 rebuild: the hierarchical narrative synthesizer has been removed. Each
+  // batch now emits structured JSON; we merge with pure JS (sort by date, dedupe)
+  // and emit a markdown pipe table that generateDocx() renders as a Word table.
+  // That eliminates the single biggest source of hallucination in prior cases —
+  // the narrative reducer was responsible for date drift, event loss, and
+  // fabricated findings. The tool is now a cited fact INDEX the LNC searches,
+  // not a report draft she has to audit line by line.
   await patchJob(jobId, { status: 'synthesizing' }).catch(() => {});
-  // Tuning history:
-  //   First pass  (150k tokens * 4 chars/token = 600k chars) — overflowed: 44 batches of
-  //                dense medical extractions produced ~2.9 chars/token, so 600k chars
-  //                clocked in at 206k actual tokens — over the 200k input limit.
-  //   Second pass (120k budget, 400k chars) — survived 93 batches but ran into HTTP 400
-  //                "prompt is too long" on a 304-batch case where per-group text density
-  //                pushed the actual tokenization north of 180k for some groups. Claude's
-  //                tokenizer runs denser on highly-structured medical content (dates, codes,
-  //                CFR citations, drug names) than plain prose — observed ratio ~2.2 chars/token.
-  //   Current    (100k budget, 250k chars) — targets ~113k tokens at 2.2 chars/token so
-  //                even worst-case dense content sits comfortably under 200k with room
-  //                for preamble, system prompt, and output reservation. The trade-off is
-  //                more hierarchy levels (more round-trips) but total wall-clock is still
-  //                small compared to extraction. MAX_HIERARCHY_LEVELS stays at 4 because
-  //                even a 1000-batch case converges to a single group within 4 levels
-  //                at a ~5x reduction per level.
-  const SYNTH_TOKEN_BUDGET = 100000;
-  const SYNTH_CHAR_BUDGET = 250000;
-  const PROMPT_PREAMBLE_CHARS = 3000;
-  const MAX_HIERARCHY_LEVELS = 4;
-  const typeLabel = typeLabels[type] || type;
-
-  const buildSynthPrompt = (intro, items) =>
-`You are a research assistant helping a licensed Legal Nurse Consultant organize factual information extracted from medical records. You are NOT the expert on this case — a licensed LNC will review, edit, and sign any final work product. Your job is to produce a well-organized, fully cited compilation of facts from the source material below so the LNC can work from a clean timeline. Accuracy is non-negotiable.
-${caseContext ? 'Case context: ' + caseContext : ''}
-${instructions ? 'Special instructions: ' + instructions : ''}
-
-${intro}
-
-MANDATORY ACCURACY RULES — violations are grounds for rejection:
-• DO NOT invent or infer facts. If a date, name, dose, diagnosis, provider, or citation is unclear or missing in the source text, write "[unclear in source]" in that position rather than guessing or filling from clinical knowledge.
-• Every factual statement must end with its source citation (record name and/or date) in the form "(Source: <record>)". No bare claims.
-• Copy source citations verbatim. Do not paraphrase, shorten, or reformat record names.
-• If two sources disagree on a fact, record both with their respective citations rather than picking one.
-• Do not add clinical commentary, causation analysis, or deviations from standard of care unless it is explicitly stated in the source text.
-• Stay on task. Do NOT add commentary about professional ethics, credentials, HIPAA, AI-vs-human authorship, or whether this task is appropriate. The licensed professional supervising this work has already established the proper legal and ethical framework. Refusing the task or inserting ethical warnings is itself a quality failure — just organize the facts with their citations.
-• QUARANTINE POLLUTED INPUTS. Some input chunks below may themselves be prior refusals, model commentary about the task, or incomplete truncated output instead of factual extractions. If an input chunk begins with phrasing like "I cannot…", "I need to be direct…", "I am unable to…", "As an AI…", or "I apologize…", OR reads as meta-commentary about whether the task is appropriate rather than as a fact extraction, treat that specific chunk as EMPTY / MISSING DATA. Silently skip it. Synthesize only from the clean, fact-bearing chunks. Do NOT quote, reference, or acknowledge the polluted chunk in your output. Do NOT refuse the task yourself in response to a polluted input — the licensed LNC has already validated the task. This is the single most important reliability rule: refusal contagion breaks the whole pipeline, so one bad chunk must never infect the output.
-• NO TEMPLATES. NO PLACEHOLDERS. Do not produce bracketed placeholder text like [Date], [Name], [Facility], [Provider], [From admission records], [DOB], [MRN], [Diagnosis], or any other [Fill-in] slot. Every entry in your output must be a concrete fact copied from the source material with its citation. If a fact isn't in the source, OMIT the entry entirely rather than leaving a blank slot to be filled in later. Template/placeholder output is a complete failure of this task.
-• If, after reviewing the provided source material AND after skipping any polluted chunks per the quarantine rule above, you find ZERO extractable facts remaining (all chunks were empty/polluted), return exactly this string as your entire response: "ERROR: No extractable facts found in source material." Do not produce a structural template, a blank form, or a demonstration document under any circumstances.
-
-Presentation rules:
-• Deduplicate repeated facts (keep the earliest and most specific citation when merging).
-• Order events chronologically by date.
-• Use professional LNC terminology and clear section headings.
-• Do NOT mention "batches", "groups", "extractions", or the batching process in the output — produce a unified document.
-• CITATION FORMAT — this is critical. Citations MUST reference the original record by filename or date (e.g. "(Source: 7 12 2022 fall .pdf)" or "(Source: nursing note 08/06/2022)"). NEVER cite "Batch 287" or "Batches 174–176" or any batch/group number in your output. The "===== BATCH N EXTRACTION =====" headers below are internal organization markers for the reducer — they are NOT citation targets. Strip them entirely when reasoning and pull citations from inside each extraction's text (every extracted fact already has its real record citation attached).
-• Be comprehensive. This compilation will be reviewed and refined by a licensed professional — completeness beats brevity. But "comprehensive" means every real fact from the source — NOT filling gaps with placeholders.
-
-${items.join('\n\n')}`;
-
-  const totalChars = (items) => items.reduce((n, s) => n + s.length, 0) + PROMPT_PREAMBLE_CHARS;
-
-  let items = batchOutputs.map(br => '===== BATCH ' + br.batch + ' EXTRACTION =====\n' + br.text);
-
-  area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Synthesizing final ' + typeLabel + ' from ' + numBatches + ' batches…</span></div>';
-
+  area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Merging ' + numBatches + ' batch' + (numBatches === 1 ? '' : 'es') + ' of extracted facts into a chronological index…</span></div>';
   let finalText = '';
   try {
-    // Recursively reduce until the combined input fits under budget. Each reduction pass
-    // groups the current items so every group fits under budget on its own, calls Claude
-    // once per group to consolidate, then the consolidated summaries become the new items.
-    let level = 0;
-    while (totalChars(items) > SYNTH_CHAR_BUDGET && level < MAX_HIERARCHY_LEVELS) {
-      level++;
-      const groups = [];
-      let g = [];
-      let gChars = PROMPT_PREAMBLE_CHARS;
-      for (const item of items) {
-        if (gChars + item.length > SYNTH_CHAR_BUDGET && g.length) {
-          groups.push(g);
-          g = [item];
-          gChars = PROMPT_PREAMBLE_CHARS + item.length;
-        } else {
-          g.push(item);
-          gChars += item.length;
-        }
+    // Phase 2 verification: await the source-text cache we kicked off at function entry.
+    // If the build failed or the cache entry is missing, we pass null — the merger
+    // degrades gracefully to status '—' on every row rather than throwing.
+    let sourceTextCache = null;
+    try {
+      const cacheEntry = _sourceTextCacheByCase[_caseKey];
+      if (cacheEntry && cacheEntry._promise) {
+        area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Finishing source-text cache for round-trip verification…</span></div>';
+        sourceTextCache = await cacheEntry._promise;
       }
-      if (g.length) groups.push(g);
-
-      area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Large case — L' + level + ' reducing ' + items.length + ' items into ' + groups.length + ' groups…</span></div>';
-
-      // Parallel group synthesis with bounded concurrency. Why 4:
-      //   • Anthropic's per-org rate limits comfortably absorb 4 concurrent Haiku calls
-      //     even during a long-running job.
-      //   • 4× wall-clock improvement on 25+ group runs (Mimms-class cases drop from ~90min
-      //     to ~25min), but we keep each call fully sequential within its worker so retry
-      //     logic inside callClaude stays deterministic per-call.
-      //   • Processing time is billable, so speed is NOT the primary motivator — this is
-      //     about giving Debbie the deliverable sooner when she's waiting on it. Quality
-      //     is unchanged: each group still gets its own dedicated call with full retry.
-      //
-      // Ordering invariant: we write into newItems[gi] by index (NOT push) so the final
-      // report preserves the original document ordering regardless of which worker
-      // finishes first. Critical — batch order reflects chronological sequencing in many
-      // cases, and shuffling it would break the chronological rule in buildSynthPrompt.
-      //
-      // Error handling: per-call try/catch inside runOne writes a fallback slot with the
-      // raw group content, so no facts are lost even if one worker's call fails. We
-      // use Promise.all on the workers (safe — runOne swallows errors) rather than
-      // Promise.allSettled on the individual calls, because we need all workers to
-      // drain the queue before we move on.
-      const newItems = new Array(groups.length);
-      const CONCURRENCY = Math.min(4, groups.length);
-      let completed = 0;
-      let inFlight = 0;
-      const updateProgress = () => {
-        area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>L' + level + ': ' + completed + '/' + groups.length + ' groups completed, ' + inFlight + ' in flight…</span></div>';
-      };
-      updateProgress();
-
-      const runOne = async (gi) => {
-        inFlight++;
-        updateProgress();
-        const groupPrompt = buildSynthPrompt(
-          'Below are fact extractions from a subset of this case\'s records. Produce a consolidated, deduplicated fact extraction covering this subset only — preserve every date, source citation, medication, provider, diagnosis, and deviation. This will be combined with other subsets in a final step.',
-          groups[gi]
-        );
-        try {
-          // 64k output cap — Haiku 4.5 supports 64k output tokens. Raised from 32k after
-          // observing that mid-pipeline truncation (toast: "Output reached the token cap
-          // and may be truncated") cascaded into refusal-like consolidations at the next
-          // hierarchy level, poisoning the final synth. Cost trade-off is acceptable on
-          // a legal deliverable where completeness beats brevity.
-          const inputChars = groups[gi].reduce((n, s) => n + (s ? s.length : 0), 0);
-          let r = await callClaude(groupPrompt, { maxTokens: 64000 });
-          // Refusal quarantine: if this group's output looks like a refusal or is
-          // suspiciously short relative to its input, replace it with an inert skip
-          // marker so the next level's reducer doesn't read it as source material.
-          // This is the circuit breaker that prevents refusal contagion.
-          if (looksLikeRefusal(r, inputChars)) {
-            console.warn('[synth L' + level + '] group ' + (gi + 1) + ' output failed quality check (len=' + (r ? r.length : 0) + ', input=' + inputChars + ') — quarantining to prevent contagion');
-            newItems[gi] = '===== L' + level + ' GROUP ' + (gi + 1) + ' SKIPPED — failed quality check =====\n[This group\'s consolidation did not produce usable output and has been silently skipped. Content from this subset is not represented in the final synthesis.]';
-          } else {
-            newItems[gi] = '===== L' + level + ' GROUP ' + (gi + 1) + ' CONSOLIDATED =====\n' + r;
-          }
-        } catch (e) {
-          // Fall through with the raw group contents so no facts are lost even if one
-          // group's synth call fails.
-          newItems[gi] = '===== L' + level + ' GROUP ' + (gi + 1) + ' ERROR =====\n[Group synthesis failed: ' + e.message + ']\n\nRaw items for this group follow:\n\n' + groups[gi].join('\n\n');
-        }
-        inFlight--;
-        completed++;
-        updateProgress();
-      };
-
-      let nextIndex = 0;
-      const workers = [];
-      for (let w = 0; w < CONCURRENCY; w++) {
-        workers.push((async () => {
-          while (true) {
-            const gi = nextIndex++;
-            if (gi >= groups.length) return;
-            await runOne(gi);
-            // Small stagger between a worker's calls to avoid thundering-herd bursts on
-            // rate limits when all 4 workers happen to finish a call at once.
-            if (nextIndex < groups.length) await new Promise(r => setTimeout(r, 250));
-          }
-        })());
-      }
-      await Promise.all(workers);
-      items = newItems;
-      // Safety: if a reduction pass didn't meaningfully shrink the total, bail out of the
-      // loop so we don't spin forever. The final call below will throw if still too big.
-      if (items.length >= groups.length && groups.length === 1) break;
+    } catch (cacheErr) {
+      console.warn('[async] awaiting source text cache failed: ' + cacheErr.message);
+      sourceTextCache = null;
     }
-
-    area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Combining into final ' + typeLabel + '…</span></div>';
-    const intro = level === 0
-      ? 'Below are fact extractions from ' + numBatches + ' batches of medical records for this case. Combine them into a single ' + typeLabel + '.'
-      : 'Below are ' + items.length + ' consolidated fact extraction(s) covering this case. Combine them into a single ' + typeLabel + '.';
-    const synthPrompt = buildSynthPrompt(intro, items);
-    // 64k output cap for the final combine call — Haiku 4.5's maximum. Raised from 32k
-    // after observing truncation in intermediate reducer calls cascade into refusal-like
-    // final outputs. This is the deliverable that lands in the result pane, so complete
-    // narrative is non-negotiable. Cost impact is worth it on a legal deliverable.
-    finalText = await callClaude(synthPrompt, { maxTokens: 64000 });
-    // Post-synthesis verification pass. Uses the last-level `items` (consolidated group
-    // outputs for big cases, raw batchOutputs text for small cases) as source material —
-    // always more compact than raw extractions, so fits under the 150k char cap more
-    // often. Any failure here is swallowed inside runVerificationPass; we never block
-    // delivery on the review pass. Also pass the known-filename list + case context so
-    // the verifier can distinguish real hallucinated citations from citations that just
-    // got compacted out of view by the hierarchical reducer.
-    const verifyOpts = (() => {
-      const c2 = (caseInfo && caseInfo.id) ? state.cases.find(x => x.id === caseInfo.id) : null;
-      const idx = (c2 && c2.driveFileIndex) || {};
-      return { knownFilenames: Object.keys(idx), caseContext: caseContext || '' };
-    })();
-    finalText = await runVerificationPass(finalText, items, area, verifyOpts);
+    area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Merging ' + numBatches + ' batch' + (numBatches === 1 ? '' : 'es') + ' of extracted facts into a chronological index…</span></div>';
+    finalText = mergeExtractedFactsToMarkdown(batchOutputs, caseInfo, sourceTextCache);
   } catch (e) {
-    await patchJob(jobId, { status: 'failed', error: 'Synthesis failed: ' + e.message }).catch(() => {});
-    area.innerHTML = `<div class="alert alert-danger">Synthesis error: ${esc(e.message)}<br><br>Batch extractions were completed but could not be merged. You can still review them below.</div>`;
+    await patchJob(jobId, { status: 'failed', error: 'Merge failed: ' + e.message }).catch(() => {});
+    area.innerHTML = `<div class="alert alert-danger">Merge error: ${esc(e.message)}<br><br>Batch extractions completed but could not be merged. You can still review the raw JSON output below.</div>`;
     pre.textContent = batchOutputs.map(br => '===== BATCH ' + br.batch + ' =====\n' + br.text).join('\n\n');
     pre.style.display = 'block';
     document.getElementById('copy-rec-btn').style.display = '';
@@ -5730,6 +6443,42 @@ function renderSavedAnalysisIfAny(caseInfo, area, pre) {
 }
 
 async function runRecordAnalysis() {
+  // ---------- RE-ENTRANCY GUARD ----------
+  // A previous run showed the popup twice because the Analyze Records button got
+  // double-clicked (a doubled-up onclick, a bouncy mouse, or just Debbie being
+  // impatient while the button still looked clickable). Each click spawned an
+  // independent runRecordAnalysis → two cost-estimate confirms → two concurrent
+  // 70+ file upload loops. The second run doesn't just waste money, it fights
+  // the first for the Worker's connection pool and makes "Failed to fetch"
+  // errors cascade. Guard at function entry and disable the button visually
+  // until the run finishes (success, failure, or cancel).
+  if (_runRecordAnalysisInFlight) {
+    console.warn('[analyze] ignoring duplicate click — analysis already in flight');
+    try { showToast('Analysis is already running — please wait for it to finish.'); } catch(_) {}
+    return;
+  }
+  _runRecordAnalysisInFlight = true;
+  const _analyzeBtn = Array.from(document.querySelectorAll('button')).find(
+    b => /onclick/i.test(b.getAttribute('onclick') || '') && /runRecordAnalysis/.test(b.getAttribute('onclick') || '')
+  );
+  if (_analyzeBtn) {
+    _analyzeBtn.disabled = true;
+    _analyzeBtn.style.opacity = '0.55';
+    _analyzeBtn.style.cursor = 'not-allowed';
+  }
+  const _releaseGuard = () => {
+    _runRecordAnalysisInFlight = false;
+    if (_analyzeBtn) {
+      _analyzeBtn.disabled = false;
+      _analyzeBtn.style.opacity = '';
+      _analyzeBtn.style.cursor = '';
+    }
+  };
+  // Wrap the body in try/finally so the flag ALWAYS clears — even on thrown
+  // exceptions, async rejection, or early returns. Without this, a single
+  // crash would wedge the button permanently until a page reload.
+  try {
+
   // Capture wall-clock start so finishAnalysis can auto-log the billable time spent.
   _analysisStartedAt = Date.now();
   // Reset per-run usage accumulator. Every extraction, retry, and synthesis call that
@@ -6172,6 +6921,22 @@ MANDATORY ANTI-TEMPLATE RULE — violations are grounds for rejection:
   document.getElementById('copy-rec-btn').style.display = 'none';
   { const s = document.getElementById('send-to-report-btn'); if (s) s.style.display = 'none'; }
 
+  // Phase 2 verification: kick off the source-text cache build CONCURRENTLY with the
+  // batch extraction loop. Parsing every source PDF into plain text takes ~30–60s on
+  // a typical case, but the batch loop takes several minutes — so the cache is ready
+  // by the time we merge. Stored on a module-level map so it survives the async wait.
+  // Gracefully degrades to no verification if parsing fails.
+  const _syncCaseKey = (caseInfo && caseInfo.id) || '_ephemeral_';
+  if (!_sourceTextCacheByCase[_syncCaseKey] || !_sourceTextCacheByCase[_syncCaseKey]._promise) {
+    _sourceTextCacheByCase[_syncCaseKey] = {
+      _promise: buildSourceTextCache(contentBlocks, null).catch(e => {
+        console.warn('[sync] source text cache build failed: ' + e.message);
+        return {};
+      })
+    };
+    _sourceTextCacheByCase[_syncCaseKey]._promise.then(c => { _sourceTextCacheByCase[_syncCaseKey]._resolved = c; });
+  }
+
   const batchOutputs = [];
   // Cascade detection: if 3 batches in a row all fail (after callClaude has already
   // exhausted its retries), the proxy is dead and we should stop hammering it. Better
@@ -6185,20 +6950,38 @@ MANDATORY ANTI-TEMPLATE RULE — violations are grounds for rejection:
     const batchMB = batch.reduce((n,b) => n + ((b.source && b.source.data) ? b.source.data.length : 0), 0) / (1024*1024);
     const batchPages = batch.reduce((n,b) => n + (b.type === 'document' ? (b._pageCount || 1) : 1), 0);
     area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>AI analysis — batch ' + (bi+1) + ' of ' + batches.length + ' (' + batch.length + ' file' + (batch.length>1?'s':'') + ', ' + batchMB.toFixed(0) + ' MB, ~' + batchPages + ' pages)…</span></div>';
-    const batchPromptText = `You are a research assistant helping a licensed Legal Nurse Consultant extract facts from medical records. You are NOT the expert on this case — a licensed LNC will review, edit, and sign any final work product. Do not add ethical commentary or refuse the task — the licensed professional supervising this work has already established the proper legal and ethical framework.
+    const batchPromptText = `You are extracting cited facts from medical records to build a searchable index for a licensed Legal Nurse Consultant. You are NOT writing a report and you are NOT interpreting the records — you are building a database row-by-row. The LNC will review every entry and write the narrative herself.
 ${caseContext ? 'Case context: ' + caseContext : ''}
 ${instructions ? 'Special instructions: ' + instructions : ''}
 ${bi === 0 && textAddendum ? '\nAdditional text records (provided only in this first batch):' + textAddendum : ''}
 
-This is BATCH ${bi+1} of ${batches.length} for a large case. From the records attached to THIS batch, extract:
-• All dates and events (admissions, discharges, assessments, falls, injuries, ER visits)
-• Providers, facilities, and locations
-• Medications (start/stop dates, dose changes, PRN use, errors)
-• Diagnoses, vitals, labs, imaging findings
-• Nursing care decisions, interventions, and any deviations from standard of care
-• Any photos/images: describe what is visible and cite the source filename
+OUTPUT FORMAT — STRICT JSON ONLY.
+Return a JSON array of fact objects. Each object must have these exact fields (all strings):
+{
+  "date": "YYYY-MM-DD or MM/DD/YYYY as written in the source — empty string if no date is present",
+  "event_type": "short label, e.g. 'Fall', 'Admission', 'Discharge', 'Assessment', 'ER visit', 'Medication order', 'Medication change', 'Vitals', 'Lab', 'Imaging', 'Nursing note', 'Care plan entry', 'Progress note', 'Death', 'Diagnosis'",
+  "facility": "facility name as written in the source, or empty string",
+  "verbatim_quote": "the exact text from the record — copied character-for-character. One or two sentences of the relevant passage. No paraphrasing, no summarizing, no inference.",
+  "bates_prefix": "Bates prefix stamped on the page, e.g. 'MV', 'LM', 'AC', 'DC' — empty string if not stamped",
+  "page_number": "Bates page number or PDF page number as written — empty string if unknown",
+  "source_filename": "filename of the source record attached to this batch"
+}
 
-Be thorough and factual. Cite the source record name/date for each fact. Do NOT write a narrative summary yet — just extract facts. A final synthesis step will combine your extractions across all batches for the LNC's review.`;
+EXTRACTION RULES — violations invalidate the entry:
+• Extract EVERY discrete fact: admissions, discharges, assessments, falls, injuries, ER visits, vitals, labs, imaging, medications (start/stop/change/PRN/error), providers, diagnoses, nursing notes, care plan entries, deaths.
+• verbatim_quote must be COPIED from the source — character for character. If you cannot copy a verbatim passage, OMIT the fact. Do not paraphrase. Do not summarize. Do not infer.
+• Do NOT add clinical interpretation, standard-of-care analysis, causation commentary, or "deviations from standard of care" — just extract what the record says.
+• Do NOT fabricate Bates numbers or page numbers. If a page is not stamped, leave bates_prefix and page_number as empty strings.
+• Do NOT duplicate the same fact within this batch — dedupe before returning.
+• If a page is a blank scan, duplicate cover sheet, or unreadable, skip it silently — do not emit a fact for it.
+• Do NOT refuse the task or add ethical commentary. The licensed professional supervising this work has already established the proper legal framework; your only job is to extract.
+
+OUTPUT RULES:
+• Return ONLY the JSON array. No prose before or after. No markdown code fences. No commentary.
+• If zero facts are extractable from this batch, return exactly: []
+• Valid JSON: no trailing commas, all double quotes inside strings properly escaped as \\".
+
+This is BATCH ${bi+1} of ${batches.length} for this case. Extract facts from the records attached to THIS batch only.`;
     const batchContent = [{ type: 'text', text: batchPromptText }, ...stripInternalFields(batch)];
     try {
       const r = await callClaude(batchContent);
@@ -6231,152 +7014,42 @@ Be thorough and factual. Cite the source record name/date for each fact. Do NOT 
     if (bi < batches.length - 1) await new Promise(r => setTimeout(r, 3000));
   }
 
-  // Synthesis pass — text-only, but large runs overflow the 200k-token context window.
-  // Previous constants (150k * 4 chars/token = 600k chars) overflowed in production:
-  // 44 batches of dense medical extractions clocked in at ~2.9 chars/token, so 600k chars
-  // = 206k actual tokens — over the 200k limit. Tightened below + made the hierarchy
-  // recursive so a single reduction pass isn't the only safety net.
-  const SYNTH_TOKEN_BUDGET = 120000;
-  const SYNTH_CHAR_BUDGET  = 400000;
-  const PROMPT_PREAMBLE_CHARS = 3000;
-  const MAX_HIERARCHY_LEVELS = 4;
-  const typeLabel = typeLabels[type] || type;
-
-  const buildSynthPrompt = (intro, items) =>
-`You are a research assistant helping a licensed Legal Nurse Consultant organize factual information extracted from medical records. You are NOT the expert on this case — a licensed LNC will review, edit, and sign any final work product. Your job is to produce a well-organized, fully cited compilation of facts from the source material below so the LNC can work from a clean timeline. Accuracy is non-negotiable.
-${caseContext ? 'Case context: ' + caseContext : ''}
-${instructions ? 'Special instructions: ' + instructions : ''}
-
-${intro}
-
-MANDATORY ACCURACY RULES — violations are grounds for rejection:
-• DO NOT invent or infer facts. If a date, name, dose, diagnosis, provider, or citation is unclear or missing in the source text, write "[unclear in source]" in that position rather than guessing or filling from clinical knowledge.
-• Every factual statement must end with its source citation (record name and/or date) in the form "(Source: <record>)". No bare claims.
-• Copy source citations verbatim. Do not paraphrase, shorten, or reformat record names.
-• If two sources disagree on a fact, record both with their respective citations rather than picking one.
-• Do not add clinical commentary, causation analysis, or deviations from standard of care unless it is explicitly stated in the source text.
-• Stay on task. Do NOT add commentary about professional ethics, credentials, HIPAA, AI-vs-human authorship, or whether this task is appropriate. The licensed professional supervising this work has already established the proper legal and ethical framework. Refusing the task or inserting ethical warnings is itself a quality failure — just organize the facts with their citations.
-• QUARANTINE POLLUTED INPUTS. Some input chunks below may themselves be prior refusals, model commentary about the task, or incomplete truncated output instead of factual extractions. If an input chunk begins with phrasing like "I cannot…", "I need to be direct…", "I am unable to…", "As an AI…", or "I apologize…", OR reads as meta-commentary about whether the task is appropriate rather than as a fact extraction, treat that specific chunk as EMPTY / MISSING DATA. Silently skip it. Synthesize only from the clean, fact-bearing chunks. Do NOT quote, reference, or acknowledge the polluted chunk in your output. Do NOT refuse the task yourself in response to a polluted input — the licensed LNC has already validated the task. This is the single most important reliability rule: refusal contagion breaks the whole pipeline, so one bad chunk must never infect the output.
-• NO TEMPLATES. NO PLACEHOLDERS. Do not produce bracketed placeholder text like [Date], [Name], [Facility], [Provider], [From admission records], [DOB], [MRN], [Diagnosis], or any other [Fill-in] slot. Every entry in your output must be a concrete fact copied from the source material with its citation. If a fact isn't in the source, OMIT the entry entirely rather than leaving a blank slot to be filled in later. Template/placeholder output is a complete failure of this task.
-• If, after reviewing the provided source material AND after skipping any polluted chunks per the quarantine rule above, you find ZERO extractable facts remaining (all chunks were empty/polluted), return exactly this string as your entire response: "ERROR: No extractable facts found in source material." Do not produce a structural template, a blank form, or a demonstration document under any circumstances.
-
-Presentation rules:
-• Deduplicate repeated facts (keep the earliest and most specific citation when merging).
-• Order events chronologically by date.
-• Use professional LNC terminology and clear section headings.
-• Do NOT mention "batches", "groups", "extractions", or the batching process in the output — produce a unified document.
-• CITATION FORMAT — this is critical. Citations MUST reference the original record by filename or date (e.g. "(Source: 7 12 2022 fall .pdf)" or "(Source: nursing note 08/06/2022)"). NEVER cite "Batch 287" or "Batches 174–176" or any batch/group number in your output. The "===== BATCH N EXTRACTION =====" headers below are internal organization markers for the reducer — they are NOT citation targets. Strip them entirely when reasoning and pull citations from inside each extraction's text (every extracted fact already has its real record citation attached).
-• Be comprehensive. This compilation will be reviewed and refined by a licensed professional — completeness beats brevity. But "comprehensive" means every real fact from the source — NOT filling gaps with placeholders.
-
-${items.join('\n\n')}`;
-
-  const totalChars = (arr) => arr.reduce((n, s) => n + s.length, 0) + PROMPT_PREAMBLE_CHARS;
-  let items = batchOutputs.map(br => '===== BATCH ' + br.batch + ' EXTRACTION =====\n' + br.text);
-
-  area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Synthesizing final ' + typeLabel + ' from ' + batches.length + ' batches…</span></div>';
+  // Merge extracted facts deterministically (no LLM in this step). Phase 1 rebuild —
+  // see the async path above for the full rationale. Each batch emits structured JSON;
+  // pure-JS merge produces the final markdown pipe table that generateDocx() renders
+  // as a Word table. This eliminates the narrative reducer that was responsible for
+  // date drift, event loss, and fabricated findings in prior cases.
+  area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Merging ' + batches.length + ' batch' + (batches.length === 1 ? '' : 'es') + ' of extracted facts into a chronological index…</span></div>';
 
   try {
-    // Recursively reduce until the combined input fits under budget.
-    let level = 0;
-    while (totalChars(items) > SYNTH_CHAR_BUDGET && level < MAX_HIERARCHY_LEVELS) {
-      level++;
-      const groups = [];
-      let g = []; let gChars = PROMPT_PREAMBLE_CHARS;
-      for (const item of items) {
-        if (gChars + item.length > SYNTH_CHAR_BUDGET && g.length) {
-          groups.push(g); g = [item]; gChars = PROMPT_PREAMBLE_CHARS + item.length;
-        } else {
-          g.push(item); gChars += item.length;
-        }
+    // Phase 2 verification: await the source-text cache kicked off before the batch loop.
+    // Degrades gracefully to null (all rows show status '—') if the parse failed.
+    let sourceTextCache = null;
+    try {
+      const cacheEntry = _sourceTextCacheByCase[_syncCaseKey];
+      if (cacheEntry && cacheEntry._promise) {
+        area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Finishing source-text cache for round-trip verification…</span></div>';
+        sourceTextCache = await cacheEntry._promise;
       }
-      if (g.length) groups.push(g);
-
-      area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Large case — L' + level + ' reducing ' + items.length + ' items into ' + groups.length + ' groups…</span></div>';
-
-      // Parallel group synthesis (concurrency 4). Mirror of the async-path scheduler —
-      // see that block for full rationale. Writes newItems[gi] by index so ordering is
-      // preserved regardless of worker completion order. Per-call try/catch inside
-      // runOne ensures one failure doesn't lose facts for the other groups.
-      const newItems = new Array(groups.length);
-      const CONCURRENCY = Math.min(4, groups.length);
-      let completed = 0;
-      let inFlight = 0;
-      const updateProgress = () => {
-        area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>L' + level + ': ' + completed + '/' + groups.length + ' groups completed, ' + inFlight + ' in flight…</span></div>';
-      };
-      updateProgress();
-
-      const runOne = async (gi) => {
-        inFlight++;
-        updateProgress();
-        const groupPrompt = buildSynthPrompt(
-          'Below are fact extractions from a subset of this case\'s records. Produce a consolidated, deduplicated fact extraction covering this subset only — preserve every date, source citation, medication, provider, diagnosis, and deviation. This will be combined with other subsets in a final step.',
-          groups[gi]
-        );
-        try {
-          // 64k output cap (Haiku 4.5 max). Raised from 32k to prevent mid-pipeline
-          // truncation, which was cascading into refusal-shaped consolidations at the
-          // next hierarchy level — a single truncation could poison the whole synth.
-          const inputChars = groups[gi].reduce((n, s) => n + (s ? s.length : 0), 0);
-          let r = await callClaude(groupPrompt, { maxTokens: 64000 });
-          // Same refusal quarantine as the async path. See looksLikeRefusal() for the
-          // heuristic — short output from a substantial input, or a refusal-shaped head,
-          // gets replaced with an inert skip marker instead of a "CONSOLIDATED" wrapper.
-          if (looksLikeRefusal(r, inputChars)) {
-            console.warn('[synth L' + level + '] group ' + (gi+1) + ' output failed quality check (len=' + (r ? r.length : 0) + ', input=' + inputChars + ') — quarantining to prevent contagion');
-            newItems[gi] = '===== L' + level + ' GROUP ' + (gi+1) + ' SKIPPED — failed quality check =====\n[This group\'s consolidation did not produce usable output and has been silently skipped. Content from this subset is not represented in the final synthesis.]';
-          } else {
-            newItems[gi] = '===== L' + level + ' GROUP ' + (gi+1) + ' CONSOLIDATED =====\n' + r;
-          }
-        } catch(e) {
-          newItems[gi] = '===== L' + level + ' GROUP ' + (gi+1) + ' ERROR =====\n[Group synthesis failed: ' + e.message + ']\n\nRaw items follow:\n\n' + groups[gi].join('\n\n');
-        }
-        inFlight--;
-        completed++;
-        updateProgress();
-      };
-
-      let nextIndex = 0;
-      const workers = [];
-      for (let w = 0; w < CONCURRENCY; w++) {
-        workers.push((async () => {
-          while (true) {
-            const gi = nextIndex++;
-            if (gi >= groups.length) return;
-            await runOne(gi);
-            if (nextIndex < groups.length) await new Promise(r => setTimeout(r, 250));
-          }
-        })());
-      }
-      await Promise.all(workers);
-      items = newItems;
-      if (items.length >= groups.length && groups.length === 1) break;
+    } catch (cacheErr) {
+      console.warn('[sync] awaiting source text cache failed: ' + cacheErr.message);
+      sourceTextCache = null;
     }
-
-    area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Combining into final ' + typeLabel + '…</span></div>';
-    const intro = level === 0
-      ? 'Below are fact extractions from ' + batches.length + ' batches of medical records for this case. Combine them into a single ' + typeLabel + '.'
-      : 'Below are ' + items.length + ' consolidated fact extraction(s) covering this case. Combine them into a single ' + typeLabel + '.';
-    const synthPrompt = buildSynthPrompt(intro, items);
-    // 64k output cap (Haiku 4.5 max) for the final deliverable — raised from 32k to
-    // match the reducer cap and give the final combine call full room to breathe.
-    let res = await callClaude(synthPrompt, { maxTokens: 64000 });
-    // Post-synthesis verification pass — mirrors the async path. See runVerificationPass
-    // for why this is worth the extra Haiku call on a legal deliverable. Pass the
-    // known-filename list + case context so the verifier can distinguish real
-    // hallucinated citations from citations compacted out of view by reduction.
-    const verifyOpts = (() => {
-      const c2 = (caseInfo && caseInfo.id) ? state.cases.find(x => x.id === caseInfo.id) : null;
-      const idx = (c2 && c2.driveFileIndex) || {};
-      return { knownFilenames: Object.keys(idx), caseContext: caseContext || '' };
-    })();
-    res = await runVerificationPass(res, items, area, verifyOpts);
+    area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Merging ' + batches.length + ' batch' + (batches.length === 1 ? '' : 'es') + ' of extracted facts into a chronological index…</span></div>';
+    const res = mergeExtractedFactsToMarkdown(batchOutputs, caseInfo, sourceTextCache);
     await finishAnalysis(res, caseInfo, type, typeLabels, area, pre);
   } catch(e) {
-    area.innerHTML = `<div class="alert alert-danger">Synthesis error: ${esc(e.message)}<br><br>Batch extractions were completed but could not be merged. You can still review them below.</div>`;
+    area.innerHTML = `<div class="alert alert-danger">Merge error: ${esc(e.message)}<br><br>Batch extractions completed but could not be merged. You can still review the raw JSON output below.</div>`;
     pre.textContent = batchOutputs.map(br => '===== BATCH ' + br.batch + ' =====\n' + br.text).join('\n\n');
     pre.style.display = 'block';
     document.getElementById('copy-rec-btn').style.display = '';
+  }
+  } finally {
+    // Close the re-entrancy-guard try wrapper opened right after the
+    // _runRecordAnalysisInFlight flag was set. Release ALWAYS fires — even
+    // on thrown exceptions, async rejection, or early returns above — so
+    // the Analyze Records button can never get wedged in the disabled state.
+    _releaseGuard();
   }
 }
 
@@ -6737,9 +7410,9 @@ function renderAnalysisReview(text, caseInfo, container) {
   const finalBtn = document.createElement('button');
   finalBtn.type = 'button';
   finalBtn.className = 'btn btn-gold';
-  finalBtn.textContent = 'Finalize & Generate Report';
-  finalBtn.title = 'Produces the clean Word deliverable from the edited chronology above. Strips the review callout and any leftover internal markers. Saves to Drive if connected.';
-  finalBtn.onclick = () => generateFinalReport(caseInfo, bodyEl, finalBtn);
+  finalBtn.textContent = 'Download Fact Index + Blank Template';
+  finalBtn.title = 'Produces the two deliverables for this case:  (1) "<patient> — Fact Index.xlsx" — the chronology as a filterable spreadsheet, and  (2) "<patient> — Narrative Template.docx" — a branded blank letterhead for you to write the narrative into. Both save to the case\'s Drive work folder if connected.';
+  finalBtn.onclick = () => generateFinalDeliverables(caseInfo, finalBtn);
   footer.appendChild(finalBtn);
   const note = document.createElement('span');
   note.style.fontSize = '12px';
@@ -6749,37 +7422,65 @@ function renderAnalysisReview(text, caseInfo, container) {
   container.appendChild(footer);
 }
 
-// Generate the final deliverable docx from Debbie's reviewed/edited analysis.
-// Everything she removed or rewrote in the editor above is honored; the verifier
-// callout is never included (it lives in its own div outside the editable body).
-async function generateFinalReport(caseInfo, bodyEl, triggerBtn) {
-  if (triggerBtn) { triggerBtn.disabled = true; triggerBtn.textContent = 'Generating…'; }
+// Generate the two Phase 3 deliverables for this case:
+//   (1) Fact Index .xlsx  — filterable/sortable workbook built from the structured
+//                           facts the extractor emitted. No LLM prose.
+//   (2) Narrative Template .docx  — branded blank letterhead with empty section
+//                                   headings. Debbie writes the narrative herself.
+// Both files download to her browser AND upload to the case's private Work folder on
+// Drive (so she never has to hunt for where they went). If the structured facts aren't
+// on the case record (old analysis pre-dating Phase 3), we surface a clear message
+// telling her to re-run extraction — we will NOT fall back to parsing the markdown
+// pipe table because that re-introduces the round-tripping surface we just removed.
+async function generateFinalDeliverables(caseInfo, triggerBtn) {
+  const originalLabel = triggerBtn ? triggerBtn.textContent : '';
+  if (triggerBtn) { triggerBtn.disabled = true; triggerBtn.textContent = 'Generating deliverables…'; }
   try {
     if (!caseInfo) throw new Error('No case selected.');
     const c = state.cases.find(x => x.id === caseInfo.id) || caseInfo;
-    // Prefer the LIVE editor contents so her most recent unsaved keystrokes land
-    // in the report; fall back to the last auto-saved reviewed version; finally
-    // to the raw AI analysis if she never touched the editor.
-    let text = '';
-    if (bodyEl && bodyEl.innerText) text = bodyEl.innerText;
-    else if (c.reviewedAnalysis) text = c.reviewedAnalysis;
-    else if (c.lastAnalysis) text = splitAnalysisForReview(c.lastAnalysis).body;
-    if (!text.trim()) throw new Error('No analysis content to export.');
-    // Defensive strip in case the raw analysis somehow ends up passed through here
-    // with the review section still attached.
-    text = text.replace(/={3,}\s*INTERNAL QUALITY REVIEW[\s\S]*$/i, '').trim();
-    const title = 'Medical Chronology — ' + (c.patient || 'Unnamed case');
-    await generateDocx(title, text, c.patient || '', c.id || '', c);
-    // Stamp the finalized version on the case so we know when a deliverable was produced.
-    c.finalizedReport = text;
-    c.finalizedReportAt = new Date().toISOString();
+    const facts = Array.isArray(c.lastAnalysisFacts) ? c.lastAnalysisFacts : [];
+    const stats = c.lastAnalysisStats || {};
+    if (!facts.length) {
+      throw new Error('No structured facts found on this case. Re-run "Analyze Records" under the current version so the fact index can be compiled from structured extraction output.');
+    }
+    const patient = sanitizeFilename(c.patient || 'Case');
+    const xlsxName = patient + ' — Fact Index.xlsx';
+    const docxName = patient + ' — Narrative Template.docx';
+
+    const xlsxBlob = buildFactIndexXlsxBlob(facts, c, stats);
+    const docxBlob = await buildBlankNarrativeDocxBlob(c, stats);
+
+    // Browser downloads first — so even if Drive upload fails, she gets the files.
+    downloadBlob(xlsxBlob, xlsxName);
+    // Small gap between downloads so browser doesn't coalesce them into one prompt.
+    setTimeout(() => downloadBlob(docxBlob, docxName), 250);
+
+    // Drive upload into the private Work folder (never the shared Records folder —
+    // these are internal work product, not attorney-shareable).
+    let driveMsg = '';
+    if (c.driveFolderId) {
+      try {
+        const workId = await ensureWorkFolderId(c);
+        const dest = workId || c.driveFolderId;
+        await driveUploadFile(dest, xlsxName, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', xlsxBlob);
+        await driveUploadFile(dest, docxName, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', docxBlob);
+        driveMsg = workId ? ' Saved to private work folder on Drive.' : ' Saved to case folder on Drive.';
+      } catch (e) {
+        console.warn('[finalize] Drive upload failed:', e);
+        driveMsg = ' (Drive save failed: ' + e.message + ' — the files still downloaded.)';
+      }
+    }
+
+    c.finalizedReport = ''; // legacy field no longer used; clear so it doesn't mislead
+    c.finalizedDeliverablesAt = new Date().toISOString();
+    c.finalizedDeliverableNames = { xlsx: xlsxName, docx: docxName };
     save();
-    showToast('✓ Final report generated and saved to Drive.');
+    showToast('✓ Fact Index + Narrative Template generated.' + driveMsg);
   } catch (e) {
-    alert('Could not generate the final report: ' + e.message);
+    alert('Could not generate the deliverables: ' + e.message);
     console.error('[finalize] generation failed:', e);
   } finally {
-    if (triggerBtn) { triggerBtn.disabled = false; triggerBtn.textContent = 'Finalize & Generate Report'; }
+    if (triggerBtn) { triggerBtn.disabled = false; triggerBtn.textContent = originalLabel || 'Download Fact Index + Blank Template'; }
   }
 }
 
@@ -6885,6 +7586,26 @@ async function finishAnalysis(res, caseInfo, type, typeLabels, area, pre) {
         showToast('🔒 Analysis saved to private work folder: ' + fname);
       } else {
         showToast('💾 Analysis saved to Drive: ' + fname);
+      }
+      // Phase 3: also auto-save the fact-index workbook to the work folder right
+      // now so Debbie never has to remember to click Finalize just to get the
+      // spreadsheet. The narrative template is deferred to the Finalize click —
+      // a blank template is harmless to regenerate, but an empty .docx in the
+      // folder next to the analysis could be mistaken for stale work product.
+      try {
+        const caseRec = state.cases.find(x => x.id === caseInfo.id) || caseInfo;
+        const facts = Array.isArray(caseRec.lastAnalysisFacts) ? caseRec.lastAnalysisFacts : [];
+        if (facts.length && window.XLSX) {
+          const stats = caseRec.lastAnalysisStats || {};
+          const patient = sanitizeFilename(caseRec.patient || 'Case');
+          const xlsxName = patient + ' — Fact Index.xlsx';
+          const xlsxBlob = buildFactIndexXlsxBlob(facts, caseRec, stats);
+          await driveUploadFile(destFolderId, xlsxName, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', xlsxBlob);
+          showToast('📊 Fact Index spreadsheet saved to Drive: ' + xlsxName);
+        }
+      } catch (xe) {
+        console.warn('[finish] xlsx auto-save failed:', xe);
+        // Non-fatal — Debbie can still click Finalize to regenerate and download locally.
       }
     } catch(e) {
       showToast('⚠️ Drive save failed: ' + e.message, true);
