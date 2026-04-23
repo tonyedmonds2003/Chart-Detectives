@@ -1188,7 +1188,7 @@ tr:hover td { background: var(--gray-50); }
 // Format: YYYY.MM.DD.N where N is the Nth change on that day (1-indexed).
 // APP_VERSION_LABEL is a human-readable caption shown on hover.
 // ============================================================================
-const APP_VERSION       = '2026.04.23.5';
+const APP_VERSION       = '2026.04.23.6';
 const APP_VERSION_LABEL = 'Apr 23, 2026 (x5) — Phase 6f.2 partial: OneDrive canonical-storage picker + dispatcher shipped. NEW UI on Case Manager page: second folder strip (☁️ icon) right below the Drive root strip — "Set OneDrive folder" prompts for a OneDrive folder share link, resolves it via msGraphGetShareItem (same plumbing proven on the attorney-import read path), and persists state.oneDriveRootDriveId / oneDriveRootFolderId / oneDriveRootFolderName. Adjacent "Use OneDrive as canonical" checkbox flips state.canonicalStorage between "gdrive" and "onedrive" — refuses to flip ON until a OneDrive folder is set (prevents silent dead-end); auto-flips OFF if the user clears the folder. Strip label shows "canonical" (gold) vs "standby" (gray) so Debbie can see at a glance which provider will claim the next case. MS_SCOPES now includes Files.ReadWrite.All (next interactive sign-in will reprompt consent — correct behavior). NEW functions: pickOneDriveRootFolder, clearOneDriveRootFolder, toggleCanonicalStorage, renderOneDriveRootStrip (all parallel to their Drive siblings), ensureCaseHierarchyOneDrive (creates {root}/{firm}/{attorney}/{case} + {root}/_Internal/{firm}/{attorney}/{case} via msGraphFindOrCreateFolder — same two-tree split as Drive, link-shared records via msGraphShareAnyoneReader, private work), and the key dispatcher ensureCaseCanonicalHierarchy(caseInfo) which reads state.canonicalStorage and routes to ensureCaseHierarchy OR ensureCaseHierarchyOneDrive, persisting provider-specific fields onto caseInfo (oneDriveDriveId/oneDriveItemId/oneDriveFolderWebUrl/oneDriveWorkDriveId/oneDriveWorkItemId OR the legacy driveFolderId/driveWorkFolderId). init() now calls renderOneDriveRootStrip alongside renderDriveRootStrip. DEFERRED within 6f.2: the 50+ existing call sites that read driveFolderId / driveWorkFolderId directly have NOT been rewritten to go through the dispatcher — that is Phase 6f.3. Flipping canonicalStorage to "onedrive" today will create OneDrive hierarchies for new cases on save, but the analysis / cache / DM-token paths still read Drive fields, so actual runs continue on Drive until 6f.3 lands. This is the safe intermediate state that unblocks Richards/Mimms re-run without destabilizing the Drive flow. Parse-check clean (491,345 bytes inline JS across 2 script blocks). Phase 6c + 6e (deep-link Fact Index rows + per-source yield telemetry) from x4 remain fully intact. 6d (periodOfCare date filter, requires schema addition) and 6f.3 (50-site provider-aware refactor) still deferred pending Tony\'s go-ahead.';
 
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
@@ -5664,6 +5664,134 @@ async function buildSourceTextCache(contentBlocks, area) {
 // verification gracefully degrades to status '—' on all rows — a re-run will rebuild.
 const _sourceTextCacheByCase = {};
 
+// Phase 6b follow-up: rebuild the source-text cache from Drive for a case that is
+// resuming from KV (resumeAsyncJobForCase) or re-running synthesis from cached
+// batch results (retrySynthesisForCase). When a browser reload drops the in-memory
+// contentBlocks, runAsyncRecordAnalysis's fresh-start cache kickoff never fires.
+// The three features that depend on the cache — round-trip verification, low-yield
+// flagging, and deep-link hyperlinks — silently degrade together. This was the
+// root cause of the Dottie Richards Fact Index landing with 7,758 rows but 0
+// verified and only 15 clickable links: the run was resumed after a refresh, so
+// the cache kickoff that the fresh-start path performs was bypassed.
+//
+// This helper walks the case's Drive records folder, downloads each PDF's bytes,
+// extracts full text via pdf.js, and registers it under BOTH the original filename
+// AND every chunk-title variant the chunker would have produced (read from the
+// processed-cache manifest). That covers single-chunk cases where the extractor
+// saw title="foo.pdf" AND multi-chunk cases where it saw
+// title="foo — pp. 1-500 of 1000.pdf" per slice.
+//
+// Cache shape matches runAsyncRecordAnalysis exactly: {_promise, _resolved} stored
+// on _sourceTextCacheByCase[caseKey]. Fire-and-forget — the verification step in
+// pollBatchAndFinish awaits the promise when it's ready (with the existing 15m
+// timeout as a safety net).
+async function rebuildSourceTextCacheFromDrive(caseInfo, area) {
+  if (!caseInfo || !caseInfo.id) return null;
+  const caseKey = caseInfo.id;
+  // Idempotence guard: if runAsyncRecordAnalysis already kicked off a cache this
+  // session, or a prior resume/retry already rebuilt it, don't start a second
+  // traversal. Two concurrent downloads of the same 4,000-page PDF would OOM the
+  // tab and would also race to write the same keys into the cache object.
+  if (_sourceTextCacheByCase[caseKey] && _sourceTextCacheByCase[caseKey]._promise) {
+    console.log('[resume-cache][' + caseKey + '] cache entry already present — skipping rebuild');
+    return _sourceTextCacheByCase[caseKey]._promise;
+  }
+  if (!caseInfo.driveFolderId) {
+    console.warn('[resume-cache][' + caseKey + '] case has no driveFolderId — cannot rebuild cache');
+    return null;
+  }
+  const seedPromise = (async () => {
+    const cache = {};
+    try {
+      if (!_driveToken) await driveSignIn(false);
+    } catch (e) {
+      console.warn('[resume-cache][' + caseKey + '] Drive sign-in failed: ' + e.message);
+      return cache;
+    }
+    // Walk records folder for every PDF. Non-PDF blocks (HEIC, images, text) can't
+    // be verified by substring search anyway — they were always status '—' even
+    // on fresh-start runs, so we skip them.
+    let flatFiles = [];
+    try {
+      const tree = await driveListFolderRecursive(caseInfo.driveFolderId, '');
+      flatFiles = flattenDriveTree(tree).filter(n =>
+        n && n.kind === 'file' && n.mimeType === 'application/pdf'
+      );
+    } catch (e) {
+      console.warn('[resume-cache][' + caseKey + '] records folder walk failed: ' + e.message);
+      return cache;
+    }
+    if (!flatFiles.length) {
+      console.warn('[resume-cache][' + caseKey + '] records folder had 0 PDFs');
+      return cache;
+    }
+    // Best-effort manifest load so we can reconstruct chunk-title variants the
+    // model saw at extraction time. If unavailable (legacy case, missing work
+    // folder, API error), we still register each PDF under its original filename
+    // — that covers single-chunk titles and lets the majority of facts verify.
+    let manifestEntries = null;
+    try {
+      if (caseInfo.driveWorkFolderId) {
+        const processedFolderId = await ensureProcessedFolder(caseInfo.driveWorkFolderId).catch(() => null);
+        if (processedFolderId) {
+          const manifest = await loadProcessedManifest(processedFolderId).catch(() => null);
+          manifestEntries = (manifest && manifest.entries) || null;
+        }
+      }
+    } catch (_e) { manifestEntries = null; }
+    // Sequential (not parallel) keeps memory bounded: pdf.js + Uint8Array for a
+    // 4,000-page PDF is several hundred MB in flight, and parallel traversal
+    // would reliably OOM Chrome on the Richards-class cases that actually need
+    // this rebuild path.
+    for (let i = 0; i < flatFiles.length; i++) {
+      const f = flatFiles[i];
+      if (area) {
+        try {
+          area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Rebuilding source-text index from Drive (' + (i + 1) + '/' + flatFiles.length + '): ' + esc(f.name) + '…</span></div>';
+        } catch (_) {}
+      }
+      try {
+        const blob = await driveGetFileBlob(f.id, 'application/pdf');
+        const buf = await blob.arrayBuffer();
+        const raw = await extractPdfFullText(new Uint8Array(buf));
+        const normalized = raw ? normalizeForMatch(raw) : null;
+        // Key 1: the bare filename — matches single-chunk title exactly.
+        cache[f.name] = normalized;
+        // Keys 2+: multi-chunk title variants. Same formula the chunker uses at
+        // lines ~7761 and ~7783: "{baseName} — pp. {S}-{E} of {T}.pdf". The
+        // verifier does substring matching, so registering the full PDF text
+        // under each chunk title is correct: every chunk's content is a substring
+        // of the full text, so facts extracted from any chunk verify.
+        const entry = manifestEntries && manifestEntries[f.id];
+        if (entry && entry.kind === 'pdfChunks' && Array.isArray(entry.chunks) && entry.chunks.length > 1) {
+          const baseName = f.name.replace(/\.pdf$/i, '');
+          for (const ck of entry.chunks) {
+            if (!ck || typeof ck.startPage !== 'number' || typeof ck.endPage !== 'number') continue;
+            const partTitle = baseName + ' — pp. ' + ck.startPage + '-' + ck.endPage + ' of ' + (ck.totalPages || '?') + '.pdf';
+            cache[partTitle] = normalized;
+          }
+        }
+      } catch (e) {
+        console.warn('[resume-cache][' + caseKey + '] ' + f.name + ' failed: ' + e.message);
+        // Leave an explicit null so the verifier reports '—' (skipped) rather
+        // than ⚠ on rows that cite this file — a download/parse failure is not
+        // evidence of a hallucination.
+        cache[f.name] = null;
+      }
+      // Yield so the UI stays responsive and Chrome can GC the previous PDF
+      // buffer before the next download lands.
+      await new Promise(r => setTimeout(r, 0));
+    }
+    const entryCount = Object.keys(cache).length;
+    const nonNullCount = Object.values(cache).filter(v => v && typeof v === 'string' && v.length > 0).length;
+    console.log('[resume-cache][' + caseKey + '] rebuilt — ' + entryCount + ' key(s), ' + nonNullCount + ' with extractable text');
+    return cache;
+  })();
+  _sourceTextCacheByCase[caseKey] = { _promise: seedPromise };
+  seedPromise.then(c => { _sourceTextCacheByCase[caseKey]._resolved = c; }).catch(() => {});
+  return seedPromise;
+}
+
 // ===== STRUCTURED JSON EXTRACTION + DETERMINISTIC MERGE =====
 // Phase 1 of the indexing-not-drafting rebuild. Each batch emits a JSON array of
 // extracted facts (date, event type, facility, verbatim quote, Bates, source file).
@@ -7414,6 +7542,15 @@ async function resumeAsyncJobForCase(caseInfo) {
   } else if (md.batch_requests) {
     console.warn(`[resume] job.metadata.batch_requests shape mismatch (got ${Array.isArray(md.batch_requests) ? md.batch_requests.length : typeof md.batch_requests}, expected ${md.num_batches}) — auto-retry disabled`);
   }
+  // Phase 6b follow-up: fire off a source-text cache rebuild from Drive. Without
+  // this, pollBatchAndFinish's verification step finds no cache kickoff, flips
+  // verificationRan=false, and every fact lands with status '—'. We intentionally
+  // do NOT await here — the verifier awaits the promise itself (with a 15-minute
+  // timeout), so extraction merging can start the moment batches resolve rather
+  // than blocking on a 4,000-page pdf.js run.
+  rebuildSourceTextCacheFromDrive(caseInfo, null).catch(e =>
+    console.warn('[resume] cache rebuild kickoff failed: ' + e.message)
+  );
   await pollBatchAndFinish({
     jobId: job.job_id,
     batchId: job.batch_id,
@@ -7477,6 +7614,15 @@ async function retrySynthesisForCase(caseInfo) {
   // from Anthropic's 29-day cached results, so this run only counts the synthesis calls.
   resetRunUsage();
   const typeLabels = { chronology: 'detailed medical chronology', summary: 'comprehensive narrative summary', gaps: 'analysis of care gaps and inconsistencies', providers: 'list of all providers, diagnoses, and medications', full: 'full comprehensive LNC analysis including chronology, summary, gaps, providers, and nursing care assessment' };
+  // Phase 6b follow-up: synthesis-only retries run WAY after the original
+  // extraction — usually hours or days later, in a fresh browser session —
+  // so contentBlocks are never in memory and the fresh-start cache kickoff is
+  // never going to fire. Without a rebuild, the retried synthesis lands with
+  // the same verificationRan=false degradation that sent Richards out with 0
+  // verified rows. Fire-and-forget (same reasoning as resumeAsyncJobForCase).
+  rebuildSourceTextCacheFromDrive(caseInfo, null).catch(e =>
+    console.warn('[retry-synth] cache rebuild kickoff failed: ' + e.message)
+  );
   await pollBatchAndFinish({
     jobId: job.job_id,
     batchId: job.batch_id,
