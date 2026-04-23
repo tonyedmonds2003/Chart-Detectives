@@ -1188,7 +1188,7 @@ tr:hover td { background: var(--gray-50); }
 // Format: YYYY.MM.DD.N where N is the Nth change on that day (1-indexed).
 // APP_VERSION_LABEL is a human-readable caption shown on hover.
 // ============================================================================
-const APP_VERSION       = '2026.04.23.8';
+const APP_VERSION       = '2026.04.23.9';
 const APP_VERSION_LABEL = 'Apr 23, 2026 (x5) — Phase 6f.2 partial: OneDrive canonical-storage picker + dispatcher shipped. NEW UI on Case Manager page: second folder strip (☁️ icon) right below the Drive root strip — "Set OneDrive folder" prompts for a OneDrive folder share link, resolves it via msGraphGetShareItem (same plumbing proven on the attorney-import read path), and persists state.oneDriveRootDriveId / oneDriveRootFolderId / oneDriveRootFolderName. Adjacent "Use OneDrive as canonical" checkbox flips state.canonicalStorage between "gdrive" and "onedrive" — refuses to flip ON until a OneDrive folder is set (prevents silent dead-end); auto-flips OFF if the user clears the folder. Strip label shows "canonical" (gold) vs "standby" (gray) so Debbie can see at a glance which provider will claim the next case. MS_SCOPES now includes Files.ReadWrite.All (next interactive sign-in will reprompt consent — correct behavior). NEW functions: pickOneDriveRootFolder, clearOneDriveRootFolder, toggleCanonicalStorage, renderOneDriveRootStrip (all parallel to their Drive siblings), ensureCaseHierarchyOneDrive (creates {root}/{firm}/{attorney}/{case} + {root}/_Internal/{firm}/{attorney}/{case} via msGraphFindOrCreateFolder — same two-tree split as Drive, link-shared records via msGraphShareAnyoneReader, private work), and the key dispatcher ensureCaseCanonicalHierarchy(caseInfo) which reads state.canonicalStorage and routes to ensureCaseHierarchy OR ensureCaseHierarchyOneDrive, persisting provider-specific fields onto caseInfo (oneDriveDriveId/oneDriveItemId/oneDriveFolderWebUrl/oneDriveWorkDriveId/oneDriveWorkItemId OR the legacy driveFolderId/driveWorkFolderId). init() now calls renderOneDriveRootStrip alongside renderDriveRootStrip. DEFERRED within 6f.2: the 50+ existing call sites that read driveFolderId / driveWorkFolderId directly have NOT been rewritten to go through the dispatcher — that is Phase 6f.3. Flipping canonicalStorage to "onedrive" today will create OneDrive hierarchies for new cases on save, but the analysis / cache / DM-token paths still read Drive fields, so actual runs continue on Drive until 6f.3 lands. This is the safe intermediate state that unblocks Richards/Mimms re-run without destabilizing the Drive flow. Parse-check clean (491,345 bytes inline JS across 2 script blocks). Phase 6c + 6e (deep-link Fact Index rows + per-source yield telemetry) from x4 remain fully intact. 6d (periodOfCare date filter, requires schema addition) and 6f.3 (50-site provider-aware refactor) still deferred pending Tony\'s go-ahead.';
 
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
@@ -6304,6 +6304,20 @@ function _buildFactIndexHyperlink(entry, pageNumber) {
       if (!isFinite(page) || page < 1) page = null;
     }
   }
+  // Phase 6c follow-up: when `entry` points at a chunk (not the full source PDF),
+  // translate the absolute page number from the fact index into a page number
+  // within the chunk. E.g. row cites p.855 of a 1111-page PDF; chunk spans
+  // pp.841-875 — the chunk's own page 15 is what Drive's viewer needs. If the
+  // cited page falls outside the chunk's range (shouldn't happen — the model
+  // only saw pages inside the chunk — but guard anyway), drop the fragment so
+  // the chunk at least opens at page 1 instead of pointing at nothing.
+  if (page && typeof entry.startPage === 'number' && typeof entry.endPage === 'number') {
+    if (page >= entry.startPage && page <= entry.endPage) {
+      page = page - entry.startPage + 1;
+    } else {
+      page = null;
+    }
+  }
   const pageFrag = page ? ('#page=' + page) : '';
   if (prov === 'onedrive') {
     if (entry.webUrl) return entry.webUrl + pageFrag;
@@ -6987,30 +7001,44 @@ async function _augmentMapWithProcessedPages(caseInfo, map, provider) {
       // Phase 6c follow-up: register chunk-title variants so the workbook
       // builder can resolve `urlMap[source_filename]` when the model cited a
       // chunk (e.g. "Foo — pp. 36-70 of 1111.pdf") rather than the original PDF
-      // (e.g. "Foo.pdf"). The chunk files themselves don't exist in Drive —
-      // they're ephemeral slices created during upload — so every chunk title
-      // resolves to the SAME Drive file id as the original PDF, and the #page
-      // fragment in _buildFactIndexHyperlink takes Debbie to the right page
-      // inside that PDF. Mirrors the same expansion rebuildSourceTextCacheFromDrive
+      // (e.g. "Foo.pdf"). Mirrors the same expansion rebuildSourceTextCacheFromDrive
       // applies to the source-text cache (see lines ~5765-5773).
       //
+      // CRITICAL: we point each chunk-title entry at the CHUNK file's Drive id
+      // (ck.id), NOT the full source PDF's id. Reason: Drive's in-browser PDF
+      // viewer refuses to preview files over ~100MB ("This file is too large
+      // to preview — Download"). Source PDFs routinely exceed that (4,000-page
+      // hospital records), but each 35-page chunk sits comfortably under it.
+      // Since chunks live as real files in the _processed folder (uploaded by
+      // uploadPdfChunk), linking to ck.id gives Debbie a previewable viewer.
+      //
+      // Because the chunk has its own 1..N page numbering, we stash startPage
+      // and endPage on the entry so _buildFactIndexHyperlink can translate the
+      // absolute page (e.g. 855) from the fact row into the chunk's own page
+      // (855 - 841 + 1 = 15 for a chunk spanning pp.841-875).
+      //
       // Single-chunk files (length <= 1) already match the original name that's
-      // already in the map, so skip them to keep the map small.
+      // already in the map, so skip them. Small single-chunk files are under
+      // the preview ceiling anyway.
       if (processed.kind === 'pdfChunks' && Array.isArray(processed.chunks) && processed.chunks.length > 1) {
         const baseName = name.replace(/\.pdf$/i, '');
         for (const ck of processed.chunks) {
           if (!ck || typeof ck.startPage !== 'number' || typeof ck.endPage !== 'number') continue;
+          // Need the chunk's own Drive id — without it, we can't build a
+          // preview URL pointing at the chunk. (Legacy manifests pre-dating
+          // the chunk-id stamp fall back to the source id, which at least
+          // preserves the pre-fix behavior.)
+          const chunkFileId = ck.id || entry.id;
           const partTitle = baseName + ' — pp. ' + ck.startPage + '-' + ck.endPage + ' of ' + (ck.totalPages || '?') + '.pdf';
           if (map[partTitle]) continue; // don't overwrite a real Drive file with the same name
-          // Re-emit the original entry under the chunk title. Same id/webUrl —
-          // so _buildFactIndexHyperlink produces the same preview URL, just
-          // anchored to the cited page from the Fact Index row.
           map[partTitle] = {
             provider: entry.provider,
-            id: entry.id,
+            id: chunkFileId,
             driveId: entry.driveId,
-            webUrl: entry.webUrl,
-            pages: entry.pages
+            webUrl: null,          // chunks on Drive use id-based /preview; no webUrl equivalent
+            pages: (ck.endPage - ck.startPage + 1),
+            startPage: ck.startPage,
+            endPage: ck.endPage
           };
           chunkKeysAdded++;
         }
