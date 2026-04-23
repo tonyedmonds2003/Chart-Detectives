@@ -432,6 +432,19 @@ tr:hover td { background: var(--gray-50); }
     <button class="btn btn-outline btn-sm" onclick="pickDriveRootFolder()">Set root folder</button>
     <button class="btn btn-outline btn-sm" id="drive-root-clear-btn" onclick="clearDriveRootFolder()" style="display:none;">Clear</button>
   </div>
+  <!-- Phase 6f.2: OneDrive root folder strip. When canonicalStorage='onedrive' and this is set,
+       new cases create their Firm/Attorney/Case hierarchy in Debbie's OneDrive instead of Drive.
+       Drive stays as attorney-share ingest target; OneDrive is Debbie's canonical storage. -->
+  <div id="onedrive-root-strip" style="display:flex;align-items:center;gap:10px;padding:10px 14px;margin-bottom:14px;background:var(--gray-50);border:1px solid var(--gray-100);border-radius:var(--radius-sm);font-size:13px;color:var(--gray-500);">
+    <span style="flex-shrink:0;">☁️</span>
+    <span id="onedrive-root-label" style="flex:1;">OneDrive canonical folder: <b>not set</b> — canonical storage will stay on Google Drive.</span>
+    <button class="btn btn-outline btn-sm" onclick="pickOneDriveRootFolder()">Set OneDrive folder</button>
+    <button class="btn btn-outline btn-sm" id="onedrive-root-clear-btn" onclick="clearOneDriveRootFolder()" style="display:none;">Clear</button>
+    <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--gray-500);margin-left:8px;white-space:nowrap;">
+      <input type="checkbox" id="canonical-storage-toggle" onchange="toggleCanonicalStorage(this.checked)" style="margin:0;">
+      <span>Use OneDrive as canonical</span>
+    </label>
+  </div>
   <div class="tabs">
     <button class="tab active" onclick="filterCases('all', this)">All Cases</button>
     <button class="tab" onclick="filterCases('active', this)">Active</button>
@@ -1175,8 +1188,8 @@ tr:hover td { background: var(--gray-50); }
 // Format: YYYY.MM.DD.N where N is the Nth change on that day (1-indexed).
 // APP_VERSION_LABEL is a human-readable caption shown on hover.
 // ============================================================================
-const APP_VERSION       = '2026.04.22.17';
-const APP_VERSION_LABEL = 'Apr 22, 2026 (x17) — Phase 4 rebuild: derived worklist sheets inside the Fact Index workbook. The xlsx now contains — in addition to the master Fact Index and Summary sheets — seven topic-filtered views (Falls, Skin & Wounds, Risk Assessments, Care Plans, Medications, Hospitalizations, Death & End-of-Life) plus a Documentation Checklist sheet. Each worklist sheet is a deterministic keyword filter over the fact rows: a row appears on the Falls sheet if its event_type or verbatim_quote contains "fall", "fell", "found on floor", etc. — nothing else. Zero LLM involvement in the filtering; every keyword list is visible at the top of its sheet so Debbie can audit. Sheets with zero matches stay in the workbook with a visible "no matches found" note — a gap is information too. The Documentation Checklist inverts the logic: it lists 20 expected documentation items (admission H&P, post-fall neuro checks, Braden, wound measurements, death note, etc.) with a count of matching fact-index rows and the first few row numbers for drill-down. Items with zero matches surface as "— NOT FOUND" so gaps are visible at a glance without Debbie having to remember 20 items from memory. Every worklist row includes an "Orig Row" column pointing back at the master Fact Index. Phase 1 structured extraction, Phase 2 round-trip verification, and Phase 3 xlsx+template deliverables remain fully intact.';
+const APP_VERSION       = '2026.04.23.5';
+const APP_VERSION_LABEL = 'Apr 23, 2026 (x5) — Phase 6f.2 partial: OneDrive canonical-storage picker + dispatcher shipped. NEW UI on Case Manager page: second folder strip (☁️ icon) right below the Drive root strip — "Set OneDrive folder" prompts for a OneDrive folder share link, resolves it via msGraphGetShareItem (same plumbing proven on the attorney-import read path), and persists state.oneDriveRootDriveId / oneDriveRootFolderId / oneDriveRootFolderName. Adjacent "Use OneDrive as canonical" checkbox flips state.canonicalStorage between "gdrive" and "onedrive" — refuses to flip ON until a OneDrive folder is set (prevents silent dead-end); auto-flips OFF if the user clears the folder. Strip label shows "canonical" (gold) vs "standby" (gray) so Debbie can see at a glance which provider will claim the next case. MS_SCOPES now includes Files.ReadWrite.All (next interactive sign-in will reprompt consent — correct behavior). NEW functions: pickOneDriveRootFolder, clearOneDriveRootFolder, toggleCanonicalStorage, renderOneDriveRootStrip (all parallel to their Drive siblings), ensureCaseHierarchyOneDrive (creates {root}/{firm}/{attorney}/{case} + {root}/_Internal/{firm}/{attorney}/{case} via msGraphFindOrCreateFolder — same two-tree split as Drive, link-shared records via msGraphShareAnyoneReader, private work), and the key dispatcher ensureCaseCanonicalHierarchy(caseInfo) which reads state.canonicalStorage and routes to ensureCaseHierarchy OR ensureCaseHierarchyOneDrive, persisting provider-specific fields onto caseInfo (oneDriveDriveId/oneDriveItemId/oneDriveFolderWebUrl/oneDriveWorkDriveId/oneDriveWorkItemId OR the legacy driveFolderId/driveWorkFolderId). init() now calls renderOneDriveRootStrip alongside renderDriveRootStrip. DEFERRED within 6f.2: the 50+ existing call sites that read driveFolderId / driveWorkFolderId directly have NOT been rewritten to go through the dispatcher — that is Phase 6f.3. Flipping canonicalStorage to "onedrive" today will create OneDrive hierarchies for new cases on save, but the analysis / cache / DM-token paths still read Drive fields, so actual runs continue on Drive until 6f.3 lands. This is the safe intermediate state that unblocks Richards/Mimms re-run without destabilizing the Drive flow. Parse-check clean (491,345 bytes inline JS across 2 script blocks). Phase 6c + 6e (deep-link Fact Index rows + per-source yield telemetry) from x4 remain fully intact. 6d (periodOfCare date filter, requires schema addition) and 6f.3 (50-site provider-aware refactor) still deferred pending Tony\'s go-ahead.';
 
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
 
@@ -1333,7 +1346,13 @@ let _pickerLoaded = false;    // google.picker module readiness
 // accounts can sign in, since an attorney could be on either.
 const MS_CLIENT_ID = '7fa7074a-c1b9-474e-a362-ddba1bfbefe7';
 const MS_AUTHORITY = 'https://login.microsoftonline.com/common';
-const MS_SCOPES    = ['Files.Read.All', 'Sites.Read.All'];
+// Files.ReadWrite.All (Phase 6f.2) enables create/upload/move into Debbie's
+// OneDrive when OneDrive is the canonical storage. Read-only scopes stay for
+// attorney-link imports (where Debbie only needs to read from a link). Adding
+// a scope triggers MSAL consent on next interactive sign-in; silent token
+// acquisition from an old session cached with only Read scopes will force a
+// fresh interactive prompt, which is the correct behavior.
+const MS_SCOPES    = ['Files.Read.All', 'Files.ReadWrite.All', 'Sites.Read.All'];
 let _msalInstance = null;     // lazily initialized MSAL PublicClientApplication
 let _msToken      = null;     // last access token (kept for quick reuse; MSAL caches it too)
 
@@ -1753,6 +1772,346 @@ async function msGraphDownloadFile(driveId, itemId) {
     throw new Error('Graph download failed (' + res.status + '): ' + body.slice(0, 300));
   }
   return res.blob();
+}
+
+// ============================================================================
+// Phase 6f.1 — Microsoft Graph WRITE helpers
+// ============================================================================
+// These parallel the driveUploadFile / driveCreateFolder / driveShareAnyoneReader
+// family of functions so a case-creation flow can write to OneDrive the same
+// way it already writes to Google Drive. They are defined here but NOT wired
+// into any call site yet — Phase 6f.2 is where case creation starts branching
+// on state.canonicalStorage. Phase 6f.1 is scaffolding only.
+//
+// IMPORTANT: the write endpoints require the Files.ReadWrite.All scope, which
+// is NOT in the current MS_SCOPES array. The current scope is read-only. When
+// 6f.2 wires these helpers, MS_SCOPES needs to be updated and Debbie will be
+// prompted to re-consent on her next sign-in. Until then, calling any of the
+// write helpers below will yield a 403 from Graph — that's expected, and the
+// redirect-to-consent path in msGetToken will catch it.
+//
+// All helpers follow the same pattern as msGraphDownloadFile: fetch a token,
+// hit the REST endpoint, throw on non-2xx with a useful body snippet.
+
+// Resolve the user's personal OneDrive (their "me" drive). Returns the full
+// drive record — callers usually only need `.id`, which is the {drive-id}
+// path segment every other Graph write call needs.
+async function msGraphGetUserDrive() {
+  const token = await msGetToken();
+  const res = await fetch('https://graph.microsoft.com/v1.0/me/drive?$select=id,name,driveType,owner', {
+    headers: { Authorization: 'Bearer ' + token }
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error('Graph /me/drive failed (' + res.status + '): ' + body.slice(0, 300));
+  }
+  return res.json();
+}
+
+// Look up a single Graph drive item's metadata. Parallels driveGetFileMeta —
+// used for cache-freshness checks (size + lastModifiedDateTime) without having
+// to re-download the file content.
+async function msGraphGetItemMeta(driveId, itemId) {
+  const token = await msGetToken();
+  const url = 'https://graph.microsoft.com/v1.0/drives/' + driveId + '/items/' + itemId +
+              '?$select=id,name,folder,file,size,lastModifiedDateTime,parentReference,webUrl';
+  const res = await fetch(url, { headers: { Authorization: 'Bearer ' + token } });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error('Graph item meta failed (' + res.status + '): ' + body.slice(0, 300));
+  }
+  return res.json();
+}
+
+// Create a folder inside a parent Graph drive item. Parallels driveCreateFolder.
+// The body shape { name, folder: {}, "@microsoft.graph.conflictBehavior": "fail" }
+// is Graph's "fail if a same-named child already exists" — we prefer fail here
+// so msGraphFindOrCreateFolder can distinguish "created" from "already existed"
+// cleanly, rather than Graph silently renaming our folder to "Foo 1".
+async function msGraphCreateFolder(driveId, parentItemId, name) {
+  const token = await msGetToken();
+  const url = 'https://graph.microsoft.com/v1.0/drives/' + driveId + '/items/' + parentItemId + '/children';
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: name,
+      folder: {},
+      '@microsoft.graph.conflictBehavior': 'fail'
+    })
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error('Graph folder create failed (' + res.status + '): ' + body.slice(0, 300));
+  }
+  return res.json();
+}
+
+// Find a child folder by name inside a parent, creating it if missing.
+// Parallels driveFindOrCreateFolder with the same case-insensitive / trimmed
+// matching rule. Returns { id, name, webUrl } for easy consumption by the
+// case-creation flow.
+//
+// Graph doesn't support $filter on name= in the same way Google Drive's q=
+// does — it's pickier about indexed properties. So instead of a server-side
+// filter, we list the immediate children of the parent (already paginated by
+// msGraphListChildren) and do the case-insensitive comparison client-side.
+// For typical case-folder parents (tens of children, not thousands) this is
+// fast and avoids Graph's $filter quirks.
+async function msGraphFindOrCreateFolder(driveId, parentItemId, name) {
+  const target = (name || '').trim();
+  if (!target) throw new Error('Folder name is required.');
+  const children = await msGraphListChildren(driveId, parentItemId);
+  const hit = children.find(c => c.folder && (c.name || '').trim().toLowerCase() === target.toLowerCase());
+  if (hit) return { id: hit.id, name: hit.name, webUrl: hit.webUrl || null };
+  const created = await msGraphCreateFolder(driveId, parentItemId, target);
+  return { id: created.id, name: created.name, webUrl: created.webUrl || null };
+}
+
+// Upload a file to Graph. Mirrors driveUploadFile. Automatically chooses
+// between "simple upload" (PUT /content, up to 250 MiB per Graph docs but
+// 4 MiB is the documented safe limit for raw PUT without an upload session)
+// and "upload session" (chunked, for larger files). We use 4 MiB as the
+// cutoff to stay inside the simple-upload happy path.
+//
+// filename is positional under parentItemId — Graph wants the *target* name
+// in the URL segment ("{filename}:/content"). The ":" syntax separates the
+// path-under-parent from the action segment.
+const _MS_GRAPH_SIMPLE_UPLOAD_MAX = 4 * 1024 * 1024; // 4 MiB
+const _MS_GRAPH_SESSION_CHUNK     = 5 * 1024 * 1024; // 5 MiB per chunk (must be multiple of 320 KiB)
+
+async function msGraphUploadFile(driveId, parentItemId, filename, mime, blobOrText) {
+  const blob = (typeof blobOrText === 'string') ? new Blob([blobOrText], { type: mime || 'text/plain' }) : blobOrText;
+  const size = blob.size;
+  if (size <= _MS_GRAPH_SIMPLE_UPLOAD_MAX) {
+    return _msGraphUploadSimple(driveId, parentItemId, filename, mime, blob);
+  }
+  return _msGraphUploadSession(driveId, parentItemId, filename, mime, blob);
+}
+
+// Small-file path: single PUT of the raw bytes.
+async function _msGraphUploadSimple(driveId, parentItemId, filename, mime, blob) {
+  const token = await msGetToken();
+  // Graph's path-under-parent syntax: /items/{parent-id}:/{filename}:/content
+  // The filename must be URL-encoded (handles spaces, unicode, etc.).
+  const encName = encodeURIComponent(filename);
+  const url = 'https://graph.microsoft.com/v1.0/drives/' + driveId +
+              '/items/' + parentItemId + ':/' + encName + ':/content' +
+              // replace if a same-named file already exists — matches the
+              // "last write wins" semantics driveUploadFile has.
+              '?@microsoft.graph.conflictBehavior=replace';
+  const res = await fetch(url, {
+    method: 'PUT',
+    headers: {
+      Authorization: 'Bearer ' + token,
+      'Content-Type': mime || 'application/octet-stream'
+    },
+    body: blob
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error('Graph simple upload failed (' + res.status + '): ' + body.slice(0, 300));
+  }
+  return res.json();
+}
+
+// Large-file path: createUploadSession, then PUT each chunk with a
+// Content-Range header. Graph returns 202 Accepted for in-progress chunks
+// and 200/201 for the final chunk with the completed driveItem.
+async function _msGraphUploadSession(driveId, parentItemId, filename, mime, blob) {
+  const token = await msGetToken();
+  const encName = encodeURIComponent(filename);
+  const createUrl = 'https://graph.microsoft.com/v1.0/drives/' + driveId +
+                    '/items/' + parentItemId + ':/' + encName + ':/createUploadSession';
+  const createRes = await fetch(createUrl, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      item: {
+        '@microsoft.graph.conflictBehavior': 'replace',
+        name: filename
+      }
+    })
+  });
+  if (!createRes.ok) {
+    const body = await createRes.text().catch(() => '');
+    throw new Error('Graph upload session create failed (' + createRes.status + '): ' + body.slice(0, 300));
+  }
+  const session = await createRes.json();
+  const uploadUrl = session.uploadUrl;
+  if (!uploadUrl) throw new Error('Graph upload session returned no uploadUrl');
+
+  const total = blob.size;
+  let offset = 0;
+  let lastJson = null;
+  while (offset < total) {
+    const end = Math.min(offset + _MS_GRAPH_SESSION_CHUNK, total);
+    const chunk = blob.slice(offset, end);
+    // Content-Range: bytes {start}-{end-1}/{total}  — Graph's required format.
+    const range = 'bytes ' + offset + '-' + (end - 1) + '/' + total;
+    // NOTE: upload-session chunk PUTs do NOT use a Bearer token — the
+    // uploadUrl is pre-signed and self-authenticating. Adding Authorization
+    // here causes Graph to return 401. This is a common footgun.
+    const chunkRes = await fetch(uploadUrl, {
+      method: 'PUT',
+      headers: {
+        'Content-Length': String(end - offset),
+        'Content-Range': range
+      },
+      body: chunk
+    });
+    if (!chunkRes.ok && chunkRes.status !== 202) {
+      const body = await chunkRes.text().catch(() => '');
+      throw new Error('Graph chunk upload failed (' + chunkRes.status + '): ' + body.slice(0, 300));
+    }
+    // 202 = accepted, more chunks expected. 200/201 = done, body is the final
+    // driveItem we want to return to the caller.
+    if (chunkRes.status === 200 || chunkRes.status === 201) {
+      lastJson = await chunkRes.json();
+    }
+    offset = end;
+  }
+  if (!lastJson) {
+    // Edge case: final chunk returned 202 instead of 200/201 (shouldn't happen
+    // if Content-Range adds up, but defensive). Fetch the item metadata by
+    // name from the parent to find the id we just uploaded.
+    const kids = await msGraphListChildren(driveId, parentItemId);
+    const hit = kids.find(c => c.name === filename);
+    if (hit) return hit;
+    throw new Error('Graph upload session finished without a final driveItem.');
+  }
+  return lastJson;
+}
+
+// Update an existing Graph item's content in place (same id, new bytes).
+// Parallels driveUpdateFileContent. Uses the same simple PUT path — only
+// makes sense for small files (manifest JSONs, cache indexes). For large
+// content rewrites, upload as a new file and move/replace.
+async function msGraphUpdateFileContent(driveId, itemId, mime, blobOrText) {
+  const token = await msGetToken();
+  const blob = (typeof blobOrText === 'string') ? new Blob([blobOrText], { type: mime || 'text/plain' }) : blobOrText;
+  const url = 'https://graph.microsoft.com/v1.0/drives/' + driveId + '/items/' + itemId + '/content';
+  const res = await fetch(url, {
+    method: 'PUT',
+    headers: {
+      Authorization: 'Bearer ' + token,
+      'Content-Type': mime || 'application/octet-stream'
+    },
+    body: blob
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error('Graph file content update failed (' + res.status + '): ' + body.slice(0, 300));
+  }
+  return res.json();
+}
+
+// Move an item to a new parent folder. Parallels driveMoveFile. Graph uses
+// PATCH on the item with a parentReference pointing at the new folder.
+async function msGraphMoveItem(driveId, itemId, newParentItemId) {
+  const token = await msGetToken();
+  const url = 'https://graph.microsoft.com/v1.0/drives/' + driveId + '/items/' + itemId;
+  const res = await fetch(url, {
+    method: 'PATCH',
+    headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      parentReference: { id: newParentItemId }
+    })
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error('Graph move failed (' + res.status + '): ' + body.slice(0, 300));
+  }
+  return res.json();
+}
+
+// Create (or fetch the existing) Anyone-with-link view permission on a Graph
+// item. Parallels driveShareAnyoneReader in semantics — the returned link is
+// the one we embed in [DM######] hyperlinks inside the .docx report so
+// attorneys/paralegals can click through without signing into OneDrive.
+//
+// Graph's createLink action is idempotent-ish: calling it twice with the same
+// type+scope returns the same link, so we don't need the "check existing
+// permissions first" dance driveShareAnyoneReader does. Still, we swallow
+// non-fatal errors (some personal 365 tenants disable anonymous sharing) and
+// surface a structured result so the caller can decide whether to fail the
+// case-creation flow or fall back to an authenticated webUrl.
+async function msGraphShareAnyoneReader(driveId, itemId) {
+  if (!driveId || !itemId) return { ok: false, reason: 'missing driveId/itemId' };
+  try {
+    const token = await msGetToken();
+    const url = 'https://graph.microsoft.com/v1.0/drives/' + driveId + '/items/' + itemId + '/createLink';
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: 'view',        // view | edit | embed
+        scope: 'anonymous'   // anonymous | organization
+      })
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      console.warn('[graph] createLink failed for', itemId, res.status, body);
+      return { ok: false, status: res.status, body };
+    }
+    const data = await res.json();
+    // Response shape: { id, roles, link: { type, scope, webUrl, ... }, ... }
+    const webUrl = (data && data.link && data.link.webUrl) || null;
+    return { ok: true, permission: data, webUrl };
+  } catch (e) {
+    console.warn('[graph] createLink threw:', e);
+    return { ok: false, error: String(e && e.message || e) };
+  }
+}
+
+// Cross-cloud mirror: walk a Google Drive tree and push each file into a
+// Microsoft Graph folder, preserving subfolder structure. Opposite direction
+// of mirrorGraphTreeToGdrive. This is the key helper for the 6f canonical
+// swap: attorneys continue to send records via Google Drive links (the
+// inbound path stays Drive), but Debbie's organized case hierarchy lives on
+// OneDrive, so we need to copy Drive-tree → Graph-tree on import.
+//
+// Returns the same manifest shape mirrorGraphTreeToGdrive does so the caller
+// persists a consistent record regardless of which direction we mirrored.
+async function mirrorDriveTreeToGraph(sourceTree, destDriveId, destParentItemId, progressCb) {
+  const allFiles = flattenDriveTree(sourceTree);
+  const total = allFiles.length;
+  let done = 0;
+  const copies = [];
+
+  async function walk(nodes, destFolderId, relPath) {
+    for (const n of nodes) {
+      if (n.kind === 'folder') {
+        const sub = await msGraphFindOrCreateFolder(destDriveId, destFolderId, n.name);
+        await walk(n.children || [], sub.id, relPath ? (relPath + '/' + n.name) : n.name);
+      } else {
+        if (progressCb) { try { progressCb(done, total, n.name); } catch(_e) {} }
+        // Source is a Google Drive file — download bytes, then push to Graph.
+        // driveGetFileBlob handles the Drive-specific auth + export-for-Google-
+        // Docs-mime-types; we just hand its Blob to msGraphUploadFile.
+        const blob = await driveGetFileBlob(n.id);
+        const mime = n.mimeType || blob.type || 'application/octet-stream';
+        const up = await msGraphUploadFile(destDriveId, destFolderId, n.name, mime, blob);
+        copies.push({
+          sourceId: n.id,
+          mirroredId: up.id,
+          driveId: destDriveId,
+          name: up.name || n.name,
+          relPath: relPath || '',
+          size: (typeof up.size !== 'undefined') ? up.size : n.size,
+          modifiedTime: up.lastModifiedDateTime || n.modifiedTime,
+          // Graph's quickXorHash serves the same purpose md5Checksum does on
+          // Drive — it's what refresh-diff will compare against next time.
+          md5Checksum: (up.file && up.file.hashes && (up.file.hashes.quickXorHash || up.file.hashes.sha1Hash)) || null
+        });
+        done += 1;
+        if (progressCb) { try { progressCb(done, total, n.name); } catch(_e) {} }
+      }
+    }
+  }
+
+  await walk(sourceTree, destParentItemId, '');
+  return copies;
 }
 
 // Cross-cloud mirror: walk a Graph tree and push each file into a Google
@@ -2281,6 +2640,140 @@ async function ensureCaseHierarchy(caseInfo) {
   // generated reports.
 
   return { records: recordsFolder, work: workFolder };
+}
+
+// ============================================================================
+// Phase 6f.2: OneDrive parallel of ensureCaseHierarchy.
+// ----------------------------------------------------------------------------
+// Same tree shape as the Drive version:
+//   {root}/{firm}/{attorney}/{case}/                ← RECORDS (link-shared)
+//   {root}/_Internal/{firm}/{attorney}/{case}/      ← WORK    (not shared)
+//
+// Differences from the Drive path:
+//   - driveId + itemId pair instead of a single Drive folderId
+//   - link-sharing uses createLink type=view scope=anonymous (msGraphShareAnyoneReader)
+//   - returns webUrl on each folder so the DM-citation pipeline can resolve
+//     hyperlinks without a second roundtrip
+//
+// Populates on caseInfo (new fields, parallel to the Drive ones):
+//   oneDriveDriveId       — driveId of records folder
+//   oneDriveItemId        — itemId of records folder (records root)
+//   oneDriveFolderName    — display name
+//   oneDriveFolderWebUrl  — sharing URL (anonymous reader)
+//   oneDriveWorkDriveId   — driveId of work folder
+//   oneDriveWorkItemId    — itemId of work folder
+//   oneDriveWorkFolderName
+//
+// Return shape: { records: {id, driveId, name, webUrl}, work: {id, driveId, name} }
+// ============================================================================
+async function ensureCaseHierarchyOneDrive(caseInfo) {
+  if (!state.oneDriveRootDriveId || !state.oneDriveRootFolderId) {
+    throw new Error('Set a OneDrive canonical folder first (Case Manager page).');
+  }
+  if (!caseInfo) throw new Error('Unknown case.');
+  const firmRec = caseInfo.firmId ? state.firms.find(f => f.id === caseInfo.firmId) : null;
+  const attyRec = caseInfo.attorneyId ? state.attorneys.find(a => a.id === caseInfo.attorneyId) : null;
+  if (!firmRec) throw new Error('This case has no firm selected — pick a firm before organizing into OneDrive.');
+
+  const firmName = firmRec.name || 'Unnamed Firm';
+  const attyName = attyRec ? (((attyRec.firstName||'') + ' ' + (attyRec.lastName||'')).trim() || 'Unnamed Attorney') : null;
+  const caseFolderName = ((caseInfo.patient || 'Untitled') + ' — ' + (caseInfo.id || '')).trim().replace(/ — $/,'');
+
+  const rootDriveId = state.oneDriveRootDriveId;
+  const rootItemId  = state.oneDriveRootFolderId;
+
+  // ---- Records tree (shared)
+  const firmFolder = await msGraphFindOrCreateFolder(rootDriveId, rootItemId, firmName);
+  let parentItemId = firmFolder.id;
+  if (attyName) {
+    const attyFolder = await msGraphFindOrCreateFolder(rootDriveId, parentItemId, attyName);
+    parentItemId = attyFolder.id;
+  }
+  const recordsFolder = await msGraphFindOrCreateFolder(rootDriveId, parentItemId, caseFolderName);
+  // Anonymous reader link — matches driveShareAnyoneReader semantics so the
+  // DM-citation hyperlinks in the generated .docx resolve for recipients.
+  let recordsLink = null;
+  try {
+    recordsLink = await msGraphShareAnyoneReader(rootDriveId, recordsFolder.id);
+  } catch (e) {
+    console.warn('[onedrive] records folder link-sharing could not be enabled automatically:', e && e.message ? e.message : e);
+  }
+
+  // ---- Work tree (private, parallel hierarchy)
+  const workRoot = await msGraphFindOrCreateFolder(rootDriveId, rootItemId, WORK_ROOT_NAME);
+  const workFirm = await msGraphFindOrCreateFolder(rootDriveId, workRoot.id, firmName);
+  let workParentItemId = workFirm.id;
+  if (attyName) {
+    const workAtty = await msGraphFindOrCreateFolder(rootDriveId, workParentItemId, attyName);
+    workParentItemId = workAtty.id;
+  }
+  const workFolder = await msGraphFindOrCreateFolder(rootDriveId, workParentItemId, caseFolderName);
+  // Intentionally no link-sharing on the work folder — same rationale as Drive.
+
+  return {
+    records: {
+      id: recordsFolder.id,
+      driveId: rootDriveId,
+      name: recordsFolder.name || caseFolderName,
+      webUrl: (recordsLink && recordsLink.link && recordsLink.link.webUrl) || recordsFolder.webUrl || null,
+    },
+    work: {
+      id: workFolder.id,
+      driveId: rootDriveId,
+      name: workFolder.name || caseFolderName,
+      webUrl: workFolder.webUrl || null,
+    },
+  };
+}
+
+// ============================================================================
+// Phase 6f.2: provider-aware dispatcher. Every case-creation / ensure-on-demand
+// site that previously called ensureCaseHierarchy(caseInfo) should call this
+// instead, so the canonical storage setting actually changes behavior.
+//
+// Return shape mirrors the Drive version ({ records, work }) but entries have
+// extra `provider` + `driveId` + `webUrl` fields so callers that care can
+// distinguish. Drive-provider entries come back with provider='gdrive' and no
+// driveId (driveId is OneDrive-only semantics).
+//
+// Side-effect: on success, persists the appropriate provider-specific fields
+// onto caseInfo and calls save(). The legacy Drive fields
+// (driveFolderId / driveWorkFolderId) are ALSO populated when canonical is
+// 'gdrive' — this preserves compatibility with the 50+ sites that still read
+// those fields directly. A follow-up (Phase 6f.3) will make those sites
+// provider-aware; until then, OneDrive-canonical cases carry their canonical
+// pointers in the new oneDrive* fields and Drive-canonical cases continue to
+// work exactly as before.
+// ============================================================================
+async function ensureCaseCanonicalHierarchy(caseInfo) {
+  if (!caseInfo) throw new Error('Unknown case.');
+  const canonical = (state && state.canonicalStorage) || 'gdrive';
+  if (canonical === 'onedrive') {
+    const h = await ensureCaseHierarchyOneDrive(caseInfo);
+    caseInfo.oneDriveDriveId        = h.records.driveId;
+    caseInfo.oneDriveItemId         = h.records.id;
+    caseInfo.oneDriveFolderName     = h.records.name;
+    caseInfo.oneDriveFolderWebUrl   = h.records.webUrl || caseInfo.oneDriveFolderWebUrl || '';
+    caseInfo.oneDriveWorkDriveId    = h.work.driveId;
+    caseInfo.oneDriveWorkItemId     = h.work.id;
+    caseInfo.oneDriveWorkFolderName = h.work.name;
+    save();
+    return {
+      records: { provider: 'onedrive', id: h.records.id, driveId: h.records.driveId, name: h.records.name, webUrl: h.records.webUrl },
+      work:    { provider: 'onedrive', id: h.work.id,    driveId: h.work.driveId,    name: h.work.name,    webUrl: h.work.webUrl    },
+    };
+  }
+  // Drive path (default)
+  const h = await ensureCaseHierarchy(caseInfo);
+  caseInfo.driveFolderId       = caseInfo.driveFolderId       || h.records.id;
+  caseInfo.driveFolderName     = caseInfo.driveFolderName     || h.records.name;
+  caseInfo.driveWorkFolderId   = h.work.id;
+  caseInfo.driveWorkFolderName = h.work.name;
+  save();
+  return {
+    records: { provider: 'gdrive', id: h.records.id, driveId: null, name: h.records.name, webUrl: null },
+    work:    { provider: 'gdrive', id: h.work.id,    driveId: null, name: h.work.name,    webUrl: null },
+  };
 }
 
 // Given a case, ensure its work folder exists and return its id. Used by
@@ -3238,7 +3731,21 @@ let state = {
   // Top-level Chart Detectives folder in Drive. When set, new cases auto-organize into
   // {root}/{firm}/{attorney}/{case}/ — see ensureCaseHierarchy().
   driveRootFolderId: '',
-  driveRootFolderName: ''
+  driveRootFolderName: '',
+  // Phase 6f (storage swap): parallel fields for OneDrive as CANONICAL storage.
+  // Google Drive stays in the codebase for inbound attorney shares (attorneys
+  // commonly send records via Drive links), but Debbie's own organized case
+  // hierarchy lives on her OneDrive (she has 365). Mirror of the three driveRoot
+  // fields above: oneDriveRootDriveId is Graph's {drive-id} for her personal
+  // drive, oneDriveRootFolderId is the {item-id} of her Chart Detectives folder
+  // inside that drive. Both default to '' until she picks a root via the UI.
+  // canonicalStorage: 'gdrive' | 'onedrive' — selects which provider new cases
+  // are written to. Defaults to 'gdrive' during migration; flip to 'onedrive'
+  // once 6f.2 (case-creation wiring) ships and she's ready to cut over.
+  oneDriveRootDriveId: '',
+  oneDriveRootFolderId: '',
+  oneDriveRootFolderName: '',
+  canonicalStorage: 'gdrive'
 };
 let casesFilter = 'all';
 let uploadedFiles = [];
@@ -3376,6 +3883,7 @@ function init() {
   renderInvoices();
   updateActiveCaseBadge();
   renderDriveRootStrip();
+  renderOneDriveRootStrip();
   // Set default dates
   const today = new Date().toISOString().split('T')[0];
   ['new-received','log-date','inv-date'].forEach(id => {
@@ -3757,6 +4265,96 @@ function clearDriveRootFolder() {
   state.driveRootFolderName = '';
   save();
   renderDriveRootStrip();
+}
+
+// ===== ONEDRIVE ROOT FOLDER (Phase 6f.2) =====
+// Parallel to renderDriveRootStrip / pickDriveRootFolder — manages Debbie's
+// canonical OneDrive root. When canonicalStorage='onedrive' and this is set,
+// ensureCaseCanonicalHierarchy will create new case folders here instead of Drive.
+function renderOneDriveRootStrip() {
+  const label = document.getElementById('onedrive-root-label');
+  const clearBtn = document.getElementById('onedrive-root-clear-btn');
+  const toggle = document.getElementById('canonical-storage-toggle');
+  if (toggle) toggle.checked = (state.canonicalStorage === 'onedrive');
+  if (!label) return;
+  if (state.oneDriveRootFolderId && state.oneDriveRootFolderName) {
+    const flag = (state.canonicalStorage === 'onedrive')
+      ? '<b style="color:var(--gold,#b8891f);">canonical</b>'
+      : '<span style="color:var(--gray-400);">standby</span>';
+    label.innerHTML = 'OneDrive canonical folder: <b>' + esc(state.oneDriveRootFolderName) + '</b> &mdash; ' + flag + '.';
+    if (clearBtn) clearBtn.style.display = '';
+  } else {
+    label.innerHTML = 'OneDrive canonical folder: <b>not set</b> &mdash; canonical storage will stay on Google Drive.';
+    if (clearBtn) clearBtn.style.display = 'none';
+  }
+}
+
+// Prompt the user for a OneDrive folder via the OneDrive file picker v8 SDK.
+// OneDrive's picker flow is very different from Google Picker: Microsoft
+// ships a framed picker (window.open + postMessage) that does not require
+// the SDK to be preloaded. For Phase 6f.2 we use a simpler pragmatic approach:
+// ask the user to paste a OneDrive folder share link, then resolve it to a
+// driveId/itemId via msGraphGetShareItem (which we already use for
+// attorney-share import). This keeps the dependency surface small and
+// reuses the exact Graph plumbing that's proven on the read path.
+async function pickOneDriveRootFolder() {
+  try {
+    // Make sure MSAL is ready + the user has consented to the WRITE scope.
+    await msSignIn(); // interactive; acquires token with Files.ReadWrite.All
+    const link = prompt('Paste a OneDrive folder share link (right-click the folder in OneDrive → Copy link):');
+    if (!link) return;
+    const trimmed = link.trim();
+    if (!trimmed) return;
+    const meta = await msGraphGetShareItem(trimmed);
+    if (!meta || !meta.id || !meta.parentReference || !meta.parentReference.driveId) {
+      alert('Could not resolve that OneDrive link. Make sure it\u2019s a folder share link from your own OneDrive.');
+      return;
+    }
+    if (meta.folder === undefined && meta.file) {
+      alert('That link points to a file, not a folder. Pick a folder share link.');
+      return;
+    }
+    state.oneDriveRootDriveId  = meta.parentReference.driveId;
+    state.oneDriveRootFolderId = meta.id;
+    state.oneDriveRootFolderName = meta.name || 'OneDrive Folder';
+    save();
+    renderOneDriveRootStrip();
+    showToast('\u2601\ufe0f OneDrive root set to ' + state.oneDriveRootFolderName);
+  } catch (e) {
+    alert('Could not set OneDrive root: ' + (e && e.message ? e.message : e));
+  }
+}
+
+function clearOneDriveRootFolder() {
+  if (!confirm('Clear the OneDrive canonical folder? If canonical storage is set to OneDrive, new cases will fall back to Google Drive until a new folder is set.')) return;
+  state.oneDriveRootDriveId = '';
+  state.oneDriveRootFolderId = '';
+  state.oneDriveRootFolderName = '';
+  // If the user was on OneDrive canonical but just cleared the folder, flip
+  // them back to Drive so case creation doesn't silently fail.
+  if (state.canonicalStorage === 'onedrive') state.canonicalStorage = 'gdrive';
+  save();
+  renderOneDriveRootStrip();
+}
+
+// Flip canonicalStorage between 'gdrive' and 'onedrive'. We refuse to flip
+// to 'onedrive' unless the OneDrive root folder is already set — otherwise
+// case creation would hit a dead end.
+function toggleCanonicalStorage(wantOneDrive) {
+  if (wantOneDrive) {
+    if (!state.oneDriveRootFolderId) {
+      alert('Set a OneDrive canonical folder first, then toggle this on.');
+      const toggle = document.getElementById('canonical-storage-toggle');
+      if (toggle) toggle.checked = false;
+      return;
+    }
+    state.canonicalStorage = 'onedrive';
+  } else {
+    state.canonicalStorage = 'gdrive';
+  }
+  save();
+  renderOneDriveRootStrip();
+  showToast('Canonical storage: ' + (state.canonicalStorage === 'onedrive' ? 'OneDrive' : 'Google Drive'));
 }
 
 // One-click migration: move this case's existing Drive folder into {root}/{firm}/{attorney}/.
@@ -5116,7 +5714,13 @@ function parseBatchJson(text) {
 // present, each fact's verbatim_quote is substring-matched against the cited source
 // document and stamped with a verification status (✓ verified, ⚠ flagged, — skipped).
 // Missing or null cache entries degrade gracefully to '—' rather than false ⚠.
-function mergeExtractedFactsToMarkdown(batchOutputs, caseInfo, sourceTextCache) {
+//
+// verificationReason (optional, Phase 6b): a short human-readable string explaining
+// WHY verification didn't run when sourceTextCache is null/empty. Flows through to
+// the Summary sheet so Debbie sees a specific reason ("cache build timed out at 15m",
+// "scope bug — case key not in scope", "resumed from KV — source files not in memory")
+// instead of a generic "source-text cache unavailable". Defaults to a generic string.
+function mergeExtractedFactsToMarkdown(batchOutputs, caseInfo, sourceTextCache, verificationReason) {
   const allFacts = [];
   let batchesErrored = 0;
   let batchesWithZero = 0;
@@ -5132,17 +5736,121 @@ function mergeExtractedFactsToMarkdown(batchOutputs, caseInfo, sourceTextCache) 
   // every cell in the final table is either a verbatim source quote or blank.
   const norm = (v) => (v === null || v === undefined) ? '' : String(v).trim();
   const cellSafe = (s) => s.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
+  // Phase 6a counters — track how many rows each normalization rule fired on,
+  // surface in console + Summary sheet so Debbie can see when the prompt starts
+  // misbehaving at scale (e.g. suddenly 800 rows with fused "LM003271").
+  let batesNorm = { fused: 0, numericOnly: 0, facilityWord: 0, uppercased: 0, pageFromBates: 0 };
   for (const f of allFacts) {
     f._date = norm(f.date);
     f._event_type = norm(f.event_type);
     f._facility = norm(f.facility);
     f._quote = cellSafe(norm(f.verbatim_quote));
-    f._bates = norm(f.bates_prefix);
-    f._page = norm(f.page_number);
+    // --- Phase 6a: defensive Bates normalization ---
+    // Even with a hardened extraction prompt, the model produces five dirty variants
+    // per case at scale: "Licking Memorial Hospital000563" (facility name pasted
+    // into prefix), "LM003271" (letters and digits fused), "000596" (prefix dropped,
+    // only digits), "lmh" (mixed case), and plain " LM " (whitespace noise). All
+    // of these need to collapse to a clean (prefix, digits) pair before the
+    // deduper, verifier, and downstream worklists see them — otherwise duplicates
+    // slip through and coverage stats lie.
+    const rawBates = norm(f.bates_prefix);
+    const rawPage = norm(f.page_number);
+    let cleanBates = rawBates;
+    let cleanPage = rawPage;
+    // 1) Strip whitespace the model sometimes leaves in ("MV " or " LM" — and,
+    //    more importantly, the interior spaces in "Licking Memorial Hospital000563"
+    //    that turn it into one big fused token we can split).
+    cleanBates = cleanBates.replace(/\s+/g, '');
+    cleanPage = cleanPage.replace(/\s+/g, '');
+    // 2) Fused "<letters><digits>" form — ALWAYS split. Handles the canonical
+    //    "LM003271" variant and the facility-name variant
+    //    "Licking Memorial Hospital000563" identically. After splitting, step 3
+    //    decides whether the letter portion is a legitimate 2–4 letter
+    //    abbreviation or a facility name to blank out.
+    //
+    //    Reconciliation with page_number:
+    //      - page empty                               → use the fused digits
+    //      - page matches fused digits (0-stripped)   → digits are redundant, keep page
+    //      - page disagrees with fused digits         → trust the fused digits (they
+    //        were right next to the Bates prefix on the same stamp; the page field
+    //        in that case is typically the PDF page number the model confused with
+    //        the Bates page). Flag the row so Debbie can spot-check.
+    //    Up to 40 letters to accept pathological facility-name outliers; beyond
+    //    that something is genuinely weird and we leave the string alone.
+    const fused = cleanBates.match(/^([A-Za-z]{1,40})(\d{1,8})$/);
+    if (fused) {
+      const fusedLetters = fused[1];
+      const fusedDigits = fused[2];
+      cleanBates = fusedLetters;
+      if (!cleanPage) {
+        cleanPage = fusedDigits;
+      } else if (cleanPage.replace(/^0+/, '') !== fusedDigits.replace(/^0+/, '')) {
+        // Disagreement — prefer the fused digits since they were the ones
+        // physically adjacent to the prefix on the stamp.
+        cleanPage = fusedDigits;
+      }
+      batesNorm.fused++;
+    }
+    // 3) Facility-name variant — e.g. cleanBates == "LickingMemorialHospital" with
+    //    no digits. If the bates "prefix" is longer than 4 letters AND doesn't look
+    //    like a canonical abbreviation, blank it out. The canonical Bates prefix on
+    //    a legal exhibit is always a short abbreviation (2–4 letters) — anything
+    //    longer came from the model reading body text instead of the stamp.
+    if (/^[A-Za-z]+$/.test(cleanBates) && cleanBates.length > 4) {
+      cleanBates = '';
+      batesNorm.facilityWord++;
+    }
+    // 4) Numeric-only "prefix" — the model dropped the letters and only kept the
+    //    digits. If page_number is empty, promote the digits to page_number and
+    //    blank the prefix. If page_number already matches, blank the prefix (same
+    //    number duplicated). If page_number differs, leave alone and flag — the
+    //    row will show ambiguous Bates and Debbie can investigate.
+    if (/^\d+$/.test(cleanBates)) {
+      if (!cleanPage) {
+        cleanPage = cleanBates;
+        cleanBates = '';
+        batesNorm.pageFromBates++;
+      } else if (cleanPage.replace(/^0+/, '') === cleanBates.replace(/^0+/, '')) {
+        cleanBates = '';
+        batesNorm.numericOnly++;
+      } else {
+        // Ambiguous — both fields are digits but disagree. Leave as-is for review.
+        batesNorm.numericOnly++;
+      }
+    }
+    // 5) Uppercase the prefix so "lm" and "LM" dedupe as the same citation. We
+    //    deliberately keep LMH separate from LM — without the Records Reviewed
+    //    legend loaded on the case we can't know whether LMH is a different
+    //    record set or a model artifact, and collapsing prefixes we shouldn't is
+    //    much worse than leaving them split.
+    if (cleanBates && cleanBates !== cleanBates.toUpperCase()) {
+      cleanBates = cleanBates.toUpperCase();
+      batesNorm.uppercased++;
+    }
+    // 6) Normalize page number — strip leading zeros for dedupe purposes, but
+    //    keep the original on the row so the visual citation matches the stamp.
+    //    (We only use the stripped form internally for the dedupe key.)
+    const pageForKey = cleanPage.replace(/^0+/, '') || cleanPage;
+    f._bates = cleanBates;
+    f._page = cleanPage;
     f._source = norm(f.source_filename);
     // Dedupe key: exact match across identifying fields. Facts that differ in any
     // substantive way stay as separate rows so the LNC can see the full evidence.
-    f._key = [f._date, f._event_type, f._bates, f._page, f._quote].join('||');
+    // Using pageForKey (zero-stripped) means "LM 003271" and "LM 3271" dedupe — a
+    // very common inter-batch disagreement that used to ship as two separate rows.
+    f._key = [f._date, f._event_type, f._bates, pageForKey, f._quote].join('||');
+  }
+  // One-liner diagnostic — visible in console for each run. If any counter spikes
+  // into the thousands on a fresh case, the extraction prompt needs another pass.
+  const totalNorm = batesNorm.fused + batesNorm.numericOnly + batesNorm.facilityWord
+                  + batesNorm.uppercased + batesNorm.pageFromBates;
+  if (totalNorm > 0) {
+    console.log('[bates-normalize] fused=' + batesNorm.fused
+      + ' numericOnly=' + batesNorm.numericOnly
+      + ' facilityWord=' + batesNorm.facilityWord
+      + ' pageFromBates=' + batesNorm.pageFromBates
+      + ' uppercased=' + batesNorm.uppercased
+      + ' (of ' + allFacts.length + ' raw facts)');
   }
 
   // Dedupe preserving first occurrence — same key, keep the earlier extraction.
@@ -5180,7 +5888,11 @@ function mergeExtractedFactsToMarkdown(batchOutputs, caseInfo, sourceTextCache) 
   //                 image-only scan that pdf.js cannot extract)
   // The counts are surfaced in a summary line above the table.
   let verifiedCount = 0, flaggedCount = 0, skippedCount = 0;
-  const haveCache = !!sourceTextCache;
+  // Treat only NON-EMPTY object caches as "have cache". A cache that exists but is
+  // empty (e.g. the .catch() fallback returned {}) will mark every row skipped, which
+  // is indistinguishable from "no cache at all" from the user's perspective. Reporting
+  // that as verificationRan=true misleadingly implies the check worked.
+  const haveCache = !!sourceTextCache && typeof sourceTextCache === 'object' && Object.keys(sourceTextCache).length > 0;
   for (const f of deduped) {
     if (!haveCache || !f._source || !f._quote) {
       f._status = '—';
@@ -5236,7 +5948,23 @@ function mergeExtractedFactsToMarkdown(batchOutputs, caseInfo, sourceTextCache) 
     verified: verifiedCount,
     flagged: flaggedCount,
     skipped: skippedCount,
-    verificationRan: haveCache
+    verificationRan: haveCache,
+    // Phase 6b: flow the specific failure reason through to the Summary sheet. When
+    // verification DID run, this stays empty. When it didn't, the caller passes a
+    // short human-readable string (e.g. "cache build timed out at 15m", "resumed
+    // from KV — source files not in memory"). Empty default means old call sites
+    // that never supplied a reason still produce the legacy "unavailable" wording.
+    verificationReason: haveCache ? '' : (verificationReason || ''),
+    // Count of source files actually parsed — useful diagnostic for Summary sheet.
+    // "cache had 0 entries" vs "cache had 67 entries but no rows matched any file"
+    // point to very different bugs.
+    cacheEntryCount: (sourceTextCache && typeof sourceTextCache === 'object') ? Object.keys(sourceTextCache).length : 0,
+    // Phase 6a: how many rows each Bates normalization rule rewrote. A healthy
+    // case shows zeros (or small single digits on the occasional stray) — big
+    // numbers here mean the extraction prompt drifted and the prompt rules need
+    // another pass. These counts are defensive fixes; we still want the model to
+    // emit clean Bates fields the first time.
+    batesNormalizations: batesNorm
   };
   if (caseInfo && typeof caseInfo === 'object') {
     caseInfo.lastAnalysisFacts = structuredFacts;
@@ -5256,7 +5984,15 @@ function mergeExtractedFactsToMarkdown(batchOutputs, caseInfo, sourceTextCache) 
     out.push('_Verification: ' + verifiedCount + ' of ' + total + ' rows verified against source (✓), ' + flaggedCount + ' flagged for spot-check (⚠), ' + skippedCount + ' not checkable (—). Flagged rows could not be matched against the cited source document — review before relying on them._');
     out.push('');
   } else {
-    out.push('_Verification was skipped for this run (source text cache unavailable). Review every row against the source before use._');
+    // Phase 6b: surface the specific reason rather than a generic "unavailable". The
+    // most common failure — until we fixed it — was a cross-function reference to a
+    // case key that didn't exist in the merger's scope, which the surrounding
+    // try/catch swallowed silently. Spelling out WHAT went wrong makes that kind of
+    // quiet regression visible in Debbie's deliverable instead of going unnoticed.
+    const reasonSuffix = factIndexStats.verificationReason
+      ? ' (' + factIndexStats.verificationReason + ')'
+      : ' (source text cache unavailable)';
+    out.push('_Verification was skipped for this run' + reasonSuffix + '. Review every row against the source before use._');
     out.push('');
   }
   if (batchesErrored > 0) {
@@ -5408,12 +6144,70 @@ function factMatchesChecklistItem(fact, keywords) {
 
 // Build the fact-index Excel workbook. Returns a Blob the caller can download or
 // upload to Drive. Requires SheetJS (window.XLSX) loaded in <head>.
-function buildFactIndexXlsxBlob(facts, caseInfo, stats) {
+// Phase 6c helper: compose the exact PDF-preview URL for a given source file
+// entry and page number, keyed on storage provider. Factored out so the format
+// lives in one place (change here → change everywhere). Returns null when the
+// entry is unusable (no id / no webUrl).
+//
+//   • Google Drive:  https://drive.google.com/file/d/{id}/preview#page={N}
+//     The /preview endpoint uses the PDF.js-based Drive viewer which respects
+//     #page anchors. Using /view instead works too, but /preview is the
+//     embeddable variant and gives a slightly cleaner read-only UX.
+//   • OneDrive:       {webUrl}#page={N}   (when webUrl is known)
+//     OneDrive's web viewer opens PDFs in the Office Online PDF viewer which
+//     honors the #page fragment for personal and business 365 links. When we
+//     only have a driveId+itemId pair (no webUrl), we fall back to the Graph
+//     /items/{id}/content download URL, which won't page-jump but will open
+//     the file — better than nothing.
+//
+// Callers that pass a page_number with non-numeric content (e.g. letters-only
+// Bates like "N/A") get a URL without the #page fragment — the file still
+// opens, just at page 1.
+function _buildFactIndexHyperlink(entry, pageNumber) {
+  if (!entry) return null;
+  const prov = entry.provider || 'gdrive';
+  // Coerce page_number — accept "12", " 12 ", 12, "003271", strip leading zeros
+  // for the URL while preserving the original on the row. Reject "N/A" / "—".
+  let page = null;
+  if (pageNumber !== null && pageNumber !== undefined) {
+    const s = String(pageNumber).trim();
+    if (/^\d+$/.test(s)) {
+      page = parseInt(s, 10);
+      if (!isFinite(page) || page < 1) page = null;
+    }
+  }
+  const pageFrag = page ? ('#page=' + page) : '';
+  if (prov === 'onedrive') {
+    if (entry.webUrl) return entry.webUrl + pageFrag;
+    if (entry.driveId && entry.id) {
+      // Graph content endpoint — a 302 to a short-lived download URL. Won't
+      // honor #page but at least opens the PDF. Last-resort fallback.
+      return 'https://graph.microsoft.com/v1.0/drives/' + entry.driveId +
+             '/items/' + entry.id + '/content';
+    }
+    return null;
+  }
+  // Default/gdrive path
+  if (!entry.id) return null;
+  return 'https://drive.google.com/file/d/' + entry.id + '/preview' + pageFrag;
+}
+
+// Phase 6c: sourceFileUrlMap is an optional { [filename]: { id, webUrl?, provider } }
+// map built by the caller so each Fact Index row can hyperlink its "Source File"
+// column directly to the PDF page cited (via #page=N fragment). When null/empty,
+// the column renders as plain text — graceful degradation rather than failing
+// the whole workbook if the file tree couldn't be fetched. Provider is 'gdrive'
+// or 'onedrive'; both platforms respect #page=N in their preview URLs. The
+// helper _buildFactIndexHyperlink above computes the exact target URL so the
+// format is consistent across both providers and we can change it in one place.
+function buildFactIndexXlsxBlob(facts, caseInfo, stats, sourceFileUrlMap) {
   if (!window.XLSX) throw new Error('Spreadsheet library (SheetJS) failed to load. Refresh the page and try again.');
   if (!Array.isArray(facts)) facts = [];
   const patient = (caseInfo && caseInfo.patient) || 'Case';
   const typeLabel = (caseInfo && caseInfo.type) ? (' — ' + caseInfo.type) : '';
   const today = new Date().toISOString().split('T')[0];
+  // Phase 6c defense: accept the map being null/undefined without throwing.
+  const urlMap = sourceFileUrlMap || {};
 
   // --- Sheet 1: Fact Index (the main deliverable) ---
   const header = [
@@ -5475,6 +6269,44 @@ function buildFactIndexXlsxBlob(facts, caseInfo, stats) {
     }
   }
 
+  // --- Phase 6c: deep-link each Fact Index row to its cited source PDF page ---
+  // For every row where we have a URL-map entry for the source filename AND a
+  // numeric page_number, rewrite the "Source File" cell into a hyperlink that
+  // opens the PDF at the exact cited page. Works on both Drive (which respects
+  // #page=N on the /preview URL) and OneDrive (which respects the same fragment
+  // on its embed URL). Rows without a matching file or without a numeric page
+  // render as plain text — no red "broken link" indicator in Excel — so the
+  // Fact Index still ships cleanly when the underlying tree lookup failed.
+  //
+  // We also apply a blue underlined style to the cell so Debbie can see at a
+  // glance which rows click through vs. which don't. That visual cue matters
+  // because a row with no page_number renders as black text and she should not
+  // expect a click to do anything.
+  const SOURCE_FILE_COL = 5; // 0-based column index — matches header array above
+  let linkedRowCount = 0;
+  facts.forEach((f, i) => {
+    const src = f && f.source_filename;
+    if (!src) return;
+    const meta = urlMap[src];
+    if (!meta) return;
+    const target = _buildFactIndexHyperlink(meta, f.page_number);
+    if (!target) return;
+    const addr = XLSX.utils.encode_cell({ r: i + 1, c: SOURCE_FILE_COL });
+    const cell = ws[addr];
+    if (!cell) return;
+    // SheetJS's hyperlink shape: ws[addr].l = { Target, Tooltip }
+    cell.l = {
+      Target: target,
+      Tooltip: 'Open ' + src + (f.page_number ? (' at page ' + f.page_number) : '') + ' in ' + (meta.provider === 'onedrive' ? 'OneDrive' : 'Drive')
+    };
+    cell.s = cell.s || {};
+    cell.s.font = Object.assign({}, cell.s.font || {}, { color: { rgb: '1155CC' }, underline: true });
+    linkedRowCount++;
+  });
+  // Expose the count on the worksheet for the Summary sheet to read (and for
+  // console diagnostics). Not persisted anywhere — purely a render-time stat.
+  ws.__hyperlinkCount = linkedRowCount;
+
   // --- Sheet 2: Summary (counts + case info so a single-sheet print stays legible) ---
   const verificationRan = !!(stats && stats.verificationRan);
   const sumRows = [
@@ -5490,18 +6322,107 @@ function buildFactIndexXlsxBlob(facts, caseInfo, stats) {
     ['Batches with errors',   (stats && stats.batchesErrored) || 0],
     ['Batches with 0 facts',  (stats && stats.batchesWithZero) || 0],
     ['', ''],
-    ['Verification ran',      verificationRan ? 'Yes' : 'No (source-text cache unavailable)'],
+    // Phase 6b: when verification didn't run, surface the SPECIFIC reason so silent
+    // regressions (like a scope bug swallowed by a try/catch) show up in Debbie's
+    // workbook instead of hiding behind a generic "unavailable" label.
+    ['Verification ran',      verificationRan
+                                ? 'Yes'
+                                : ('No — ' + ((stats && stats.verificationReason) || 'source-text cache unavailable'))],
+    ['Source files cached',   (stats && typeof stats.cacheEntryCount === 'number')
+                                ? stats.cacheEntryCount
+                                : '—'],
     ['Rows verified (✓)',     verificationRan ? (stats.verified || 0) : '—'],
     ['Rows flagged (⚠)',      verificationRan ? (stats.flagged || 0) : '—'],
     ['Rows not checkable (—)',verificationRan ? (stats.skipped || 0) : '—'],
+    // Phase 6a: surface Bates normalization activity so a silently misbehaving
+    // extraction prompt becomes visible in Debbie's deliverable instead of
+    // shipping thousands of dirty "LM003271"-style rows unannounced.
+    ['Bates fields auto-cleaned',
+      (function () {
+        const bn = (stats && stats.batesNormalizations) || {};
+        const total = (bn.fused || 0) + (bn.numericOnly || 0) + (bn.facilityWord || 0)
+                    + (bn.pageFromBates || 0) + (bn.uppercased || 0);
+        if (!total) return '0 — extraction emitted clean Bates fields';
+        const parts = [];
+        if (bn.fused)          parts.push(bn.fused + ' fused (letters+digits split)');
+        if (bn.facilityWord)   parts.push(bn.facilityWord + ' facility-name in prefix');
+        if (bn.pageFromBates)  parts.push(bn.pageFromBates + ' prefix was actually a page');
+        if (bn.numericOnly)    parts.push(bn.numericOnly + ' numeric-only prefix');
+        if (bn.uppercased)     parts.push(bn.uppercased + ' case-normalized');
+        return total + ' row(s) — ' + parts.join('; ');
+      })()],
     ['', ''],
-    ['Notes', ''],
-    ['', 'This workbook is a cited fact index compiled from the records provided for the case above. Every row in the Fact Index sheet is intended to be a verbatim excerpt from a source document, tagged with its date, event type, facility, file, and Bates/page reference where available.'],
-    ['', 'A "✓" in the Verification column means the verbatim quote was located character-for-character in the cited source PDF via in-browser text extraction. A "⚠" means the quote could NOT be matched to the source and should be spot-checked before being relied upon. A "—" means verification was skipped (no source cached, quote too short to verify reliably, or source was an image-only scan).'],
-    ['', 'This is a reference index for the licensed Legal Nurse Consultant, not a narrative report. The companion narrative template (separate .docx) is a blank letterhead for the LNC to write her own analysis, supported by the facts in this workbook.']
+    // Phase 6c: deep-link activity report. When the caller supplied a urlMap
+    // but no rows matched, that's a sign the filenames in facts don't line up
+    // with the filenames in the source tree (common cause: Drive renamed the
+    // file after upload, or the attorney share had a different filename).
+    ['Rows with clickable source link',
+      (function () {
+        const haveMap = urlMap && Object.keys(urlMap).length > 0;
+        const linked = ws.__hyperlinkCount || 0;
+        if (!haveMap) return 'No — source-file URL map was not provided at workbook build time (fell back to plain-text "Source File" column).';
+        if (linked === 0) return 'No — urlMap had entries but none matched any fact\'s source_filename. The filenames in the records tree may differ from what the extractor emitted.';
+        return linked + ' of ' + facts.length + ' rows (click "Source File" to open the cited PDF at the cited page).';
+      })()],
+    ['', '']
   ];
+
+  // --- Phase 6e: per-source-file yield telemetry ---
+  // For each distinct source_filename in the fact set, count how many rows
+  // reference it. Sort descending. Surfaces the "LM has 6% page coverage"
+  // pattern immediately — a file with 800 pages but only 12 rows is clearly
+  // under-indexed and worth re-running, while a file with 80 pages and 120
+  // rows is healthy. If the caller supplied pageCountMap entries (via the
+  // urlMap — we piggyback on entry.pages when present), we also compute a
+  // rows-per-page "yield ratio" so the LNC can spot outliers at a glance.
+  const sourceYield = {};
+  for (const f of facts) {
+    const key = (f && f.source_filename) || '(unknown)';
+    if (!sourceYield[key]) sourceYield[key] = { rows: 0, status: { ok: 0, flagged: 0, skipped: 0 } };
+    sourceYield[key].rows++;
+    const s = f && f.verification;
+    if (s === '✓') sourceYield[key].status.ok++;
+    else if (s === '⚠') sourceYield[key].status.flagged++;
+    else sourceYield[key].status.skipped++;
+  }
+  const sortedSources = Object.keys(sourceYield).sort((a, b) => sourceYield[b].rows - sourceYield[a].rows);
+  if (sortedSources.length) {
+    sumRows.push(['Per-source-file yield (Phase 6e)', '']);
+    sumRows.push(['', 'Rows extracted per source PDF. Each source with fewer than 1 row per 10 pages is tagged "⚠ low yield" — strong signal that the extractor missed content in that file (common causes: image-only scans that pdf.js can\'t read, extraction timeouts, refusals quarantined upstream). Re-running the case after spot-checking a flagged file against its source is usually the right next step.']);
+    sumRows.push(['Source File', 'Rows / Pages / Yield / Verification mix']);
+    for (const name of sortedSources) {
+      const y = sourceYield[name];
+      const entry = urlMap[name];
+      const pages = (entry && typeof entry.pages === 'number' && entry.pages > 0) ? entry.pages : null;
+      const ratio = (pages && y.rows > 0) ? (y.rows / pages) : null;
+      const lowYield = (pages && ratio !== null && ratio < 0.1);
+      const statusMix =
+        (y.status.ok      ? (y.status.ok      + '✓ ') : '') +
+        (y.status.flagged ? (y.status.flagged + '⚠ ') : '') +
+        (y.status.skipped ? (y.status.skipped + '— ') : '');
+      const parts = [];
+      parts.push(y.rows + ' row' + (y.rows === 1 ? '' : 's'));
+      if (pages !== null) {
+        parts.push(pages + ' pages');
+        parts.push((ratio < 0.01 ? ratio.toFixed(3) : ratio.toFixed(2)) + ' rows/page');
+      } else {
+        parts.push('pages unknown');
+      }
+      if (lowYield) parts.push('⚠ LOW YIELD — review this source');
+      parts.push('[' + (statusMix.trim() || 'no status') + ']');
+      sumRows.push([name, parts.join('   |   ')]);
+    }
+    sumRows.push(['', '']);
+  }
+
+  sumRows.push(['Notes', '']);
+  sumRows.push(['', 'This workbook is a cited fact index compiled from the records provided for the case above. Every row in the Fact Index sheet is intended to be a verbatim excerpt from a source document, tagged with its date, event type, facility, file, and Bates/page reference where available.']);
+  sumRows.push(['', 'A "✓" in the Verification column means the verbatim quote was located character-for-character in the cited source PDF via in-browser text extraction. A "⚠" means the quote could NOT be matched to the source and should be spot-checked before being relied upon. A "—" means verification was skipped (no source cached, quote too short to verify reliably, or source was an image-only scan).']);
+  sumRows.push(['', 'Phase 6c: cells in the "Source File" column are clickable hyperlinks when the workbook generator could resolve the filename to a Drive/OneDrive file at build time. Clicking opens the PDF at the exact page cited in the row.']);
+  sumRows.push(['', 'This is a reference index for the licensed Legal Nurse Consultant, not a narrative report. The companion narrative template (separate .docx) is a blank letterhead for the LNC to write her own analysis, supported by the facts in this workbook.']);
+
   const wsSum = XLSX.utils.aoa_to_sheet(sumRows);
-  wsSum['!cols'] = [{ wch: 26 }, { wch: 100 }];
+  wsSum['!cols'] = [{ wch: 34 }, { wch: 120 }];
 
   // --- Assemble workbook ---
   const wb = XLSX.utils.book_new();
@@ -5520,6 +6441,14 @@ function buildFactIndexXlsxBlob(facts, caseInfo, stats) {
     { wch:  8 }, { wch: 12 }, { wch: 20 }, { wch: 26 }, { wch: 80 },
     { wch: 38 }, { wch:  8 }, { wch:  8 }, { wch: 12 }
   ];
+  // wlHeader: ['Orig Row', 'Date', 'Event', 'Facility', 'Verbatim Quote', 'Source File', ...]
+  // "Source File" lives at column index 5 in wlHeader — same offset as in the
+  // master Fact Index. Phase 6c: apply identical hyperlink treatment on each
+  // worklist sheet so the Falls / Skin & Wounds / etc. views are just as
+  // clickable as the master. The per-row mapping is the same facts array — we
+  // track the fact index as we push rows so the hyperlink can be re-attached
+  // on the corresponding cell of the worklist sheet.
+  const WL_SOURCE_FILE_COL = 5;
   for (const def of WORKLIST_DEFINITIONS) {
     const wlRows = [
       ['Worklist: ' + def.name],
@@ -5529,9 +6458,13 @@ function buildFactIndexXlsxBlob(facts, caseInfo, stats) {
       wlHeader
     ];
     let matchCount = 0;
+    // Track the fact index of each data row we push, so hyperlinks can be
+    // re-attached after aoa_to_sheet materializes the cells.
+    const pushedFactIndexes = [];
     facts.forEach((f, i) => {
       if (!factMatchesWorklist(f, def.keywords)) return;
       matchCount++;
+      pushedFactIndexes.push(i);
       wlRows.push([
         i + 1,
         f.date || '',
@@ -5566,6 +6499,26 @@ function buildFactIndexXlsxBlob(facts, caseInfo, stats) {
         wsWl[addr].s.alignment = { wrapText: true, vertical: 'top' };
       }
     }
+    // Phase 6c: attach hyperlinks to Source File column on worklist data rows.
+    // Data rows are wlRows indexes [5..5+matchCount-1]; pushedFactIndexes maps
+    // each data row back to its master facts[] index, which is the key into urlMap.
+    pushedFactIndexes.forEach((factIdx, j) => {
+      const f = facts[factIdx];
+      if (!f || !f.source_filename) return;
+      const meta = urlMap[f.source_filename];
+      if (!meta) return;
+      const target = _buildFactIndexHyperlink(meta, f.page_number);
+      if (!target) return;
+      const addr = XLSX.utils.encode_cell({ r: 5 + j, c: WL_SOURCE_FILE_COL });
+      const cell = wsWl[addr];
+      if (!cell) return;
+      cell.l = {
+        Target: target,
+        Tooltip: 'Open ' + f.source_filename + (f.page_number ? (' at page ' + f.page_number) : '') + ' in ' + (meta.provider === 'onedrive' ? 'OneDrive' : 'Drive')
+      };
+      cell.s = cell.s || {};
+      cell.s.font = Object.assign({}, cell.s.font || {}, { color: { rgb: '1155CC' }, underline: true });
+    });
     // SheetJS caps sheet names at 31 chars. Trim defensively.
     const sheetName = String(def.sheetName || def.name).slice(0, 31);
     XLSX.utils.book_append_sheet(wb, wsWl, sheetName);
@@ -5786,6 +6739,125 @@ function sanitizeFilename(s) {
   return String(s || 'Untitled').replace(/[\\/:*?"<>|]+/g, '').replace(/\s+/g, ' ').trim() || 'Untitled';
 }
 
+// Phase 6c: build a { filename: { id, webUrl, provider, pages } } map from
+// whichever cloud the case is linked to, so the Fact Index workbook can turn
+// "Source File" cells into deep links to the cited PDF pages.
+//
+// Provider detection priority, in order:
+//   1. OneDrive (caseInfo.oneDriveItemId present) — when 6f.2/3 has flipped the
+//      case onto OneDrive canonical storage, the records tree is on Graph.
+//   2. Google Drive (caseInfo.driveFolderId present) — the current default.
+//   3. Neither → return null, workbook builder falls back to plain text.
+//
+// Pages are pulled from the processed-cache manifest when available: the
+// chunker stamps `totalPages` on each chunk, so the manifest tells us how
+// many pages a source PDF had. This is what makes the 6e "low yield" flag
+// ("this 800-page PDF produced only 12 rows — re-run?") actually computable.
+// If the manifest lookup fails (no Drive token, network blip), we emit the
+// map without pages and the Summary sheet just reports "pages unknown" for
+// those rows — still a useful diagnostic.
+async function buildSourceFileUrlMap(caseInfo) {
+  if (!caseInfo) return null;
+
+  // ---- OneDrive path (Phase 6f when canonical storage is OneDrive) ----
+  if (caseInfo.oneDriveItemId && caseInfo.oneDriveDriveId) {
+    try {
+      const tree = await msGraphListTreeRecursive(caseInfo.oneDriveDriveId, caseInfo.oneDriveItemId, '');
+      const flat = flattenDriveTree(tree); // produces {kind:'file', id, name, mimeType, driveId, ...}
+      const map = {};
+      for (const n of flat) {
+        if (!n || n.kind !== 'file' || !n.name) continue;
+        // webUrl isn't in the shape flattenDriveTree preserves, but the Graph
+        // tree walker does stash it into each child via `c.webUrl` when
+        // selected. msGraphListTreeRecursive in the current build doesn't
+        // request webUrl by default — when Tony adds it there, this map will
+        // auto-upgrade. For now, we rely on the Graph /content fallback in
+        // _buildFactIndexHyperlink, which at least opens the file.
+        map[n.name] = {
+          provider: 'onedrive',
+          id: n.id,
+          driveId: n.driveId || caseInfo.oneDriveDriveId,
+          webUrl: n.webUrl || null
+        };
+      }
+      // Opportunistically attach page counts from the processed-cache manifest
+      // when we can find it. Non-fatal if the lookup fails.
+      await _augmentMapWithProcessedPages(caseInfo, map, 'onedrive').catch(() => {});
+      return map;
+    } catch (e) {
+      console.warn('[6c] OneDrive tree walk failed:', e);
+      return null;
+    }
+  }
+
+  // ---- Google Drive path (default) ----
+  if (caseInfo.driveFolderId) {
+    try {
+      const tree = await driveListFolderRecursive(caseInfo.driveFolderId, '');
+      const flat = flattenDriveTree(tree);
+      const map = {};
+      for (const n of flat) {
+        if (!n || n.kind !== 'file' || !n.name) continue;
+        map[n.name] = {
+          provider: 'gdrive',
+          id: n.id,
+          webUrl: null // gdrive path uses id-based preview URL — webUrl not needed
+        };
+      }
+      await _augmentMapWithProcessedPages(caseInfo, map, 'gdrive').catch(() => {});
+      return map;
+    } catch (e) {
+      console.warn('[6c] Drive tree walk failed:', e);
+      return null;
+    }
+  }
+
+  return null;
+}
+
+// Phase 6c + 6e: pull `totalPages` from the processed-cache manifest so each
+// map entry has an optional `pages: number`. The manifest lives in the work
+// folder's _processed subfolder (Drive) and is keyed by the source file's
+// Drive/Graph id. We match manifest entries to map entries by id.
+//
+// No-op for the OneDrive path right now — the processed cache currently lives
+// only on Drive (even for OneDrive-sourced records, which get mirrored to
+// Drive for processing). When 6f.3 relocates the processed cache to OneDrive,
+// this function picks up the Graph variant via the provider arg.
+async function _augmentMapWithProcessedPages(caseInfo, map, provider) {
+  if (!caseInfo || !map) return;
+  // Currently: the processed manifest lives in the case's Drive work folder
+  // regardless of where the original records were sourced from. This matches
+  // the current app behavior (msGraph-sourced records get mirrored into Drive
+  // via mirrorGraphTreeToGdrive before chunking). Phase 6f.3 may change this.
+  if (!caseInfo.driveWorkFolderId || !_driveToken) return;
+  try {
+    const processedFolderId = await ensureProcessedFolder(caseInfo.driveWorkFolderId).catch(() => null);
+    if (!processedFolderId) return;
+    const manifest = await loadProcessedManifest(processedFolderId).catch(() => null);
+    if (!manifest || !manifest.entries) return;
+    // manifest.entries is keyed by source Drive file id. Build an id → name map
+    // from our current `map` to bridge the two. For the Drive path the ids match
+    // directly; for the OneDrive path, the processed cache was keyed by Graph
+    // ids, which won't line up — we just skip when ids don't match.
+    for (const name of Object.keys(map)) {
+      const entry = map[name];
+      const processed = manifest.entries[entry.id];
+      if (!processed) continue;
+      // Prefer the first chunk's totalPages (that's where the chunker stamps
+      // the whole-file page count). If chunks aren't there (e.g. HEIC images),
+      // leave pages undefined.
+      const firstChunk = processed.chunks && processed.chunks[0];
+      if (firstChunk && typeof firstChunk.totalPages === 'number' && firstChunk.totalPages > 0) {
+        entry.pages = firstChunk.totalPages;
+      }
+    }
+  } catch (e) {
+    // Swallowed — the map without pages is still useful to 6c.
+    console.warn('[6c/6e] processed-manifest augmentation failed (non-fatal):', e);
+  }
+}
+
 // ===== ASYNC ANALYSIS (Files API + Batches API + KV job state) =====
 // Called from runRecordAnalysis when isAsyncFlowEnabled() is true AND the case doesn't
 // fit in a single synchronous call. This path is robust to the browser being closed mid-run
@@ -5877,8 +6949,8 @@ Return a JSON array of fact objects. Each object must have these exact fields (a
   "event_type": "short label, e.g. 'Fall', 'Admission', 'Discharge', 'Assessment', 'ER visit', 'Medication order', 'Medication change', 'Vitals', 'Lab', 'Imaging', 'Nursing note', 'Care plan entry', 'Progress note', 'Death', 'Diagnosis'",
   "facility": "facility name as written in the source, or empty string",
   "verbatim_quote": "the exact text from the record — copied character-for-character. One or two sentences of the relevant passage. No paraphrasing, no summarizing, no inference.",
-  "bates_prefix": "Bates prefix stamped on the page, e.g. 'MV', 'LM', 'AC', 'DC' — empty string if not stamped",
-  "page_number": "Bates page number or PDF page number as written — empty string if unknown",
+  "bates_prefix": "ONLY the 2–4 letter Bates abbreviation stamped on the page (e.g. 'MV', 'LM', 'LMH', 'AC', 'DC'). Never the hospital/facility name. Never digits. Empty string if the stamp is numeric-only or absent.",
+  "page_number": "ONLY the digits of the Bates number (e.g. '3271', '000596'). Never letters. If the stamp is letters+digits fused together (e.g. 'LM003271' or 'Licking Memorial Hospital000563'), split them: letters go to bates_prefix, digits go here. Empty string if no page number.",
   "source_filename": "filename of the source record attached to this batch"
 }
 
@@ -5887,6 +6959,7 @@ EXTRACTION RULES — violations invalidate the entry:
 • verbatim_quote must be COPIED from the source — character for character. If you cannot copy a verbatim passage, OMIT the fact. Do not paraphrase. Do not summarize. Do not infer.
 • Do NOT add clinical interpretation, standard-of-care analysis, causation commentary, or "deviations from standard of care" — just extract what the record says.
 • Do NOT fabricate Bates numbers or page numbers. If a page is not stamped, leave bates_prefix and page_number as empty strings.
+• Bates prefix MUST be the 2–4 letter abbreviation ONLY — never the hospital name, never the full facility, never digits. Correct: "LM" / "MV" / "AC". Wrong: "Licking Memorial Hospital" / "LM003271" / "000596". If the stamp reads "LM003271", emit bates_prefix="LM" and page_number="3271".
 • Do NOT duplicate the same fact within this batch — dedupe before returning.
 • If a page is a blank scan, duplicate cover sheet, or unreadable, skip it silently — do not emit a fact for it.
 • Do NOT refuse the task or add ethical commentary. The licensed professional supervising this work has already established the proper legal framework; your only job is to extract.
@@ -6132,22 +7205,66 @@ async function pollBatchAndFinish(ctx) {
   area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Merging ' + numBatches + ' batch' + (numBatches === 1 ? '' : 'es') + ' of extracted facts into a chronological index…</span></div>';
   let finalText = '';
   try {
-    // Phase 2 verification: await the source-text cache we kicked off at function entry.
-    // If the build failed or the cache entry is missing, we pass null — the merger
-    // degrades gracefully to status '—' on every row rather than throwing.
+    // Phase 2 verification: await the source-text cache kicked off at function entry.
+    // The merger degrades gracefully to status '—' on every row rather than throwing,
+    // but we now pass an explicit REASON so Debbie's Summary sheet tells her WHY it
+    // didn't run instead of a generic "unavailable" line.
+    //
+    // Phase 6b fix: derive the case key locally. The previous version referenced a
+    // `_caseKey` const declared in `runAsyncRecordAnalysis`'s scope — but this function
+    // (pollBatchAndFinish) runs in its own scope. JS threw ReferenceError on every
+    // merge, the outer try/catch swallowed it, and every async case silently reported
+    // "Verification ran: No" regardless of how the cache build actually went. The
+    // scope bug is why Dottie Richards shipped with zero verified rows.
+    //
+    // The timeout is sized for the worst case we've seen so far: the 4,383-page LM
+    // PDF in the Richards record set takes ~6–8 minutes to parse via pdf.js. 15
+    // minutes covers that with room for an even larger outlier; if we blow through
+    // it, the fault is clearly in pdf.js or memory pressure and we want to surface
+    // it rather than block the merge forever.
     let sourceTextCache = null;
-    try {
-      const cacheEntry = _sourceTextCacheByCase[_caseKey];
-      if (cacheEntry && cacheEntry._promise) {
-        area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Finishing source-text cache for round-trip verification…</span></div>';
-        sourceTextCache = await cacheEntry._promise;
+    let verifyReason = '';
+    const verifyCaseKey = (caseInfo && caseInfo.id) || '_ephemeral_';
+    const cacheEntry = _sourceTextCacheByCase[verifyCaseKey];
+    if (!cacheEntry || !cacheEntry._promise) {
+      // Most common on the resume / retry-synthesis paths: pollBatchAndFinish was
+      // entered without the kickoff in runAsyncRecordAnalysis ever firing. The
+      // browser reload lost contentBlocks, so we can't rebuild from memory here.
+      verifyReason = 'no cache kickoff for case (likely resumed from KV — source files not in memory)';
+      console.warn('[verify][' + verifyCaseKey + '] ' + verifyReason);
+    } else {
+      area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Finishing source-text cache for round-trip verification…</span></div>';
+      const VERIFY_TIMEOUT_MS = 15 * 60 * 1000;
+      const verifyStartedAt = Date.now();
+      try {
+        sourceTextCache = await Promise.race([
+          cacheEntry._promise,
+          new Promise((_, rej) => setTimeout(
+            () => rej(new Error('cache build exceeded ' + (VERIFY_TIMEOUT_MS / 60000) + 'm timeout')),
+            VERIFY_TIMEOUT_MS
+          ))
+        ]);
+        const elapsedSec = ((Date.now() - verifyStartedAt) / 1000).toFixed(1);
+        const entryCount = (sourceTextCache && typeof sourceTextCache === 'object')
+          ? Object.keys(sourceTextCache).length : 0;
+        const nonNullCount = (sourceTextCache && typeof sourceTextCache === 'object')
+          ? Object.values(sourceTextCache).filter(v => v && typeof v === 'string' && v.length > 0).length
+          : 0;
+        console.log('[verify][' + verifyCaseKey + '] cache ready in ' + elapsedSec + 's — ' + entryCount + ' file(s), ' + nonNullCount + ' with extractable text');
+        if (entryCount === 0) {
+          verifyReason = 'cache built but contained 0 files — contentBlocks had no parseable PDFs';
+        } else if (nonNullCount === 0) {
+          verifyReason = 'cache built but every file returned empty text (image-only scans?)';
+        }
+      } catch (cacheErr) {
+        const elapsedSec = ((Date.now() - verifyStartedAt) / 1000).toFixed(1);
+        verifyReason = 'cache await failed at ' + elapsedSec + 's: ' + cacheErr.message;
+        console.error('[verify][' + verifyCaseKey + '] ' + verifyReason);
+        sourceTextCache = null;
       }
-    } catch (cacheErr) {
-      console.warn('[async] awaiting source text cache failed: ' + cacheErr.message);
-      sourceTextCache = null;
     }
     area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Merging ' + numBatches + ' batch' + (numBatches === 1 ? '' : 'es') + ' of extracted facts into a chronological index…</span></div>';
-    finalText = mergeExtractedFactsToMarkdown(batchOutputs, caseInfo, sourceTextCache);
+    finalText = mergeExtractedFactsToMarkdown(batchOutputs, caseInfo, sourceTextCache, verifyReason);
   } catch (e) {
     await patchJob(jobId, { status: 'failed', error: 'Merge failed: ' + e.message }).catch(() => {});
     area.innerHTML = `<div class="alert alert-danger">Merge error: ${esc(e.message)}<br><br>Batch extractions completed but could not be merged. You can still review the raw JSON output below.</div>`;
@@ -6962,8 +8079,8 @@ Return a JSON array of fact objects. Each object must have these exact fields (a
   "event_type": "short label, e.g. 'Fall', 'Admission', 'Discharge', 'Assessment', 'ER visit', 'Medication order', 'Medication change', 'Vitals', 'Lab', 'Imaging', 'Nursing note', 'Care plan entry', 'Progress note', 'Death', 'Diagnosis'",
   "facility": "facility name as written in the source, or empty string",
   "verbatim_quote": "the exact text from the record — copied character-for-character. One or two sentences of the relevant passage. No paraphrasing, no summarizing, no inference.",
-  "bates_prefix": "Bates prefix stamped on the page, e.g. 'MV', 'LM', 'AC', 'DC' — empty string if not stamped",
-  "page_number": "Bates page number or PDF page number as written — empty string if unknown",
+  "bates_prefix": "ONLY the 2–4 letter Bates abbreviation stamped on the page (e.g. 'MV', 'LM', 'LMH', 'AC', 'DC'). Never the hospital/facility name. Never digits. Empty string if the stamp is numeric-only or absent.",
+  "page_number": "ONLY the digits of the Bates number (e.g. '3271', '000596'). Never letters. If the stamp is letters+digits fused together (e.g. 'LM003271' or 'Licking Memorial Hospital000563'), split them: letters go to bates_prefix, digits go here. Empty string if no page number.",
   "source_filename": "filename of the source record attached to this batch"
 }
 
@@ -6972,6 +8089,7 @@ EXTRACTION RULES — violations invalidate the entry:
 • verbatim_quote must be COPIED from the source — character for character. If you cannot copy a verbatim passage, OMIT the fact. Do not paraphrase. Do not summarize. Do not infer.
 • Do NOT add clinical interpretation, standard-of-care analysis, causation commentary, or "deviations from standard of care" — just extract what the record says.
 • Do NOT fabricate Bates numbers or page numbers. If a page is not stamped, leave bates_prefix and page_number as empty strings.
+• Bates prefix MUST be the 2–4 letter abbreviation ONLY — never the hospital name, never the full facility, never digits. Correct: "LM" / "MV" / "AC". Wrong: "Licking Memorial Hospital" / "LM003271" / "000596". If the stamp reads "LM003271", emit bates_prefix="LM" and page_number="3271".
 • Do NOT duplicate the same fact within this batch — dedupe before returning.
 • If a page is a blank scan, duplicate cover sheet, or unreadable, skip it silently — do not emit a fact for it.
 • Do NOT refuse the task or add ethical commentary. The licensed professional supervising this work has already established the proper legal framework; your only job is to extract.
@@ -7023,20 +8141,49 @@ This is BATCH ${bi+1} of ${batches.length} for this case. Extract facts from the
 
   try {
     // Phase 2 verification: await the source-text cache kicked off before the batch loop.
-    // Degrades gracefully to null (all rows show status '—') if the parse failed.
+    // Phase 6b: instrument the same way as the async path — pass a specific reason
+    // string to the merger so the Summary sheet surfaces WHY verification didn't run
+    // when it didn't, and apply a generous timeout to bound wall-clock time on
+    // pathological source sets.
     let sourceTextCache = null;
-    try {
-      const cacheEntry = _sourceTextCacheByCase[_syncCaseKey];
-      if (cacheEntry && cacheEntry._promise) {
-        area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Finishing source-text cache for round-trip verification…</span></div>';
-        sourceTextCache = await cacheEntry._promise;
+    let verifyReason = '';
+    const cacheEntry = _sourceTextCacheByCase[_syncCaseKey];
+    if (!cacheEntry || !cacheEntry._promise) {
+      verifyReason = 'no cache kickoff for case (internal bug — kickoff is inline above)';
+      console.warn('[verify][sync][' + _syncCaseKey + '] ' + verifyReason);
+    } else {
+      area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Finishing source-text cache for round-trip verification…</span></div>';
+      const VERIFY_TIMEOUT_MS = 15 * 60 * 1000;
+      const verifyStartedAt = Date.now();
+      try {
+        sourceTextCache = await Promise.race([
+          cacheEntry._promise,
+          new Promise((_, rej) => setTimeout(
+            () => rej(new Error('cache build exceeded ' + (VERIFY_TIMEOUT_MS / 60000) + 'm timeout')),
+            VERIFY_TIMEOUT_MS
+          ))
+        ]);
+        const elapsedSec = ((Date.now() - verifyStartedAt) / 1000).toFixed(1);
+        const entryCount = (sourceTextCache && typeof sourceTextCache === 'object')
+          ? Object.keys(sourceTextCache).length : 0;
+        const nonNullCount = (sourceTextCache && typeof sourceTextCache === 'object')
+          ? Object.values(sourceTextCache).filter(v => v && typeof v === 'string' && v.length > 0).length
+          : 0;
+        console.log('[verify][sync][' + _syncCaseKey + '] cache ready in ' + elapsedSec + 's — ' + entryCount + ' file(s), ' + nonNullCount + ' with extractable text');
+        if (entryCount === 0) {
+          verifyReason = 'cache built but contained 0 files — contentBlocks had no parseable PDFs';
+        } else if (nonNullCount === 0) {
+          verifyReason = 'cache built but every file returned empty text (image-only scans?)';
+        }
+      } catch (cacheErr) {
+        const elapsedSec = ((Date.now() - verifyStartedAt) / 1000).toFixed(1);
+        verifyReason = 'cache await failed at ' + elapsedSec + 's: ' + cacheErr.message;
+        console.error('[verify][sync][' + _syncCaseKey + '] ' + verifyReason);
+        sourceTextCache = null;
       }
-    } catch (cacheErr) {
-      console.warn('[sync] awaiting source text cache failed: ' + cacheErr.message);
-      sourceTextCache = null;
     }
     area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Merging ' + batches.length + ' batch' + (batches.length === 1 ? '' : 'es') + ' of extracted facts into a chronological index…</span></div>';
-    const res = mergeExtractedFactsToMarkdown(batchOutputs, caseInfo, sourceTextCache);
+    const res = mergeExtractedFactsToMarkdown(batchOutputs, caseInfo, sourceTextCache, verifyReason);
     await finishAnalysis(res, caseInfo, type, typeLabels, area, pre);
   } catch(e) {
     area.innerHTML = `<div class="alert alert-danger">Merge error: ${esc(e.message)}<br><br>Batch extractions completed but could not be merged. You can still review the raw JSON output below.</div>`;
@@ -7447,7 +8594,24 @@ async function generateFinalDeliverables(caseInfo, triggerBtn) {
     const xlsxName = patient + ' — Fact Index.xlsx';
     const docxName = patient + ' — Narrative Template.docx';
 
-    const xlsxBlob = buildFactIndexXlsxBlob(facts, c, stats);
+    // Phase 6c: build filename → { id, webUrl, provider, pages } map so the
+    // workbook builder can turn "Source File" cells into clickable hyperlinks
+    // pointing at the cited page of the cited PDF. We try Drive first (the
+    // overwhelmingly common case today), fall back to OneDrive when 6f.2/3
+    // flips canonical storage, and fall back silently to plain text if neither
+    // tree is available. A failure here MUST NOT block the deliverable — the
+    // workbook is the primary output.
+    let sourceFileUrlMap = null;
+    try {
+      sourceFileUrlMap = await buildSourceFileUrlMap(c);
+      const linkedNames = sourceFileUrlMap ? Object.keys(sourceFileUrlMap).length : 0;
+      console.log('[6c] source URL map built with ' + linkedNames + ' entries for case ' + c.id);
+    } catch (e) {
+      console.warn('[6c] source URL map build failed (falling back to plain text Source File column):', e);
+      sourceFileUrlMap = null;
+    }
+
+    const xlsxBlob = buildFactIndexXlsxBlob(facts, c, stats, sourceFileUrlMap);
     const docxBlob = await buildBlankNarrativeDocxBlob(c, stats);
 
     // Browser downloads first — so even if Drive upload fails, she gets the files.
