@@ -1188,7 +1188,7 @@ tr:hover td { background: var(--gray-50); }
 // Format: YYYY.MM.DD.N where N is the Nth change on that day (1-indexed).
 // APP_VERSION_LABEL is a human-readable caption shown on hover.
 // ============================================================================
-const APP_VERSION       = '2026.04.23.6';
+const APP_VERSION       = '2026.04.23.7';
 const APP_VERSION_LABEL = 'Apr 23, 2026 (x5) — Phase 6f.2 partial: OneDrive canonical-storage picker + dispatcher shipped. NEW UI on Case Manager page: second folder strip (☁️ icon) right below the Drive root strip — "Set OneDrive folder" prompts for a OneDrive folder share link, resolves it via msGraphGetShareItem (same plumbing proven on the attorney-import read path), and persists state.oneDriveRootDriveId / oneDriveRootFolderId / oneDriveRootFolderName. Adjacent "Use OneDrive as canonical" checkbox flips state.canonicalStorage between "gdrive" and "onedrive" — refuses to flip ON until a OneDrive folder is set (prevents silent dead-end); auto-flips OFF if the user clears the folder. Strip label shows "canonical" (gold) vs "standby" (gray) so Debbie can see at a glance which provider will claim the next case. MS_SCOPES now includes Files.ReadWrite.All (next interactive sign-in will reprompt consent — correct behavior). NEW functions: pickOneDriveRootFolder, clearOneDriveRootFolder, toggleCanonicalStorage, renderOneDriveRootStrip (all parallel to their Drive siblings), ensureCaseHierarchyOneDrive (creates {root}/{firm}/{attorney}/{case} + {root}/_Internal/{firm}/{attorney}/{case} via msGraphFindOrCreateFolder — same two-tree split as Drive, link-shared records via msGraphShareAnyoneReader, private work), and the key dispatcher ensureCaseCanonicalHierarchy(caseInfo) which reads state.canonicalStorage and routes to ensureCaseHierarchy OR ensureCaseHierarchyOneDrive, persisting provider-specific fields onto caseInfo (oneDriveDriveId/oneDriveItemId/oneDriveFolderWebUrl/oneDriveWorkDriveId/oneDriveWorkItemId OR the legacy driveFolderId/driveWorkFolderId). init() now calls renderOneDriveRootStrip alongside renderDriveRootStrip. DEFERRED within 6f.2: the 50+ existing call sites that read driveFolderId / driveWorkFolderId directly have NOT been rewritten to go through the dispatcher — that is Phase 6f.3. Flipping canonicalStorage to "onedrive" today will create OneDrive hierarchies for new cases on save, but the analysis / cache / DM-token paths still read Drive fields, so actual runs continue on Drive until 6f.3 lands. This is the safe intermediate state that unblocks Richards/Mimms re-run without destabilizing the Drive flow. Parse-check clean (491,345 bytes inline JS across 2 script blocks). Phase 6c + 6e (deep-link Fact Index rows + per-source yield telemetry) from x4 remain fully intact. 6d (periodOfCare date filter, requires schema addition) and 6f.3 (50-site provider-aware refactor) still deferred pending Tony\'s go-ahead.';
 
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
@@ -8909,7 +8909,25 @@ async function finishAnalysis(res, caseInfo, type, typeLabels, area, pre) {
           const stats = caseRec.lastAnalysisStats || {};
           const patient = sanitizeFilename(caseRec.patient || 'Case');
           const xlsxName = patient + ' — Fact Index.xlsx';
-          const xlsxBlob = buildFactIndexXlsxBlob(facts, caseRec, stats);
+          // Phase 6c parity fix: build the filename → URL map before generating the
+          // auto-saved workbook so the Source-File column is clickable. Previously
+          // this call passed 3 args, producing a URL-map-less workbook that the
+          // Summary sheet correctly flagged as "source-file URL map was not
+          // provided at workbook build time." Only the Finalize click produced a
+          // linkified version — but Debbie usually grabs the auto-saved copy from
+          // the Drive work folder rather than clicking Finalize, so the live
+          // workflow almost never saw the hyperlinks.
+          let autoUrlMap = null;
+          try {
+            autoUrlMap = await buildSourceFileUrlMap(caseRec);
+            if (autoUrlMap) {
+              console.log('[finish] auto-save URL map built with ' + Object.keys(autoUrlMap).length + ' entries');
+            }
+          } catch (umErr) {
+            console.warn('[finish] URL map build failed (auto-saved workbook will fall back to plain text):', umErr);
+            autoUrlMap = null;
+          }
+          const xlsxBlob = buildFactIndexXlsxBlob(facts, caseRec, stats, autoUrlMap);
           await driveUploadFile(destFolderId, xlsxName, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', xlsxBlob);
           showToast('📊 Fact Index spreadsheet saved to Drive: ' + xlsxName);
         }
