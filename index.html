@@ -1188,7 +1188,7 @@ tr:hover td { background: var(--gray-50); }
 // Format: YYYY.MM.DD.N where N is the Nth change on that day (1-indexed).
 // APP_VERSION_LABEL is a human-readable caption shown on hover.
 // ============================================================================
-const APP_VERSION       = '2026.04.23.7';
+const APP_VERSION       = '2026.04.23.8';
 const APP_VERSION_LABEL = 'Apr 23, 2026 (x5) — Phase 6f.2 partial: OneDrive canonical-storage picker + dispatcher shipped. NEW UI on Case Manager page: second folder strip (☁️ icon) right below the Drive root strip — "Set OneDrive folder" prompts for a OneDrive folder share link, resolves it via msGraphGetShareItem (same plumbing proven on the attorney-import read path), and persists state.oneDriveRootDriveId / oneDriveRootFolderId / oneDriveRootFolderName. Adjacent "Use OneDrive as canonical" checkbox flips state.canonicalStorage between "gdrive" and "onedrive" — refuses to flip ON until a OneDrive folder is set (prevents silent dead-end); auto-flips OFF if the user clears the folder. Strip label shows "canonical" (gold) vs "standby" (gray) so Debbie can see at a glance which provider will claim the next case. MS_SCOPES now includes Files.ReadWrite.All (next interactive sign-in will reprompt consent — correct behavior). NEW functions: pickOneDriveRootFolder, clearOneDriveRootFolder, toggleCanonicalStorage, renderOneDriveRootStrip (all parallel to their Drive siblings), ensureCaseHierarchyOneDrive (creates {root}/{firm}/{attorney}/{case} + {root}/_Internal/{firm}/{attorney}/{case} via msGraphFindOrCreateFolder — same two-tree split as Drive, link-shared records via msGraphShareAnyoneReader, private work), and the key dispatcher ensureCaseCanonicalHierarchy(caseInfo) which reads state.canonicalStorage and routes to ensureCaseHierarchy OR ensureCaseHierarchyOneDrive, persisting provider-specific fields onto caseInfo (oneDriveDriveId/oneDriveItemId/oneDriveFolderWebUrl/oneDriveWorkDriveId/oneDriveWorkItemId OR the legacy driveFolderId/driveWorkFolderId). init() now calls renderOneDriveRootStrip alongside renderDriveRootStrip. DEFERRED within 6f.2: the 50+ existing call sites that read driveFolderId / driveWorkFolderId directly have NOT been rewritten to go through the dispatcher — that is Phase 6f.3. Flipping canonicalStorage to "onedrive" today will create OneDrive hierarchies for new cases on save, but the analysis / cache / DM-token paths still read Drive fields, so actual runs continue on Drive until 6f.3 lands. This is the safe intermediate state that unblocks Richards/Mimms re-run without destabilizing the Drive flow. Parse-check clean (491,345 bytes inline JS across 2 script blocks). Phase 6c + 6e (deep-link Fact Index rows + per-source yield telemetry) from x4 remain fully intact. 6d (periodOfCare date filter, requires schema addition) and 6f.3 (50-site provider-aware refactor) still deferred pending Tony\'s go-ahead.';
 
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
@@ -6968,7 +6968,12 @@ async function _augmentMapWithProcessedPages(caseInfo, map, provider) {
     // from our current `map` to bridge the two. For the Drive path the ids match
     // directly; for the OneDrive path, the processed cache was keyed by Graph
     // ids, which won't line up — we just skip when ids don't match.
-    for (const name of Object.keys(map)) {
+    // Snapshot keys up-front: we mutate `map` inside the loop (adding chunk-title
+    // variants) and iterating Object.keys() directly on a live map would revisit
+    // the new keys and redundantly re-process them.
+    const originalNames = Object.keys(map);
+    let chunkKeysAdded = 0;
+    for (const name of originalNames) {
       const entry = map[name];
       const processed = manifest.entries[entry.id];
       if (!processed) continue;
@@ -6979,6 +6984,40 @@ async function _augmentMapWithProcessedPages(caseInfo, map, provider) {
       if (firstChunk && typeof firstChunk.totalPages === 'number' && firstChunk.totalPages > 0) {
         entry.pages = firstChunk.totalPages;
       }
+      // Phase 6c follow-up: register chunk-title variants so the workbook
+      // builder can resolve `urlMap[source_filename]` when the model cited a
+      // chunk (e.g. "Foo — pp. 36-70 of 1111.pdf") rather than the original PDF
+      // (e.g. "Foo.pdf"). The chunk files themselves don't exist in Drive —
+      // they're ephemeral slices created during upload — so every chunk title
+      // resolves to the SAME Drive file id as the original PDF, and the #page
+      // fragment in _buildFactIndexHyperlink takes Debbie to the right page
+      // inside that PDF. Mirrors the same expansion rebuildSourceTextCacheFromDrive
+      // applies to the source-text cache (see lines ~5765-5773).
+      //
+      // Single-chunk files (length <= 1) already match the original name that's
+      // already in the map, so skip them to keep the map small.
+      if (processed.kind === 'pdfChunks' && Array.isArray(processed.chunks) && processed.chunks.length > 1) {
+        const baseName = name.replace(/\.pdf$/i, '');
+        for (const ck of processed.chunks) {
+          if (!ck || typeof ck.startPage !== 'number' || typeof ck.endPage !== 'number') continue;
+          const partTitle = baseName + ' — pp. ' + ck.startPage + '-' + ck.endPage + ' of ' + (ck.totalPages || '?') + '.pdf';
+          if (map[partTitle]) continue; // don't overwrite a real Drive file with the same name
+          // Re-emit the original entry under the chunk title. Same id/webUrl —
+          // so _buildFactIndexHyperlink produces the same preview URL, just
+          // anchored to the cited page from the Fact Index row.
+          map[partTitle] = {
+            provider: entry.provider,
+            id: entry.id,
+            driveId: entry.driveId,
+            webUrl: entry.webUrl,
+            pages: entry.pages
+          };
+          chunkKeysAdded++;
+        }
+      }
+    }
+    if (chunkKeysAdded > 0) {
+      console.log('[6c] urlMap expanded with ' + chunkKeysAdded + ' chunk-title variant(s) — ' + Object.keys(map).length + ' total keys');
     }
   } catch (e) {
     // Swallowed — the map without pages is still useful to 6c.
