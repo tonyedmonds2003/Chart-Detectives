@@ -1188,8 +1188,8 @@ tr:hover td { background: var(--gray-50); }
 // Format: YYYY.MM.DD.N where N is the Nth change on that day (1-indexed).
 // APP_VERSION_LABEL is a human-readable caption shown on hover.
 // ============================================================================
-const APP_VERSION       = '2026.04.23.9';
-const APP_VERSION_LABEL = 'Apr 23, 2026 (x5) — Phase 6f.2 partial: OneDrive canonical-storage picker + dispatcher shipped. NEW UI on Case Manager page: second folder strip (☁️ icon) right below the Drive root strip — "Set OneDrive folder" prompts for a OneDrive folder share link, resolves it via msGraphGetShareItem (same plumbing proven on the attorney-import read path), and persists state.oneDriveRootDriveId / oneDriveRootFolderId / oneDriveRootFolderName. Adjacent "Use OneDrive as canonical" checkbox flips state.canonicalStorage between "gdrive" and "onedrive" — refuses to flip ON until a OneDrive folder is set (prevents silent dead-end); auto-flips OFF if the user clears the folder. Strip label shows "canonical" (gold) vs "standby" (gray) so Debbie can see at a glance which provider will claim the next case. MS_SCOPES now includes Files.ReadWrite.All (next interactive sign-in will reprompt consent — correct behavior). NEW functions: pickOneDriveRootFolder, clearOneDriveRootFolder, toggleCanonicalStorage, renderOneDriveRootStrip (all parallel to their Drive siblings), ensureCaseHierarchyOneDrive (creates {root}/{firm}/{attorney}/{case} + {root}/_Internal/{firm}/{attorney}/{case} via msGraphFindOrCreateFolder — same two-tree split as Drive, link-shared records via msGraphShareAnyoneReader, private work), and the key dispatcher ensureCaseCanonicalHierarchy(caseInfo) which reads state.canonicalStorage and routes to ensureCaseHierarchy OR ensureCaseHierarchyOneDrive, persisting provider-specific fields onto caseInfo (oneDriveDriveId/oneDriveItemId/oneDriveFolderWebUrl/oneDriveWorkDriveId/oneDriveWorkItemId OR the legacy driveFolderId/driveWorkFolderId). init() now calls renderOneDriveRootStrip alongside renderDriveRootStrip. DEFERRED within 6f.2: the 50+ existing call sites that read driveFolderId / driveWorkFolderId directly have NOT been rewritten to go through the dispatcher — that is Phase 6f.3. Flipping canonicalStorage to "onedrive" today will create OneDrive hierarchies for new cases on save, but the analysis / cache / DM-token paths still read Drive fields, so actual runs continue on Drive until 6f.3 lands. This is the safe intermediate state that unblocks Richards/Mimms re-run without destabilizing the Drive flow. Parse-check clean (491,345 bytes inline JS across 2 script blocks). Phase 6c + 6e (deep-link Fact Index rows + per-source yield telemetry) from x4 remain fully intact. 6d (periodOfCare date filter, requires schema addition) and 6f.3 (50-site provider-aware refactor) still deferred pending Tony\'s go-ahead.';
+const APP_VERSION       = '2026.04.24.6';
+const APP_VERSION_LABEL = 'Apr 24, 2026 (x6) — Phase 6f.3 ALL 6 BATCHES COMPLETE. BATCH 6: self-heal + diagnostics provider-aware. onRecCaseSelectChanged now detects the root-pointer bug for BOTH providers independently (driveFolderId === driveRootFolderId AND oneDriveItemId === oneDriveRootFolderId) and clears the offending provider-specific fields + canonical mirrors only when that provider is the canonical one, so a OneDrive-canonical case with a stale driveFolderId no longer loses its canonical pointers. New console-callable dumpStorageDiagnostics() prints a provider-aware table of every case\u2019s canonical folder with warn flags for root-pointer bugs or missing folderIds. BATCH 5: msGraphListChildren $select includes webUrl so tree walks stamp webUrl on every file/folder node; Fact Index rows can deep-link to #page=N on OneDrive via webUrl without the Graph /content fallback. BATCH 4: analysis pipeline + citation URL builders provider-aware via listCaseRecordsTree + downloadCaseRecordBlob dispatchers; parseInline prefers labelHit.url when present. BATCH 3: _processed cache manifest + upload via getProcessedCacheRef / loadProcessedManifestByRef / saveProcessedManifestByRef / uploadPdfChunkByRef / uploadConvertedJpegByRef. BATCH 2: ensureCaseCanonicalHierarchy mirrors canonical* fields on both providers; default canonicalStorage = onedrive. BATCH 1: getCaseStorageRef resolver + migrateCaseStorageProvider on load. Parse-check clean. Ready for Tony to re-run Mimms + Richards fresh on OneDrive as smoke tests.';
 
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
 
@@ -1704,8 +1704,13 @@ async function msGraphGetShareItem(shareUrl) {
 // pagination so we don't silently drop files in large folders.
 async function msGraphListChildren(driveId, itemId) {
   const token = await msGetToken();
+  // Phase 6f.3 batch 5: $select webUrl so Fact Index rows can deep-link each
+  // source file to its #page=N anchor in the Office Online viewer. Without
+  // webUrl, buildSourceFileUrlMap falls back to the Graph /content endpoint
+  // which opens the file but won't page-jump — an inferior experience for
+  // Debbie clicking through to verify a citation.
   const first = 'https://graph.microsoft.com/v1.0/drives/' + driveId + '/items/' + itemId + '/children' +
-                '?$top=200&$select=id,name,folder,file,size,lastModifiedDateTime,parentReference';
+                '?$top=200&$select=id,name,folder,file,size,lastModifiedDateTime,parentReference,webUrl';
   const results = [];
   let nextUrl = first;
   while (nextUrl) {
@@ -1734,7 +1739,7 @@ async function msGraphListTreeRecursive(driveId, itemId, _relPath) {
     const childPath = rel ? (rel + '/' + c.name) : c.name;
     if (c.folder) {
       const sub = await msGraphListTreeRecursive(driveId, c.id, childPath);
-      out.push({ kind: 'folder', id: c.id, driveId, name: c.name, path: childPath, children: sub });
+      out.push({ kind: 'folder', id: c.id, driveId, name: c.name, path: childPath, webUrl: c.webUrl || null, children: sub });
     } else {
       out.push({
         kind: 'file',
@@ -1749,6 +1754,9 @@ async function msGraphListTreeRecursive(driveId, itemId, _relPath) {
         // md5Checksum serves for Google Drive. Use whatever's available —
         // the refresh-diff treats any mismatch as "changed, re-copy".
         md5Checksum: (c.file && c.file.hashes && (c.file.hashes.quickXorHash || c.file.hashes.sha1Hash)) || null,
+        // Phase 6f.3 batch 5: webUrl persisted so the Fact Index hyperlink
+        // builder can emit {webUrl}#page=N links without a follow-up fetch.
+        webUrl: c.webUrl || null,
         path: rel
       });
     }
@@ -2747,9 +2755,10 @@ async function ensureCaseHierarchyOneDrive(caseInfo) {
 // ============================================================================
 async function ensureCaseCanonicalHierarchy(caseInfo) {
   if (!caseInfo) throw new Error('Unknown case.');
-  const canonical = (state && state.canonicalStorage) || 'gdrive';
+  const canonical = (state && state.canonicalStorage) || 'onedrive';
   if (canonical === 'onedrive') {
     const h = await ensureCaseHierarchyOneDrive(caseInfo);
+    // Legacy fields (kept for unmigrated 6f.3 call sites).
     caseInfo.oneDriveDriveId        = h.records.driveId;
     caseInfo.oneDriveItemId         = h.records.id;
     caseInfo.oneDriveFolderName     = h.records.name;
@@ -2757,24 +2766,211 @@ async function ensureCaseCanonicalHierarchy(caseInfo) {
     caseInfo.oneDriveWorkDriveId    = h.work.driveId;
     caseInfo.oneDriveWorkItemId     = h.work.id;
     caseInfo.oneDriveWorkFolderName = h.work.name;
+    // Phase 6f.3 batch 2: provider-neutral canonical fields + storageProvider.
+    // Every read site will migrate to getCaseStorageRef() which prefers these.
+    caseInfo.storageProvider          = 'onedrive';
+    caseInfo.canonicalFolderId        = h.records.id;
+    caseInfo.canonicalFolderName      = h.records.name;
+    caseInfo.canonicalFolderWebUrl    = h.records.webUrl || caseInfo.canonicalFolderWebUrl || '';
+    caseInfo.canonicalWorkFolderId    = h.work.id;
+    caseInfo.canonicalWorkFolderName  = h.work.name;
+    caseInfo.canonicalDriveId         = h.records.driveId;
+    caseInfo.canonicalWorkDriveId     = h.work.driveId;
     save();
     return {
       records: { provider: 'onedrive', id: h.records.id, driveId: h.records.driveId, name: h.records.name, webUrl: h.records.webUrl },
       work:    { provider: 'onedrive', id: h.work.id,    driveId: h.work.driveId,    name: h.work.name,    webUrl: h.work.webUrl    },
     };
   }
-  // Drive path (default)
+  // Drive path
   const h = await ensureCaseHierarchy(caseInfo);
   caseInfo.driveFolderId       = caseInfo.driveFolderId       || h.records.id;
   caseInfo.driveFolderName     = caseInfo.driveFolderName     || h.records.name;
   caseInfo.driveWorkFolderId   = h.work.id;
   caseInfo.driveWorkFolderName = h.work.name;
+  // Phase 6f.3 batch 2: mirror into canonical fields so the Drive path and
+  // OneDrive path present identically to resolver-aware call sites.
+  caseInfo.storageProvider         = 'gdrive';
+  caseInfo.canonicalFolderId       = caseInfo.driveFolderId;
+  caseInfo.canonicalFolderName     = caseInfo.driveFolderName;
+  caseInfo.canonicalFolderWebUrl   = 'https://drive.google.com/drive/folders/' + caseInfo.driveFolderId;
+  caseInfo.canonicalWorkFolderId   = caseInfo.driveWorkFolderId;
+  caseInfo.canonicalWorkFolderName = caseInfo.driveWorkFolderName;
+  caseInfo.canonicalDriveId        = '';
+  caseInfo.canonicalWorkDriveId    = '';
   save();
   return {
     records: { provider: 'gdrive', id: h.records.id, driveId: null, name: h.records.name, webUrl: null },
     work:    { provider: 'gdrive', id: h.work.id,    driveId: null, name: h.work.name,    webUrl: null },
   };
 }
+
+// ============================================================================
+// Phase 6f.3: provider-aware resolver. Every site that previously reached into
+// caseInfo.driveFolderId / caseInfo.driveWorkFolderId directly should now call
+// this and read from the returned ref. The resolver prefers the new
+// provider-neutral fields (canonicalFolderId/canonicalWorkFolderId + the
+// per-provider id/driveId/webUrl details), and falls back to legacy Drive
+// fields when the case was created before the 6f.3 migration.
+//
+// Return shape:
+//   {
+//     provider:        'gdrive' | 'onedrive' | null,
+//     folderId:        string | null,   // records folder (Drive id or Graph itemId)
+//     folderName:      string | null,
+//     folderWebUrl:    string | null,   // synthesized for Drive, direct for OneDrive
+//     workFolderId:    string | null,
+//     workFolderName:  string | null,
+//     driveId:         string | null,   // OneDrive drive container id; null for Drive
+//     workDriveId:     string | null,
+//   }
+//
+// Rules:
+//   - If caseInfo.storageProvider is set explicitly, that wins. (New cases
+//     created under 6f.3+ always have this.)
+//   - Otherwise we infer: oneDriveItemId wins over driveFolderId. This handles
+//     legacy cases that migrated via ensureCaseCanonicalHierarchy before the
+//     storageProvider field existed.
+//   - If neither is populated, provider is null and the caller is expected to
+//     run ensureCaseCanonicalHierarchy(caseInfo) first.
+//
+// IMPORTANT: this function NEVER writes to caseInfo — it's pure. Mutations
+// happen in ensureCaseCanonicalHierarchy / migration. Keep it that way so the
+// resolver can be called from render paths without risk of partial writes.
+// ============================================================================
+function getCaseStorageRef(caseInfo) {
+  const empty = {
+    provider: null,
+    folderId: null, folderName: null, folderWebUrl: null,
+    workFolderId: null, workFolderName: null,
+    driveId: null, workDriveId: null,
+  };
+  if (!caseInfo) return empty;
+
+  // Prefer the explicit per-case provider flag when present.
+  let provider = caseInfo.storageProvider || null;
+  if (!provider) {
+    if (caseInfo.oneDriveItemId) provider = 'onedrive';
+    else if (caseInfo.driveFolderId) provider = 'gdrive';
+  }
+  if (!provider) return empty;
+
+  if (provider === 'onedrive') {
+    return {
+      provider: 'onedrive',
+      folderId:       caseInfo.oneDriveItemId       || caseInfo.canonicalFolderId     || null,
+      folderName:     caseInfo.oneDriveFolderName   || caseInfo.canonicalFolderName   || null,
+      folderWebUrl:   caseInfo.oneDriveFolderWebUrl || caseInfo.canonicalFolderWebUrl || null,
+      workFolderId:   caseInfo.oneDriveWorkItemId   || caseInfo.canonicalWorkFolderId || null,
+      workFolderName: caseInfo.oneDriveWorkFolderName || caseInfo.canonicalWorkFolderName || null,
+      driveId:        caseInfo.oneDriveDriveId      || caseInfo.canonicalDriveId      || null,
+      workDriveId:    caseInfo.oneDriveWorkDriveId  || caseInfo.canonicalWorkDriveId  || null,
+    };
+  }
+
+  // gdrive
+  const folderId = caseInfo.driveFolderId || caseInfo.canonicalFolderId || null;
+  const workId   = caseInfo.driveWorkFolderId || caseInfo.canonicalWorkFolderId || null;
+  return {
+    provider: 'gdrive',
+    folderId,
+    folderName:     caseInfo.driveFolderName || caseInfo.canonicalFolderName || null,
+    folderWebUrl:   folderId ? ('https://drive.google.com/drive/folders/' + folderId) : null,
+    workFolderId:   workId,
+    workFolderName: caseInfo.driveWorkFolderName || caseInfo.canonicalWorkFolderName || null,
+    driveId:        null,
+    workDriveId:    null,
+  };
+}
+
+// One-time, idempotent migration of existing cases into the 6f.3 schema. Runs
+// on load(), sets storageProvider + canonicalFolderId + canonicalWorkFolderId
+// on every case whose provider can be inferred from existing fields. Safe to
+// re-run — skips any case already migrated.
+function migrateCaseStorageProvider() {
+  if (!state || !Array.isArray(state.cases)) return;
+  let changed = false;
+  state.cases.forEach(c => {
+    if (c.storageProvider && c.canonicalFolderId) return; // already migrated
+
+    // Prefer OneDrive fields when present (if a case has both, OneDrive is the
+    // newer record because 6f.2 only writes oneDrive* on new OneDrive cases).
+    if (c.oneDriveItemId) {
+      c.storageProvider         = 'onedrive';
+      c.canonicalFolderId       = c.oneDriveItemId;
+      c.canonicalFolderName     = c.oneDriveFolderName || '';
+      c.canonicalFolderWebUrl   = c.oneDriveFolderWebUrl || '';
+      c.canonicalWorkFolderId   = c.oneDriveWorkItemId || '';
+      c.canonicalWorkFolderName = c.oneDriveWorkFolderName || '';
+      c.canonicalDriveId        = c.oneDriveDriveId || '';
+      c.canonicalWorkDriveId    = c.oneDriveWorkDriveId || '';
+      changed = true;
+    } else if (c.driveFolderId) {
+      c.storageProvider         = 'gdrive';
+      c.canonicalFolderId       = c.driveFolderId;
+      c.canonicalFolderName     = c.driveFolderName || '';
+      c.canonicalFolderWebUrl   = 'https://drive.google.com/drive/folders/' + c.driveFolderId;
+      c.canonicalWorkFolderId   = c.driveWorkFolderId || '';
+      c.canonicalWorkFolderName = c.driveWorkFolderName || '';
+      c.canonicalDriveId        = '';
+      c.canonicalWorkDriveId    = '';
+      changed = true;
+    }
+    // Cases with neither field set are skipped — they'll be initialized by
+    // ensureCaseCanonicalHierarchy on first save / analysis.
+  });
+  if (changed) save();
+}
+
+// Phase 6f.3 batch 6: console-callable storage diagnostics. Surfaces a one-
+// shot, provider-aware snapshot of every case's storage ref so "where are
+// these files supposed to live?" becomes a 3-second answer instead of a
+// localStorage dive. Returns the array so it's composable in the console,
+// and also console.table's it for readability. Flags cases whose canonical
+// folder-id collides with the root folder id of its provider (the same bug
+// the onRecCaseSelectChanged self-heal guards against).
+function dumpStorageDiagnostics() {
+  try {
+    const rows = (state.cases || []).map(c => {
+      let ref;
+      try { ref = getCaseStorageRef(c); } catch(_e) { ref = null; }
+      const provider = (ref && ref.provider) || c.storageProvider || '(unknown)';
+      let warn = '';
+      if (provider === 'gdrive'
+        && state.driveRootFolderId
+        && c.driveFolderId
+        && c.driveFolderId === state.driveRootFolderId) {
+        warn = 'driveFolderId === driveRootFolderId';
+      } else if (provider === 'onedrive'
+        && state.oneDriveRootFolderId
+        && c.oneDriveItemId
+        && c.oneDriveItemId === state.oneDriveRootFolderId) {
+        warn = 'oneDriveItemId === oneDriveRootFolderId';
+      } else if (!ref || !ref.folderId) {
+        warn = 'no canonical folderId';
+      }
+      return {
+        caseId:   c.id,
+        patient:  c.patient || '',
+        provider,
+        folderId: (ref && ref.folderId) || '',
+        folderName: (ref && ref.folderName) || '',
+        workFolderId: (ref && ref.workFolderId) || '',
+        driveId:  (ref && ref.driveId) || '',
+        warn,
+      };
+    });
+    console.info('[storage-diag] canonicalStorage=' + (state.canonicalStorage||'(unset)')
+      + ' driveRoot=' + (state.driveRootFolderId||'(unset)')
+      + ' oneDriveRoot=' + (state.oneDriveRootFolderId||'(unset)'));
+    try { console.table(rows); } catch(_) { console.info(rows); }
+    return rows;
+  } catch(e) {
+    console.warn('[storage-diag] failed:', e);
+    return [];
+  }
+}
+try { if (typeof window !== 'undefined') window.dumpStorageDiagnostics = dumpStorageDiagnostics; } catch(_){}
 
 // Given a case, ensure its work folder exists and return its id. Used by
 // upload sites (analysis TXT, generated DOCX, processed cache) that run for
@@ -2793,6 +2989,14 @@ async function ensureWorkFolderId(caseInfo) {
       caseInfo.driveFolderName = caseInfo.driveFolderName || h.records.name;
       caseInfo.driveWorkFolderId = h.work.id;
       caseInfo.driveWorkFolderName = h.work.name;
+      // Phase 6f.3 batch 2: keep canonical fields in sync when this Drive-only
+      // code path builds hierarchy for a legacy case.
+      caseInfo.storageProvider         = caseInfo.storageProvider || 'gdrive';
+      caseInfo.canonicalFolderId       = caseInfo.canonicalFolderId || caseInfo.driveFolderId;
+      caseInfo.canonicalFolderName     = caseInfo.canonicalFolderName || caseInfo.driveFolderName;
+      caseInfo.canonicalFolderWebUrl   = caseInfo.canonicalFolderWebUrl || ('https://drive.google.com/drive/folders/' + caseInfo.driveFolderId);
+      caseInfo.canonicalWorkFolderId   = caseInfo.driveWorkFolderId;
+      caseInfo.canonicalWorkFolderName = caseInfo.driveWorkFolderName;
       save();
       return h.work.id;
     }
@@ -2804,6 +3008,13 @@ async function ensureWorkFolderId(caseInfo) {
       const w = await driveFindOrCreateFolder(workRoot.id, flatName);
       caseInfo.driveWorkFolderId = w.id;
       caseInfo.driveWorkFolderName = w.name;
+      // Phase 6f.3 batch 2: mirror into canonical fields on this fallback too.
+      caseInfo.storageProvider         = caseInfo.storageProvider || 'gdrive';
+      caseInfo.canonicalFolderId       = caseInfo.canonicalFolderId || caseInfo.driveFolderId;
+      caseInfo.canonicalFolderName     = caseInfo.canonicalFolderName || caseInfo.driveFolderName;
+      caseInfo.canonicalFolderWebUrl   = caseInfo.canonicalFolderWebUrl || ('https://drive.google.com/drive/folders/' + caseInfo.driveFolderId);
+      caseInfo.canonicalWorkFolderId   = caseInfo.driveWorkFolderId;
+      caseInfo.canonicalWorkFolderName = caseInfo.driveWorkFolderName;
       save();
       return w.id;
     }
@@ -2814,11 +3025,21 @@ async function ensureWorkFolderId(caseInfo) {
 }
 
 // Ensure the _processed subfolder exists inside a given parent and return its id.
-// Historically the parent was the records folder — which made the cached
-// chunked-PDF files visible to anyone the records folder was shared with. It is
-// now the WORK folder, so the chunks stay private.
+// Parent is the WORK folder (so the cache stays out of the Records tree attorneys
+// browse). BUT: the chunk files inside _processed are the targets of every Fact
+// Index hyperlink — so we flip _processed itself to "anyone with the link —
+// viewer". Files inside inherit that permission, so narrative hyperlinks open
+// without access-request prompts. This is consistent with the sharing posture
+// on the Records tree (same PHI, same visibility), and doesn't expose the rest
+// of the Work folder because each folder's sharing is independent.
 async function ensureProcessedFolder(parentFolderId) {
   const f = await driveFindOrCreateFolder(parentFolderId, '_processed');
+  // Idempotent — returns early if the permission already exists, so the extra
+  // call on every analysis run is effectively free.
+  const share = await driveShareAnyoneReader(f.id);
+  if (!share.ok) {
+    console.warn('[drive] _processed link-sharing could not be enabled:', share);
+  }
   return f.id;
 }
 
@@ -2915,6 +3136,181 @@ async function uploadConvertedJpeg(processedFolderId, sourceName, jpegBlob) {
   const name = sourceName.replace(/\.(heic|heif)$/i, '') + '.converted.jpg';
   const meta = await driveUploadFile(processedFolderId, name, 'image/jpeg', jpegBlob);
   return { id: meta.id, name };
+}
+
+// ============================================================================
+// Phase 6f.3 batch 3: provider-aware processed-cache layer.
+//
+// Every previous call-site passed around a bare Drive folder id. The new
+// contract is a "cache ref" — a small object that carries provider identity
+// plus whatever the provider needs to locate the _processed folder:
+//
+//   Drive ref:    { provider: 'gdrive',    folderId: <drive folder id> }
+//   OneDrive ref: { provider: 'onedrive',  driveId:  <graph drive id>,
+//                                           itemId:   <graph folder id> }
+//
+// The five byRef() helpers below dispatch on ref.provider and delegate to the
+// existing Drive helpers (uploadPdfChunk, loadProcessedManifest, etc.) or the
+// new Graph implementations (_*OneDrive). Each existing call site becomes a
+// two-liner:
+//
+//   const cache = await getProcessedCacheRef(caseInfo);
+//   const manifest = cache ? await loadProcessedManifestByRef(cache) : null;
+//
+// Keeping the old Drive-only helpers intact means any unmigrated call site
+// continues to work exactly as before.
+// ============================================================================
+
+// ---- OneDrive _processed folder lifecycle ----
+async function _ensureProcessedFolderOneDrive(workDriveId, workItemId) {
+  if (!workDriveId || !workItemId) throw new Error('OneDrive processed-cache needs workDriveId + workItemId.');
+  const f = await msGraphFindOrCreateFolder(workDriveId, workItemId, '_processed');
+  // Mirror Drive behavior: anonymous-reader on the folder so Fact Index
+  // hyperlinks to chunk files open without an access-request prompt. Idempotent.
+  try {
+    await msGraphShareAnyoneReader(workDriveId, f.id);
+  } catch (e) {
+    console.warn('[onedrive] _processed link-sharing could not be enabled:', e && e.message ? e.message : e);
+  }
+  return { driveId: workDriveId, itemId: f.id };
+}
+
+// ---- OneDrive manifest load/save ----
+async function _loadProcessedManifestOneDrive(driveId, parentItemId) {
+  // List children of the _processed folder, find _cache-manifest.json, download.
+  const children = await msGraphListChildren(driveId, parentItemId);
+  const hit = children.find(c => c.file && (c.name || '').toLowerCase() === PROCESSED_MANIFEST_NAME.toLowerCase());
+  if (!hit) return { entries: {}, manifestItemId: null, processedDriveId: driveId, processedItemId: parentItemId };
+  // Download the JSON body. msGraphDownloadFile returns a Blob.
+  const blob = await msGraphDownloadFile(driveId, hit.id);
+  let parsed = {};
+  try { parsed = JSON.parse(await blob.text()); } catch (_e) { parsed = {}; }
+  return {
+    entries: parsed.entries || {},
+    manifestItemId: hit.id,
+    processedDriveId: driveId,
+    processedItemId: parentItemId,
+  };
+}
+
+async function _saveProcessedManifestOneDrive(manifest) {
+  const payload = JSON.stringify({ entries: manifest.entries || {}, updatedAt: new Date().toISOString() }, null, 2);
+  if (manifest.manifestItemId) {
+    await msGraphUpdateFileContent(manifest.processedDriveId, manifest.manifestItemId, 'application/json', payload);
+  } else {
+    const meta = await msGraphUploadFile(manifest.processedDriveId, manifest.processedItemId,
+                                         PROCESSED_MANIFEST_NAME, 'application/json', payload);
+    manifest.manifestItemId = meta.id;
+  }
+}
+
+async function _uploadPdfChunkOneDrive(driveId, parentItemId, sourceName, chunk) {
+  const name = sourceName.replace(/\.pdf$/i,'') + '.p' + chunk.startPage + '-' + chunk.endPage + '.pdf';
+  const blob = new Blob([chunk.bytes], { type: 'application/pdf' });
+  const meta = await msGraphUploadFile(driveId, parentItemId, name, 'application/pdf', blob);
+  // Return shape matches the Drive helper, plus driveId + webUrl so the Fact
+  // Index hyperlink builder has what it needs for OneDrive #page=N links.
+  return {
+    id: meta.id, name,
+    driveId,
+    webUrl: meta.webUrl || null,
+    startPage: chunk.startPage, endPage: chunk.endPage, totalPages: chunk.totalPages,
+  };
+}
+
+async function _uploadConvertedJpegOneDrive(driveId, parentItemId, sourceName, jpegBlob) {
+  const name = sourceName.replace(/\.(heic|heif)$/i, '') + '.converted.jpg';
+  const meta = await msGraphUploadFile(driveId, parentItemId, name, 'image/jpeg', jpegBlob);
+  return { id: meta.id, name, driveId, webUrl: meta.webUrl || null };
+}
+
+// ---- Provider-aware dispatchers (the new "byRef" contract) ----
+
+// Build a cache ref for a case. Returns null if the case isn't set up for
+// processed-cache storage yet (no work folder). Never throws — on any failure
+// we log and return null so the analysis flow can fall through to the
+// no-cache path (analysis still works, just slower on re-runs).
+async function getProcessedCacheRef(caseInfo) {
+  if (!caseInfo) return null;
+  try {
+    const ref = getCaseStorageRef(caseInfo);
+    if (ref.provider === 'onedrive') {
+      if (!ref.workDriveId || !ref.workFolderId) return null;
+      const f = await _ensureProcessedFolderOneDrive(ref.workDriveId, ref.workFolderId);
+      return { provider: 'onedrive', driveId: f.driveId, itemId: f.itemId };
+    }
+    // gdrive — legacy path keeps the bare folderId shape
+    if (ref.provider === 'gdrive') {
+      // Prefer the work folder; fall back to ensureWorkFolderId if needed.
+      let workId = ref.workFolderId;
+      if (!workId) {
+        workId = await ensureWorkFolderId(caseInfo);
+      }
+      if (!workId) return null;
+      const folderId = await ensureProcessedFolder(workId);
+      return { provider: 'gdrive', folderId };
+    }
+  } catch (e) {
+    console.warn('[cache] getProcessedCacheRef failed:', e && e.message ? e.message : e);
+  }
+  return null;
+}
+
+async function loadProcessedManifestByRef(ref) {
+  if (!ref) return null;
+  if (ref.provider === 'onedrive') return _loadProcessedManifestOneDrive(ref.driveId, ref.itemId);
+  if (ref.provider === 'gdrive')   return loadProcessedManifest(ref.folderId);
+  return null;
+}
+
+async function saveProcessedManifestByRef(ref, manifest) {
+  if (!ref || !manifest) return;
+  if (ref.provider === 'onedrive') return _saveProcessedManifestOneDrive(manifest);
+  if (ref.provider === 'gdrive')   return saveProcessedManifest(manifest);
+}
+
+async function uploadPdfChunkByRef(ref, sourceName, chunk) {
+  if (!ref) throw new Error('uploadPdfChunkByRef: ref is required.');
+  if (ref.provider === 'onedrive') return _uploadPdfChunkOneDrive(ref.driveId, ref.itemId, sourceName, chunk);
+  return uploadPdfChunk(ref.folderId, sourceName, chunk);
+}
+
+async function uploadConvertedJpegByRef(ref, sourceName, jpegBlob) {
+  if (!ref) throw new Error('uploadConvertedJpegByRef: ref is required.');
+  if (ref.provider === 'onedrive') return _uploadConvertedJpegOneDrive(ref.driveId, ref.itemId, sourceName, jpegBlob);
+  return uploadConvertedJpeg(ref.folderId, sourceName, jpegBlob);
+}
+
+// Phase 6f.3 batch 4: provider-aware dispatchers for the records-folder tree
+// listing and per-file download paths. These replace the direct
+// driveListFolderRecursive / driveGetFileBlob calls scattered across the
+// analysis pipeline so every call site picks the right backend based on the
+// case's storageProvider field. Returns the shared tree shape
+// ({kind, id, name, path, mimeType, driveId?}) that flattenDriveTree
+// consumes, so downstream code doesn't need to branch.
+async function listCaseRecordsTree(caseInfo) {
+  const ref = getCaseStorageRef(caseInfo);
+  if (!ref || !ref.folderId) return null;
+  if (ref.provider === 'onedrive') {
+    if (!ref.driveId) return null;
+    return await msGraphListTreeRecursive(ref.driveId, ref.folderId, '');
+  }
+  return await driveListFolderRecursive(ref.folderId, '');
+}
+
+// Download a single file's bytes as a Blob. fileNode is the leaf object from
+// flattenDriveTree (has .id, .driveId on OneDrive). `ref` is the same shape
+// getCaseStorageRef returns — its driveId is a fallback when the node lacks
+// one (legacy Drive-shaped nodes from mirror-walks).
+async function downloadCaseRecordBlob(ref, fileNode, mimeHint) {
+  if (!fileNode) throw new Error('downloadCaseRecordBlob: fileNode is required.');
+  const provider = (ref && ref.provider) || 'gdrive';
+  if (provider === 'onedrive') {
+    const driveId = fileNode.driveId || (ref && ref.driveId);
+    if (!driveId) throw new Error('downloadCaseRecordBlob: missing driveId for OneDrive download.');
+    return await msGraphDownloadFile(driveId, fileNode.id);
+  }
+  return await driveGetFileBlob(fileNode.id, mimeHint || 'application/pdf');
 }
 
 // ===== BATES → GOOGLE DRIVE URL MAP =====
@@ -3025,8 +3421,29 @@ async function generateDocx(title, content, patientName, caseId, caseRec) {
   for (const name of Object.keys(driveFileIndex)) {
     if (COMBINED_RECORDS_NAME_RX.test(name)) { combinedUrl = driveFileIndex[name]; break; }
   }
-  if (!combinedUrl && caseRec && caseRec.driveFolderId) {
-    combinedUrl = 'https://drive.google.com/drive/folders/' + caseRec.driveFolderId;
+  // Phase 6f.3 batch 5: provider-aware DM-token fallback. For Drive cases,
+  // the case records folder has a well-known URL shape. For OneDrive cases,
+  // use the folder's Office webUrl (set in canonicalFolderWebUrl at case
+  // creation time and link-shared anyone-reader so the attorney recipient
+  // can follow it). Without this, DM citations on OneDrive-canonical reports
+  // were dead links — they fell through to the empty-string branch and
+  // rendered as plain bold text.
+  if (!combinedUrl && caseRec) {
+    try {
+      const ref = getCaseStorageRef(caseRec);
+      if (ref && ref.provider === 'onedrive' && ref.folderWebUrl) {
+        combinedUrl = ref.folderWebUrl;
+      } else if (ref && ref.provider === 'gdrive' && ref.folderId) {
+        combinedUrl = 'https://drive.google.com/drive/folders/' + ref.folderId;
+      } else if (caseRec.driveFolderId) {
+        // Legacy fallback for pre-resolver cases.
+        combinedUrl = 'https://drive.google.com/drive/folders/' + caseRec.driveFolderId;
+      }
+    } catch (_e) {
+      if (caseRec.driveFolderId) {
+        combinedUrl = 'https://drive.google.com/drive/folders/' + caseRec.driveFolderId;
+      }
+    }
   }
   // Back-compat: if an explicit combinedRecordsUrl was ever set on the case
   // record (older builds supported this), honor it as an override.
@@ -3094,13 +3511,20 @@ async function generateDocx(title, content, patientName, caseId, caseRec) {
           const prefixMatch = trimmed.match(LABEL_PREFIX_RX);
           const prefixHit = prefixMatch ? recordsLabelIndex[prefixMatch[1]] : null;
           if (fid) runs.push(hyperlinkRun(part, batesToDriveUrl(fid), baseOpts));
-          else if (LABEL_RX.test(trimmed) && labelHit && labelHit.id) {
+          else if (LABEL_RX.test(trimmed) && labelHit && (labelHit.url || labelHit.id)) {
             // Row label like [AM] or [BC] — link straight to the source record.
-            runs.push(hyperlinkRun(part, batesToDriveUrl(labelHit.id), baseOpts));
+            // Phase 6f.3 batch 4: prefer the precomputed labelHit.url (stored
+            // when the Records Reviewed table was built) so OneDrive-canonical
+            // cases get webUrl/Graph links instead of broken Drive URLs built
+            // from a Graph item id. Fall back to batesToDriveUrl(id) for
+            // legacy Drive entries that never got the url field.
+            const href = labelHit.url || batesToDriveUrl(labelHit.id);
+            runs.push(hyperlinkRun(part, href, baseOpts));
           }
-          else if (prefixHit && prefixHit.id) {
+          else if (prefixHit && (prefixHit.url || prefixHit.id)) {
             // "LABEL: filename ..." — link the whole piece to the labeled record.
-            runs.push(hyperlinkRun(part, batesToDriveUrl(prefixHit.id), baseOpts));
+            const href = prefixHit.url || batesToDriveUrl(prefixHit.id);
+            runs.push(hyperlinkRun(part, href, baseOpts));
           }
           else if (isDM && combinedUrl) runs.push(hyperlinkRun(part, combinedUrl, baseOpts));
           else runs.push(makeRun(part, Object.assign({}, baseOpts, { bold: true })));
@@ -3745,7 +4169,11 @@ let state = {
   oneDriveRootDriveId: '',
   oneDriveRootFolderId: '',
   oneDriveRootFolderName: '',
-  canonicalStorage: 'gdrive'
+  // Phase 6f.3: OneDrive is the canonical default for brand-new cases going
+  // forward. Existing state retains whatever value was previously saved —
+  // flipping an established app from 'gdrive' to 'onedrive' is driven by the
+  // Case Manager toggle so Debbie controls the cut-over intentionally.
+  canonicalStorage: 'onedrive'
 };
 let casesFilter = 'all';
 let uploadedFiles = [];
@@ -3761,7 +4189,14 @@ function load() {
   // Back-fill new state slots for anyone upgrading from pre-firms data.
   if (!Array.isArray(state.firms)) state.firms = [];
   if (!Array.isArray(state.attorneys)) state.attorneys = [];
+  // Phase 6f.3: back-fill canonicalStorage for state that predates 6f.2.
+  // Users who already have a Drive-based workflow saved will retain 'gdrive';
+  // only completely fresh or never-set state defaults to 'onedrive'.
+  if (!state.canonicalStorage) state.canonicalStorage = 'onedrive';
   migrateFirmsAndAttorneys();
+  // Phase 6f.3 migration: stamp storageProvider + canonicalFolderId on every
+  // case whose provider can be inferred from existing fields. Idempotent.
+  migrateCaseStorageProvider();
 }
 
 // One-time sweep: turn every case's free-text firm/attorney fields into firm/attorney records,
@@ -5364,20 +5799,84 @@ async function onRecCaseSelectChanged() {
   const caseId = document.getElementById('rec-case-select').value;
   if (!caseId) { try { renderAttorneyImportBadge(); } catch(_) {} return; }
   const c = state.cases.find(x => x.id === caseId);
-  // Self-heal: if this case's driveFolderId accidentally points at the
-  // Chart Detectives root (the bug that landed Mimms files in Dottie's
-  // listing), clear it + any attorney-link manifest that was captured against
-  // that wrong destination. Users can re-import cleanly after this.
-  if (c && state.driveRootFolderId && c.driveFolderId === state.driveRootFolderId) {
-    console.warn('[drive] case', c.id, 'had driveFolderId === driveRootFolderId — clearing to force rebuild on next import/upload.');
-    c.driveFolderId = '';
-    c.driveFolderName = '';
-    // Any import that ran under the broken folder-id is untrustworthy — wipe
-    // the manifest so the "N files imported" badge doesn't lie, and the
-    // Records Reviewed table doesn't cite files that belong to another case.
-    if (c.attorneyImport) delete c.attorneyImport;
-    save();
-    try { showToast('🧹 Cleared a bad Drive link on ' + (c.patient||c.id) + ' — imported files from before the fix may have ended up on another case. Re-import to rebuild.'); } catch(_) {}
+  // Phase 6f.3 batch 6: provider-aware self-heal. If this case's canonical
+  // folder accidentally points at the Chart Detectives ROOT (the bug that
+  // landed Mimms files in Dottie's listing), clear the offending fields +
+  // any attorney-link manifest that was captured against that wrong
+  // destination. Users can re-import cleanly after this. Runs the check
+  // independently for each provider so a Drive-canonical case with a bad
+  // Drive root-pointer AND a OneDrive-canonical case with a bad OneDrive
+  // root-pointer are both healed.
+  if (c) {
+    let healed = false;
+    const driveRootBug = state.driveRootFolderId
+      && c.driveFolderId
+      && c.driveFolderId === state.driveRootFolderId;
+    if (driveRootBug) {
+      console.warn('[selfheal] case', c.id, 'had driveFolderId === driveRootFolderId — clearing Drive fields to force rebuild on next import/upload.');
+      c.driveFolderId = '';
+      c.driveFolderName = '';
+      c.driveWorkFolderId = '';
+      c.driveWorkFolderName = '';
+      // Canonical mirrors are only cleared when Drive is the canonical
+      // provider; a OneDrive-canonical case with a stale driveFolderId
+      // shouldn't lose its canonical* pointers.
+      if ((c.storageProvider || 'gdrive') === 'gdrive') {
+        c.canonicalFolderId = '';
+        c.canonicalFolderName = '';
+        c.canonicalFolderWebUrl = '';
+        c.canonicalWorkFolderId = '';
+        c.canonicalWorkFolderName = '';
+      }
+      healed = true;
+    }
+    const oneDriveRootBug = state.oneDriveRootFolderId
+      && c.oneDriveItemId
+      && c.oneDriveItemId === state.oneDriveRootFolderId;
+    if (oneDriveRootBug) {
+      console.warn('[selfheal] case', c.id, 'had oneDriveItemId === oneDriveRootFolderId — clearing OneDrive fields to force rebuild on next import/upload.');
+      c.oneDriveItemId = '';
+      c.oneDriveFolderName = '';
+      c.oneDriveFolderWebUrl = '';
+      c.oneDriveWorkItemId = '';
+      c.oneDriveWorkFolderName = '';
+      if ((c.storageProvider || '') === 'onedrive') {
+        c.canonicalFolderId = '';
+        c.canonicalFolderName = '';
+        c.canonicalFolderWebUrl = '';
+        c.canonicalWorkFolderId = '';
+        c.canonicalWorkFolderName = '';
+        c.canonicalDriveId = '';
+        c.canonicalWorkDriveId = '';
+      }
+      healed = true;
+    }
+    if (healed) {
+      // Any import that ran under the broken folder-id is untrustworthy — wipe
+      // the manifest so the "N files imported" badge doesn't lie, and the
+      // Records Reviewed table doesn't cite files that belong to another case.
+      if (c.attorneyImport) delete c.attorneyImport;
+      save();
+      try { showToast('🧹 Cleared a bad canonical link on ' + (c.patient||c.id) + ' — imported files from before the fix may have ended up on another case. Re-import to rebuild.'); } catch(_) {}
+    }
+  }
+  // Phase 6f.3 batch 6: log a provider-aware storage-ref snapshot of the
+  // selected case on every case-select. Surfaced in the console only — this
+  // is purely a diagnostics aid so we can answer "where did these files
+  // land?" questions without cracking open localStorage.
+  if (c) {
+    try {
+      const ref = getCaseStorageRef(c);
+      console.info('[case-ref]', c.id, c.patient, {
+        provider: ref.provider,
+        folderId: ref.folderId,
+        folderName: ref.folderName,
+        workFolderId: ref.workFolderId,
+        driveId: ref.driveId,
+        storageProvider: c.storageProvider || null,
+        canonicalStorage: state.canonicalStorage || null,
+      });
+    } catch(_) {}
   }
   // Refresh the attorney-link badge whenever the case selector changes so the
   // Import/Refresh UI always reflects the selected case's saved import state.
@@ -5411,39 +5910,52 @@ async function onRecCaseSelectChanged() {
     }
   }
 
-  if (!c || !c.driveFolderId) {
-    if (listEl) listEl.innerHTML = '<div style="padding:8px;color:var(--gray-400);font-size:12px;">No Drive folder linked to this case yet. Click <b>📁 Load files from case folder</b> to pick one, or go to Cases and use the 📁 Connect button.</div>';
+  // Phase 6f.3 batch 4: provider-aware case-folder resolution. The "Records"
+  // page auto-loads the case's records folder from whichever provider is
+  // canonical for this case. OneDrive cases don't require a Drive sign-in —
+  // the Graph download path prompts for its own consent the first time a
+  // file is read.
+  const caseRef = c ? getCaseStorageRef(c) : null;
+  if (!c || !caseRef || !caseRef.folderId) {
+    if (listEl) listEl.innerHTML = '<div style="padding:8px;color:var(--gray-400);font-size:12px;">No case folder linked yet. Click <b>📁 Load files from case folder</b> to pick one, or go to Cases and use the 📁 Connect button.</div>';
     return;
   }
-  // Drive folder is linked — auto-load, but only if the user has already signed in.
-  // (If not signed in we just show a hint; we don't force a popup on every case pick.)
-  if (!_driveToken) {
-    if (listEl) listEl.innerHTML = '<div style="padding:8px;color:var(--gray-400);font-size:12px;">Drive folder linked: <b>' + esc(c.driveFolderName || c.driveFolderId) + '</b>. Click <b>Connect Google Drive</b> then <b>Load files</b> to list them.</div>';
+  if (caseRef.provider === 'gdrive' && !_driveToken) {
+    if (listEl) listEl.innerHTML = '<div style="padding:8px;color:var(--gray-400);font-size:12px;">Drive folder linked: <b>' + esc(c.driveFolderName || caseRef.folderId) + '</b>. Click <b>Connect Google Drive</b> then <b>Load files</b> to list them.</div>';
     return;
   }
   try { await loadCaseDriveFiles(); } catch(e) {}
 }
 
-// Fetch the file listing from the active case's Drive folder and render it as a checklist.
+// Fetch the file listing from the active case's records folder and render it
+// as a checklist. Phase 6f.3 batch 4: provider-aware. Resolves Drive vs
+// OneDrive through getCaseStorageRef so OneDrive-canonical cases don't dead-
+// end at the Drive-only gate.
 async function loadCaseDriveFiles() {
   const caseId = document.getElementById('rec-case-select').value;
   if (!caseId) { alert('Pick a case first.'); return; }
   const c = state.cases.find(x => x.id === caseId);
   if (!c) return;
-  if (!c.driveFolderId) {
-    if (!confirm('This case has no Drive folder linked yet. Open the folder picker now?')) return;
+  let caseRef = getCaseStorageRef(c);
+  if (!caseRef || !caseRef.folderId) {
+    if (!confirm('This case has no case folder linked yet. Open the folder picker now?')) return;
     const picked = await pickDriveFolder().catch(e => { alert(e.message); return null; });
     if (!picked) return;
-    c.driveFolderId = picked.id; c.driveFolderName = picked.name; save(); renderCases();
+    c.driveFolderId = picked.id; c.driveFolderName = picked.name;
+    c.storageProvider = c.storageProvider || 'gdrive';
+    c.canonicalFolderId = c.canonicalFolderId || picked.id;
+    save(); renderCases();
+    caseRef = getCaseStorageRef(c);
   }
   const listEl = document.getElementById('drive-file-list');
-  listEl.innerHTML = '<div style="padding:8px;color:var(--gray-400);font-size:12px;">Loading from Drive…</div>';
+  const providerLabel = caseRef.provider === 'onedrive' ? 'OneDrive' : 'Drive';
+  listEl.innerHTML = '<div style="padding:8px;color:var(--gray-400);font-size:12px;">Loading from ' + providerLabel + '…</div>';
   try {
     // Walk the tree so records mirrored from an attorney link (which
     // preserves folder structure) are visible alongside root-level files.
     // We also skip our own underscore-prefixed folders (_Internal, _processed)
     // so the checklist matches what an attorney would actually review.
-    const tree = await driveListFolderRecursive(c.driveFolderId, '');
+    const tree = await listCaseRecordsTree(c);
     const leaves = flattenDriveTree(tree).filter(f => {
       if (!f || !f.name) return false;
       if (/^_/.test(f.name)) return false;
@@ -5465,8 +5977,22 @@ async function loadCaseDriveFiles() {
     // We also register the path-qualified form ("Altercare/Discharge_Summary.pdf")
     // so citations that disambiguate by folder still resolve.
     c.driveFileIndex = {};
+    // Phase 6f.3 batch 4: provider-aware URL builder. Drive files get the
+    // batesToDriveUrl /preview form; OneDrive files prefer the file's webUrl
+    // (Office Online viewer) and fall back to the Graph /content endpoint
+    // when webUrl isn't yet populated (batch 5 adds it to the tree walk).
+    const buildFileUrl = (f) => {
+      if (caseRef.provider === 'onedrive') {
+        if (f.webUrl) return f.webUrl;
+        const dId = f.driveId || caseRef.driveId;
+        if (dId && f.id) return 'https://graph.microsoft.com/v1.0/drives/' + dId + '/items/' + f.id + '/content';
+        return '';
+      }
+      return batesToDriveUrl(f.id);
+    };
     for (const f of driveFiles) {
-      const url = batesToDriveUrl(f.id);
+      const url = buildFileUrl(f);
+      if (!url) continue;
       c.driveFileIndex[f.name] = url;
       const base = f.name.replace(/\.[^.]+$/, '');
       if (base && !c.driveFileIndex[base]) c.driveFileIndex[base] = url;
@@ -5479,14 +6005,18 @@ async function loadCaseDriveFiles() {
     // Backfill: flip the folder to "anyone with the link — viewer" if it
     // isn't already. Newly-created folders get this in ensureCaseHierarchy,
     // but pre-existing folders from older app versions miss it. This is a
-    // no-op if the permission already exists.
-    driveShareAnyoneReader(c.driveFolderId).then(r => {
-      if (r && r.ok && !r.alreadyShared) {
-        showToast('🔗 Case folder set to view-only shareable.');
-      }
-    }).catch(e => console.warn('[drive] backfill share failed:', e));
+    // no-op if the permission already exists. Drive-only — the OneDrive
+    // equivalent (msGraphShareAnyoneReader) is wired at case-creation time
+    // in ensureCaseHierarchyOneDrive and doesn't need a load-time backfill.
+    if (caseRef.provider === 'gdrive' && c.driveFolderId) {
+      driveShareAnyoneReader(c.driveFolderId).then(r => {
+        if (r && r.ok && !r.alreadyShared) {
+          showToast('🔗 Case folder set to view-only shareable.');
+        }
+      }).catch(e => console.warn('[drive] backfill share failed:', e));
+    }
   } catch (e) {
-    listEl.innerHTML = '<div class="alert alert-danger">Could not list Drive folder: ' + esc(e.message) + '</div>';
+    listEl.innerHTML = '<div class="alert alert-danger">Could not list ' + providerLabel + ' folder: ' + esc(e.message) + '</div>';
   }
 }
 function renderDriveFileList() {
@@ -5696,24 +6226,33 @@ async function rebuildSourceTextCacheFromDrive(caseInfo, area) {
     console.log('[resume-cache][' + caseKey + '] cache entry already present — skipping rebuild');
     return _sourceTextCacheByCase[caseKey]._promise;
   }
-  if (!caseInfo.driveFolderId) {
-    console.warn('[resume-cache][' + caseKey + '] case has no driveFolderId — cannot rebuild cache');
+  // Phase 6f.3 batch 4: provider-aware — resolve the records folder through
+  // getCaseStorageRef so OneDrive-canonical cases rebuild their cache from
+  // OneDrive instead of failing on the missing driveFolderId gate.
+  const storageRef = getCaseStorageRef(caseInfo);
+  if (!storageRef || !storageRef.folderId) {
+    console.warn('[resume-cache][' + caseKey + '] case has no records folder (' + (storageRef && storageRef.provider || 'unknown') + ') — cannot rebuild cache');
     return null;
   }
   const seedPromise = (async () => {
     const cache = {};
-    try {
-      if (!_driveToken) await driveSignIn(false);
-    } catch (e) {
-      console.warn('[resume-cache][' + caseKey + '] Drive sign-in failed: ' + e.message);
-      return cache;
+    // Provider-specific sign-in guard. Drive path requires _driveToken;
+    // OneDrive path requires a Graph token (msGetToken issues it lazily, so
+    // we just let the first msGraphDownloadFile call prompt if needed).
+    if (storageRef.provider === 'gdrive') {
+      try {
+        if (!_driveToken) await driveSignIn(false);
+      } catch (e) {
+        console.warn('[resume-cache][' + caseKey + '] Drive sign-in failed: ' + e.message);
+        return cache;
+      }
     }
     // Walk records folder for every PDF. Non-PDF blocks (HEIC, images, text) can't
     // be verified by substring search anyway — they were always status '—' even
     // on fresh-start runs, so we skip them.
     let flatFiles = [];
     try {
-      const tree = await driveListFolderRecursive(caseInfo.driveFolderId, '');
+      const tree = await listCaseRecordsTree(caseInfo);
       flatFiles = flattenDriveTree(tree).filter(n =>
         n && n.kind === 'file' && n.mimeType === 'application/pdf'
       );
@@ -5731,12 +6270,11 @@ async function rebuildSourceTextCacheFromDrive(caseInfo, area) {
     // — that covers single-chunk titles and lets the majority of facts verify.
     let manifestEntries = null;
     try {
-      if (caseInfo.driveWorkFolderId) {
-        const processedFolderId = await ensureProcessedFolder(caseInfo.driveWorkFolderId).catch(() => null);
-        if (processedFolderId) {
-          const manifest = await loadProcessedManifest(processedFolderId).catch(() => null);
-          manifestEntries = (manifest && manifest.entries) || null;
-        }
+      // Phase 6f.3 batch 3: provider-aware manifest load.
+      const cacheRef = await getProcessedCacheRef(caseInfo);
+      if (cacheRef) {
+        const manifest = await loadProcessedManifestByRef(cacheRef).catch(() => null);
+        manifestEntries = (manifest && manifest.entries) || null;
       }
     } catch (_e) { manifestEntries = null; }
     // Sequential (not parallel) keeps memory bounded: pdf.js + Uint8Array for a
@@ -5751,7 +6289,10 @@ async function rebuildSourceTextCacheFromDrive(caseInfo, area) {
         } catch (_) {}
       }
       try {
-        const blob = await driveGetFileBlob(f.id, 'application/pdf');
+        // Phase 6f.3 batch 4: provider-aware download. Drive path uses its
+        // access token; OneDrive path uses Graph's /content endpoint (which
+        // 302s to a short-lived pre-signed URL).
+        const blob = await downloadCaseRecordBlob(storageRef, f, 'application/pdf');
         const buf = await blob.arrayBuffer();
         const raw = await extractPdfFullText(new Uint8Array(buf));
         const normalized = raw ? normalizeForMatch(raw) : null;
@@ -6900,61 +7441,48 @@ function sanitizeFilename(s) {
 // those rows — still a useful diagnostic.
 async function buildSourceFileUrlMap(caseInfo) {
   if (!caseInfo) return null;
-
-  // ---- OneDrive path (Phase 6f when canonical storage is OneDrive) ----
-  if (caseInfo.oneDriveItemId && caseInfo.oneDriveDriveId) {
-    try {
-      const tree = await msGraphListTreeRecursive(caseInfo.oneDriveDriveId, caseInfo.oneDriveItemId, '');
-      const flat = flattenDriveTree(tree); // produces {kind:'file', id, name, mimeType, driveId, ...}
-      const map = {};
-      for (const n of flat) {
-        if (!n || n.kind !== 'file' || !n.name) continue;
-        // webUrl isn't in the shape flattenDriveTree preserves, but the Graph
-        // tree walker does stash it into each child via `c.webUrl` when
-        // selected. msGraphListTreeRecursive in the current build doesn't
-        // request webUrl by default — when Tony adds it there, this map will
-        // auto-upgrade. For now, we rely on the Graph /content fallback in
-        // _buildFactIndexHyperlink, which at least opens the file.
+  // Phase 6f.3 batch 4: route through the provider-aware resolver so this
+  // function does the same thing on Drive and OneDrive cases. The tree shape
+  // is uniform (flattenDriveTree consumes both); only the map entry metadata
+  // differs (OneDrive entries carry driveId + webUrl, Drive entries are
+  // id-only since /preview URLs are built from the id alone).
+  const ref = getCaseStorageRef(caseInfo);
+  if (!ref || !ref.folderId) return null;
+  try {
+    const tree = await listCaseRecordsTree(caseInfo);
+    if (!tree) return null;
+    const flat = flattenDriveTree(tree);
+    const map = {};
+    for (const n of flat) {
+      if (!n || n.kind !== 'file' || !n.name) continue;
+      if (ref.provider === 'onedrive') {
+        // webUrl isn't requested by msGraphListChildren today (batch 5 adds it
+        // to the $select). Until that lands, onedrive entries fall back to the
+        // Graph /content endpoint inside _buildFactIndexHyperlink — the link
+        // opens the file but won't page-jump. Once batch 5 lands, webUrl will
+        // be present on `n` and Fact Index rows will deep-link to #page=N.
         map[n.name] = {
           provider: 'onedrive',
           id: n.id,
-          driveId: n.driveId || caseInfo.oneDriveDriveId,
+          driveId: n.driveId || ref.driveId,
           webUrl: n.webUrl || null
         };
-      }
-      // Opportunistically attach page counts from the processed-cache manifest
-      // when we can find it. Non-fatal if the lookup fails.
-      await _augmentMapWithProcessedPages(caseInfo, map, 'onedrive').catch(() => {});
-      return map;
-    } catch (e) {
-      console.warn('[6c] OneDrive tree walk failed:', e);
-      return null;
-    }
-  }
-
-  // ---- Google Drive path (default) ----
-  if (caseInfo.driveFolderId) {
-    try {
-      const tree = await driveListFolderRecursive(caseInfo.driveFolderId, '');
-      const flat = flattenDriveTree(tree);
-      const map = {};
-      for (const n of flat) {
-        if (!n || n.kind !== 'file' || !n.name) continue;
+      } else {
         map[n.name] = {
           provider: 'gdrive',
           id: n.id,
-          webUrl: null // gdrive path uses id-based preview URL — webUrl not needed
+          webUrl: null // gdrive preview URL is built from id alone
         };
       }
-      await _augmentMapWithProcessedPages(caseInfo, map, 'gdrive').catch(() => {});
-      return map;
-    } catch (e) {
-      console.warn('[6c] Drive tree walk failed:', e);
-      return null;
     }
+    // Opportunistically attach page counts from the processed-cache manifest
+    // when we can find it. Non-fatal if the lookup fails.
+    await _augmentMapWithProcessedPages(caseInfo, map, ref.provider).catch(() => {});
+    return map;
+  } catch (e) {
+    console.warn('[6c] source-file URL map build failed (' + (ref.provider || '?') + '):', e);
+    return null;
   }
-
-  return null;
 }
 
 // Phase 6c + 6e: pull `totalPages` from the processed-cache manifest so each
@@ -6962,21 +7490,14 @@ async function buildSourceFileUrlMap(caseInfo) {
 // folder's _processed subfolder (Drive) and is keyed by the source file's
 // Drive/Graph id. We match manifest entries to map entries by id.
 //
-// No-op for the OneDrive path right now — the processed cache currently lives
-// only on Drive (even for OneDrive-sourced records, which get mirrored to
-// Drive for processing). When 6f.3 relocates the processed cache to OneDrive,
-// this function picks up the Graph variant via the provider arg.
+// Phase 6f.3 batch 3: provider-aware via getProcessedCacheRef —
+// OneDrive-canonical cases now read their manifest from OneDrive directly.
 async function _augmentMapWithProcessedPages(caseInfo, map, provider) {
   if (!caseInfo || !map) return;
-  // Currently: the processed manifest lives in the case's Drive work folder
-  // regardless of where the original records were sourced from. This matches
-  // the current app behavior (msGraph-sourced records get mirrored into Drive
-  // via mirrorGraphTreeToGdrive before chunking). Phase 6f.3 may change this.
-  if (!caseInfo.driveWorkFolderId || !_driveToken) return;
   try {
-    const processedFolderId = await ensureProcessedFolder(caseInfo.driveWorkFolderId).catch(() => null);
-    if (!processedFolderId) return;
-    const manifest = await loadProcessedManifest(processedFolderId).catch(() => null);
+    const cacheRef = await getProcessedCacheRef(caseInfo);
+    if (!cacheRef) return;
+    const manifest = await loadProcessedManifestByRef(cacheRef).catch(() => null);
     if (!manifest || !manifest.entries) return;
     // manifest.entries is keyed by source Drive file id. Build an id → name map
     // from our current `map` to bridge the two. For the Drive path the ids match
@@ -7024,18 +7545,25 @@ async function _augmentMapWithProcessedPages(caseInfo, map, provider) {
         const baseName = name.replace(/\.pdf$/i, '');
         for (const ck of processed.chunks) {
           if (!ck || typeof ck.startPage !== 'number' || typeof ck.endPage !== 'number') continue;
-          // Need the chunk's own Drive id — without it, we can't build a
-          // preview URL pointing at the chunk. (Legacy manifests pre-dating
+          // Need the chunk's own Drive/Graph id — without it, we can't build
+          // a preview URL pointing at the chunk. (Legacy manifests pre-dating
           // the chunk-id stamp fall back to the source id, which at least
           // preserves the pre-fix behavior.)
           const chunkFileId = ck.id || entry.id;
           const partTitle = baseName + ' — pp. ' + ck.startPage + '-' + ck.endPage + ' of ' + (ck.totalPages || '?') + '.pdf';
-          if (map[partTitle]) continue; // don't overwrite a real Drive file with the same name
+          if (map[partTitle]) continue; // don't overwrite a real file with the same name
+          // Phase 6f.3 batch 4: OneDrive chunks carry their own webUrl stamped
+          // at upload time by _uploadPdfChunkOneDrive — preserve it so the
+          // Fact Index hyperlink builder can produce {webUrl}#page=N links
+          // that open the chunk in the Office Online viewer at the cited page.
+          // Drive chunks don't need webUrl (id-based /preview URL works), so
+          // ck.webUrl is null/undefined there and the entry falls through to
+          // the gdrive branch of _buildFactIndexHyperlink correctly.
           map[partTitle] = {
             provider: entry.provider,
             id: chunkFileId,
-            driveId: entry.driveId,
-            webUrl: null,          // chunks on Drive use id-based /preview; no webUrl equivalent
+            driveId: (entry.provider === 'onedrive') ? (ck.driveId || entry.driveId) : entry.driveId,
+            webUrl: ck.webUrl || null,
             pages: (ck.endPage - ck.startPage + 1),
             startPage: ck.startPage,
             endPage: ck.endPage
@@ -7920,7 +8448,9 @@ async function runRecordAnalysis() {
   // load the manifest on first use and flush it once at the end. If anything in this
   // block fails (e.g. user doesn't have write access), we silently fall through to the
   // no-cache path — analysis still works, it's just not as fast next time.
-  let processedFolderId = null;
+  // Phase 6f.3 batch 3: processed cache is now provider-aware. cacheRef
+  // is {provider:'gdrive',folderId} OR {provider:'onedrive',driveId,itemId}.
+  let cacheRef = null;
   let processedManifest = null;
   let manifestDirty = false;
   if (selectedDrive.length && caseInfo && caseInfo.driveFolderId) {
@@ -7928,19 +8458,20 @@ async function runRecordAnalysis() {
       // Cache processed chunks in the PRIVATE _Internal work folder so
       // attorneys/paralegals never see our extraction artifacts when they
       // browse the shared records folder.
-      const workId = await ensureWorkFolderId(caseInfo);
-      const cacheParent = workId || caseInfo.driveFolderId;
-      processedFolderId = await ensureProcessedFolder(cacheParent);
+      cacheRef = await getProcessedCacheRef(caseInfo);
       // One-time migration: if the legacy _processed sits inside the records
-      // folder from an older case, move it into the work folder (Drive IDs
-      // don't change across moves, so the manifest stays valid).
-      if (workId) {
+      // folder from an older Drive case, move it into the work folder (Drive
+      // IDs don't change across moves, so the manifest stays valid). Only
+      // meaningful on Drive — OneDrive cases never had the legacy layout.
+      if (cacheRef && cacheRef.provider === 'gdrive') {
         try { await migrateProcessedCacheIntoWorkFolder(caseInfo); } catch(_e) {}
       }
-      processedManifest = await loadProcessedManifest(processedFolderId);
+      if (cacheRef) {
+        processedManifest = await loadProcessedManifestByRef(cacheRef);
+      }
     } catch(e) {
       console.warn('Processed cache unavailable:', e);
-      processedFolderId = null;
+      cacheRef = null;
       processedManifest = null;
     }
   }
@@ -7996,15 +8527,15 @@ async function runRecordAnalysis() {
               : f.name.replace(/\.pdf$/i,'') + ' — pp. ' + p.startPage + '-' + p.endPage + ' of ' + p.totalPages + '.pdf';
             const partPages = (p.endPage && p.startPage) ? (p.endPage - p.startPage + 1) : 1;
             contentBlocks.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: arrayBufferToBase64(p.bytes.buffer || p.bytes) }, title: partTitle, _pageCount: partPages });
-            if (processedFolderId && processedManifest) {
+            if (cacheRef && processedManifest) {
               try {
                 area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Caching chunk '+(pi+1)+'/'+parts.length+' of ' + esc(f.name) + ' to _processed…</span></div>';
-                const up = await uploadPdfChunk(processedFolderId, f.name, p);
+                const up = await uploadPdfChunkByRef(cacheRef, f.name, p);
                 chunkMeta.push(up);
               } catch(e) { console.warn('Failed to cache chunk:', e); }
             }
           }
-          if (processedFolderId && processedManifest && chunkMeta.length) {
+          if (cacheRef && processedManifest && chunkMeta.length) {
             if (!sourceMeta) { try { sourceMeta = await driveGetFileMeta(f.id); } catch(e) { sourceMeta = null; } }
             if (sourceMeta) {
               processedManifest.entries[f.id] = {
@@ -8041,10 +8572,10 @@ async function runRecordAnalysis() {
           jpegBlob      = await downscaleImageBlob(jpegBlob, 1600, 0.75);
           const b64jpg  = await blobToBase64(jpegBlob);
           contentBlocks.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: b64jpg } });
-          if (processedFolderId && processedManifest) {
+          if (cacheRef && processedManifest) {
             try {
               area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Caching JPEG for ' + esc(f.name) + '…</span></div>';
-              const up = await uploadConvertedJpeg(processedFolderId, f.name, jpegBlob);
+              const up = await uploadConvertedJpegByRef(cacheRef, f.name, jpegBlob);
               if (!sourceMeta) { try { sourceMeta = await driveGetFileMeta(f.id); } catch(e) { sourceMeta = null; } }
               if (sourceMeta) {
                 processedManifest.entries[f.id] = {
@@ -8077,8 +8608,8 @@ async function runRecordAnalysis() {
     }
     // Flush the processed-cache manifest once at the end of the Drive loop so we survive
     // a mid-run refresh without losing the cache entries we just recorded.
-    if (manifestDirty && processedManifest) {
-      try { await saveProcessedManifest(processedManifest); }
+    if (manifestDirty && processedManifest && cacheRef) {
+      try { await saveProcessedManifestByRef(cacheRef, processedManifest); }
       catch(e) { console.warn('Cache manifest save failed:', e); }
     }
   }
@@ -9174,13 +9705,17 @@ async function runReportDraft() {
   let recordsManifestBlock = '';
   let recordsManifestLocked = false;
   try {
-    if (caseInfo && caseInfo.driveFolderId) {
+    // Phase 6f.3 batch 4: provider-aware. Resolve the case's records folder
+    // through getCaseStorageRef so OneDrive cases build a Records Reviewed
+    // table from OneDrive instead of silently skipping the whole block.
+    const reportStorageRef = caseInfo ? getCaseStorageRef(caseInfo) : null;
+    if (reportStorageRef && reportStorageRef.folderId) {
       // Walk the case Records folder recursively so subfolders imported from
       // an attorney link (e.g. Altercare/, Imaging/, Depositions/) show up
       // alongside top-level files. flattenDriveTree returns leaf-file nodes
       // with a .path property giving the slash-joined folder path the file
       // sits in (empty string for root-level files).
-      const tree = await driveListFolderRecursive(caseInfo.driveFolderId, '');
+      const tree = await listCaseRecordsTree(caseInfo);
       const allFiles = flattenDriveTree(tree);
       // Only include record files (PDFs + images). Exclude our own generated
       // outputs (.docx, .txt) and anything under a folder starting with "_"
@@ -9202,41 +9737,38 @@ async function runReportDraft() {
       // entries win on collision since they're the current write target.
       let processedEntries = {};
       try {
-        // (a) Current location — private _Internal work folder.
-        const workId = await ensureWorkFolderId(caseInfo);
-        if (workId) {
+        // (a) Current location — provider-aware cache ref.
+        const cacheRef = await getProcessedCacheRef(caseInfo);
+        if (cacheRef) {
           try {
-            const pfWork = await ensureProcessedFolder(workId);
-            const pmWork = await loadProcessedManifest(pfWork);
-            Object.assign(processedEntries, (pmWork && pmWork.entries) || {});
+            const pm = await loadProcessedManifestByRef(cacheRef);
+            Object.assign(processedEntries, (pm && pm.entries) || {});
           } catch(_e) {}
         }
         // (b) Legacy location — _processed/ inside the records folder itself.
-        // Only merge in rows the work-folder manifest didn't already cover.
-        try {
-          const legacyQ = `'${caseInfo.driveFolderId}' in parents and name = '_processed' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
-          const legacyUrl = 'https://www.googleapis.com/drive/v3/files?q=' + encodeURIComponent(legacyQ) + '&fields=files(id,name)&pageSize=10';
-          const legacyRes = await fetch(legacyUrl, { headers: { Authorization: 'Bearer ' + _driveToken } });
-          if (legacyRes.ok) {
-            const legacyData = await legacyRes.json();
-            const legacyFolder = (legacyData.files || [])[0];
-            if (legacyFolder && legacyFolder.id) {
-              const pmLegacy = await loadProcessedManifest(legacyFolder.id);
-              const legacyEntries = (pmLegacy && pmLegacy.entries) || {};
-              for (const k of Object.keys(legacyEntries)) {
-                if (!processedEntries[k]) processedEntries[k] = legacyEntries[k];
-              }
-              // Kick off a best-effort migration in the background so the
-              // *next* report doesn't need this fallback. Don't await — we
-              // don't want to delay report generation if Drive is slow, and
-              // migrateProcessedCacheIntoWorkFolder is idempotent.
-              if (workId) {
+        // Only applies to Drive-canonical cases; OneDrive never had this layout.
+        // Merges in only rows the current-location manifest didn't already cover.
+        if (cacheRef && cacheRef.provider === 'gdrive' && caseInfo.driveFolderId && _driveToken) {
+          try {
+            const legacyQ = `'${caseInfo.driveFolderId}' in parents and name = '_processed' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
+            const legacyUrl = 'https://www.googleapis.com/drive/v3/files?q=' + encodeURIComponent(legacyQ) + '&fields=files(id,name)&pageSize=10';
+            const legacyRes = await fetch(legacyUrl, { headers: { Authorization: 'Bearer ' + _driveToken } });
+            if (legacyRes.ok) {
+              const legacyData = await legacyRes.json();
+              const legacyFolder = (legacyData.files || [])[0];
+              if (legacyFolder && legacyFolder.id) {
+                const pmLegacy = await loadProcessedManifest(legacyFolder.id);
+                const legacyEntries = (pmLegacy && pmLegacy.entries) || {};
+                for (const k of Object.keys(legacyEntries)) {
+                  if (!processedEntries[k]) processedEntries[k] = legacyEntries[k];
+                }
+                // Best-effort background migration; idempotent. Don't await.
                 migrateProcessedCacheIntoWorkFolder(caseInfo).catch(e =>
                   console.warn('[report] background migration failed:', e));
               }
             }
-          }
-        } catch(_e) { /* legacy cache lookup is best-effort */ }
+          } catch(_e) { /* legacy cache lookup is best-effort */ }
+        }
       } catch(_e) { /* no cache yet — pages will display as "—" */ }
       // Sort by folder path first, then filename within each folder — this
       // keeps imported subfolder groupings (e.g. all Altercare/ records
@@ -9259,6 +9791,23 @@ async function runReportDraft() {
       // citations render as plain bold text and attorneys have no way to open
       // the cited record with one click.
       const labelIndex = {};
+      // Phase 6f.3 batch 4: precompute a provider-appropriate URL on every
+      // labelIndex entry so the docx citation resolver (see parseInline,
+      // which reads labelHit.url when present) doesn't have to branch on
+      // provider. Drive files get their /preview URL; OneDrive files get
+      // their webUrl when available, else the Graph /content fallback.
+      const provider = reportStorageRef && reportStorageRef.provider;
+      const buildUrl = (f) => {
+        if (provider === 'onedrive') {
+          if (f.webUrl) return f.webUrl;
+          const dId = f.driveId || reportStorageRef.driveId;
+          if (dId && f.id) {
+            return 'https://graph.microsoft.com/v1.0/drives/' + dId + '/items/' + f.id + '/content';
+          }
+          return null;
+        }
+        return batesToDriveUrl(f.id);
+      };
       const rows = records.map((f, i) => {
         // Letters A..Z, then AA..ZZ if there are more than 26 files.
         let letter;
@@ -9269,16 +9818,17 @@ async function runReportDraft() {
           const second = (i - 26) % 26;
           letter = String.fromCharCode(65 + first) + String.fromCharCode(65 + second);
         }
+        const url = buildUrl(f);
         // Store both the letter→file mapping and (for collision resolution)
         // a path-qualified key like "Altercare/Discharge_Summary.pdf" so
         // citations that include a folder hint can resolve unambiguously.
-        labelIndex[letter] = { id: f.id, name: f.name, path: f.path || '' };
+        labelIndex[letter] = { id: f.id, name: f.name, path: f.path || '', url, provider };
         if (f.path) {
           const qualified = f.path + '/' + f.name;
           // Keep an extra key so the citation resolver (see parseInline in
           // generateDocx) can look up "Altercare/Discharge_Summary.pdf"
           // directly when Claude disambiguates by folder.
-          labelIndex[qualified] = { id: f.id, name: f.name, path: f.path };
+          labelIndex[qualified] = { id: f.id, name: f.name, path: f.path, url, provider };
         }
         const entry = processedEntries[f.id];
         const firstChunk = entry && entry.chunks && entry.chunks[0];
