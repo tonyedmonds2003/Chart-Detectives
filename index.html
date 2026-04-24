@@ -257,7 +257,7 @@ tr:hover td { background: var(--gray-50); }
 <!-- TOP BAR -->
 <div class="topbar">
   <div class="topbar-brand">
-    <svg width="260" height="78" viewBox="0 0 1000 300" xmlns="http://www.w3.org/2000/svg">
+    <svg width="160" height="48" viewBox="0 0 1000 300" xmlns="http://www.w3.org/2000/svg">
       <!-- White background card so the exact-colors logo reads cleanly over the navy topbar -->
       <rect width="1000" height="300" fill="#ffffff" rx="10"/>
       <!-- "Chart Detectives" — black with red initial letters C and D -->
@@ -337,7 +337,7 @@ tr:hover td { background: var(--gray-50); }
   </div>
   <div class="sidebar-bottom">
     <div class="sidebar-api-badge">
-      <svg width="220" height="66" viewBox="0 0 1000 300" xmlns="http://www.w3.org/2000/svg" style="display:block;margin-bottom:6px;">
+      <svg width="180" height="54" viewBox="0 0 1000 300" xmlns="http://www.w3.org/2000/svg" style="display:block;margin:0 auto 6px auto;max-width:100%;">
         <rect width="1000" height="300" fill="#ffffff" rx="10"/>
         <text x="40" y="175" font-family="Arial, Helvetica, sans-serif" font-weight="bold" font-size="62">
           <tspan fill="#d41c1c">C</tspan><tspan fill="#111111">hart </tspan><tspan fill="#d41c1c">D</tspan><tspan fill="#111111">etectives</tspan>
@@ -444,6 +444,18 @@ tr:hover td { background: var(--gray-50); }
       <input type="checkbox" id="canonical-storage-toggle" onchange="toggleCanonicalStorage(this.checked)" style="margin:0;">
       <span>Use OneDrive as canonical</span>
     </label>
+  </div>
+  <!-- Backup & Restore strip. localStorage (cases, firms, attorneys, invoices, time
+       entries, per-case driveFileIndex / attorneyImport / lastAnalysis) does NOT
+       sync across devices or browsers. Export writes everything to a timestamped
+       JSON file; Import replaces this PC's data with a previous export. The files
+       in OneDrive/Drive are unaffected by either operation — this is only the
+       app-side metadata. -->
+  <div id="backup-strip" style="display:flex;align-items:center;gap:10px;padding:10px 14px;margin-bottom:14px;background:var(--gray-50);border:1px solid var(--gray-100);border-radius:var(--radius-sm);font-size:13px;color:var(--gray-500);">
+    <span style="flex-shrink:0;">💾</span>
+    <span id="backup-label" style="flex:1;">Backup &amp; restore this PC&rsquo;s app data (cases, firms, attorneys, invoices, time entries). <b>Auto-backup:</b> on after every new case and analysis run &mdash; saved to <code>_Internal/_backups/</code> in your canonical folder. Use the buttons below for a manual export, or to import a backup from another PC.</span>
+    <button class="btn btn-outline btn-sm" onclick="exportAppState()">Export to file</button>
+    <button class="btn btn-outline btn-sm" onclick="importAppState()">Import from file</button>
   </div>
   <div class="tabs">
     <button class="tab active" onclick="filterCases('all', this)">All Cases</button>
@@ -1188,8 +1200,8 @@ tr:hover td { background: var(--gray-50); }
 // Format: YYYY.MM.DD.N where N is the Nth change on that day (1-indexed).
 // APP_VERSION_LABEL is a human-readable caption shown on hover.
 // ============================================================================
-const APP_VERSION       = '2026.04.24.6';
-const APP_VERSION_LABEL = 'Apr 24, 2026 (x6) — Phase 6f.3 ALL 6 BATCHES COMPLETE. BATCH 6: self-heal + diagnostics provider-aware. onRecCaseSelectChanged now detects the root-pointer bug for BOTH providers independently (driveFolderId === driveRootFolderId AND oneDriveItemId === oneDriveRootFolderId) and clears the offending provider-specific fields + canonical mirrors only when that provider is the canonical one, so a OneDrive-canonical case with a stale driveFolderId no longer loses its canonical pointers. New console-callable dumpStorageDiagnostics() prints a provider-aware table of every case\u2019s canonical folder with warn flags for root-pointer bugs or missing folderIds. BATCH 5: msGraphListChildren $select includes webUrl so tree walks stamp webUrl on every file/folder node; Fact Index rows can deep-link to #page=N on OneDrive via webUrl without the Graph /content fallback. BATCH 4: analysis pipeline + citation URL builders provider-aware via listCaseRecordsTree + downloadCaseRecordBlob dispatchers; parseInline prefers labelHit.url when present. BATCH 3: _processed cache manifest + upload via getProcessedCacheRef / loadProcessedManifestByRef / saveProcessedManifestByRef / uploadPdfChunkByRef / uploadConvertedJpegByRef. BATCH 2: ensureCaseCanonicalHierarchy mirrors canonical* fields on both providers; default canonicalStorage = onedrive. BATCH 1: getCaseStorageRef resolver + migrateCaseStorageProvider on load. Parse-check clean. Ready for Tony to re-run Mimms + Richards fresh on OneDrive as smoke tests.';
+const APP_VERSION       = '2026.04.24.10';
+const APP_VERSION_LABEL = 'Apr 24, 2026 (x10) — Shrunk topbar + sidebar-bottom logo so they fit their containers cleanly. Topbar SVG went from 260x78 (overflowing the 60px topbar) to 160x48; sidebar-bottom SVG went from 220x66 to 180x54 with max-width:100% to prevent any future overflow in the 220px-wide sidebar. Same viewBox (1000x300) so the logo artwork is unchanged — just scaled down to the right display size. Previous: x9 Automatic backups. autoBackupAppState(reason) uploads the same envelope the manual Export button generates to {canonical}/_Internal/_backups/chart-detectives-backup-YYYY-MM-DD-HHMM.json. Wired into two triggers: saveCase success path (reason="new-case:<id>") and end of finishAnalysis (reason="analysis-complete:<caseId>"). Concurrency guard prevents duplicate uploads when two events fire within the same tick. 60-second throttle collapses rapid bursts. Silent token gate (checks _msToken / _driveToken without triggering sign-in redirects) — if the user is not signed in yet, we skip silently rather than disrupt workflow. Failures are non-fatal: console.warn only, never toasts a red error. Uses provider-aware routing through msGraphFindOrCreateFolder + msGraphUploadFile on OneDrive path and driveFindOrCreateFolder + driveUploadFile on Drive path. Updated backup strip label to explain auto-backup is on. Previous versions: x8 Backup & Restore (manual export/import). x7 saveCase canonical-hierarchy fix. x6 self-heal + diagnostics. Parse-check clean.';
 
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
 
@@ -2972,6 +2984,235 @@ function dumpStorageDiagnostics() {
 }
 try { if (typeof window !== 'undefined') window.dumpStorageDiagnostics = dumpStorageDiagnostics; } catch(_){}
 
+// ============================================================================
+// Backup & Restore: JSON export / import for localStorage state.
+// ----------------------------------------------------------------------------
+// The app stores cases, firms, attorneys, invoices, time entries, per-case
+// attorneyImport / driveFileIndex / lastAnalysis, and root-folder pointers
+// in localStorage under 'lnc_state'. localStorage is per-browser, per-device
+// and does not sync. These two helpers let Debbie move app data between
+// computers (or keep a safety net if a browser profile gets corrupted).
+//
+// Files in OneDrive / Google Drive are NOT touched by either operation — the
+// export is metadata only. On import we replace localStorage wholesale and
+// reload the page so every render function picks up the new state cleanly.
+// ============================================================================
+function _pad2(n) { return (n < 10 ? '0' : '') + n; }
+function exportAppState() {
+  try {
+    const now = new Date();
+    const stamp = now.getFullYear() + '-' + _pad2(now.getMonth()+1) + '-' + _pad2(now.getDate())
+      + '-' + _pad2(now.getHours()) + _pad2(now.getMinutes());
+    const envelope = {
+      kind: 'chart-detectives-app-state',
+      schema: 1,
+      appVersion: (typeof APP_VERSION !== 'undefined') ? APP_VERSION : '',
+      exportedAt: now.toISOString(),
+      counts: {
+        cases:       Array.isArray(state.cases) ? state.cases.length : 0,
+        firms:       Array.isArray(state.firms) ? state.firms.length : 0,
+        attorneys:   Array.isArray(state.attorneys) ? state.attorneys.length : 0,
+        invoices:    Array.isArray(state.invoices) ? state.invoices.length : 0,
+        timeEntries: Array.isArray(state.timeEntries) ? state.timeEntries.length : 0,
+      },
+      state: state,
+    };
+    const json = JSON.stringify(envelope, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'chart-detectives-backup-' + stamp + '.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    // Revoke the object URL after a short delay so the download has time to start.
+    setTimeout(() => { try { URL.revokeObjectURL(url); } catch(_){} }, 2000);
+    const c = envelope.counts;
+    showToast('💾 Exported ' + c.cases + ' case' + (c.cases===1?'':'s')
+      + ', ' + c.firms + ' firm' + (c.firms===1?'':'s')
+      + ', ' + c.attorneys + ' attorney' + (c.attorneys===1?'':'s')
+      + ', ' + c.timeEntries + ' time entries.');
+  } catch (e) {
+    console.error('[backup] export failed:', e);
+    alert('Could not export app state: ' + (e && e.message ? e.message : e));
+  }
+}
+
+function importAppState() {
+  // We build the file picker on the fly rather than leaving a hidden input in
+  // the DOM — avoids any chance of a stale file reference if the user imports
+  // twice in the same session.
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'application/json,.json';
+  input.style.display = 'none';
+  input.onchange = function() {
+    const file = input.files && input.files[0];
+    document.body.removeChild(input);
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onerror = function() {
+      alert('Could not read the file: ' + (reader.error && reader.error.message ? reader.error.message : 'unknown error'));
+    };
+    reader.onload = function() {
+      let envelope;
+      try {
+        envelope = JSON.parse(String(reader.result || ''));
+      } catch (e) {
+        alert('That file is not valid JSON: ' + (e && e.message ? e.message : e));
+        return;
+      }
+      // Accept either an envelope (from exportAppState) or a raw state object
+      // (defensive — if someone copy-pastes localStorage directly into a file).
+      let incoming = null;
+      if (envelope && envelope.kind === 'chart-detectives-app-state' && envelope.state && typeof envelope.state === 'object') {
+        incoming = envelope.state;
+      } else if (envelope && Array.isArray(envelope.cases)) {
+        incoming = envelope;
+      }
+      if (!incoming || !Array.isArray(incoming.cases)) {
+        alert('That file doesn\u2019t look like a Chart Detectives backup (no cases array found).');
+        return;
+      }
+      const curCounts = {
+        cases: Array.isArray(state.cases) ? state.cases.length : 0,
+        firms: Array.isArray(state.firms) ? state.firms.length : 0,
+        attorneys: Array.isArray(state.attorneys) ? state.attorneys.length : 0,
+      };
+      const newCounts = {
+        cases: incoming.cases.length,
+        firms: Array.isArray(incoming.firms) ? incoming.firms.length : 0,
+        attorneys: Array.isArray(incoming.attorneys) ? incoming.attorneys.length : 0,
+      };
+      const exportedAt = envelope.exportedAt ? new Date(envelope.exportedAt).toLocaleString() : '(unknown)';
+      const msg = 'Replace this computer\u2019s app data with the import?\n\n'
+        + 'This computer currently has:\n'
+        + '  ' + curCounts.cases + ' cases, ' + curCounts.firms + ' firms, ' + curCounts.attorneys + ' attorneys\n\n'
+        + 'The import has:\n'
+        + '  ' + newCounts.cases + ' cases, ' + newCounts.firms + ' firms, ' + newCounts.attorneys + ' attorneys\n'
+        + '  (exported ' + exportedAt + ')\n\n'
+        + 'Your current data will be OVERWRITTEN. Files in OneDrive / Google Drive are not affected.\n\n'
+        + 'Tip: click Cancel and Export first if you\u2019re not sure.';
+      if (!confirm(msg)) return;
+      try {
+        localStorage.setItem('lnc_state', JSON.stringify(incoming));
+        // Full page reload is the safest way to re-run load() + every render
+        // function (dropdowns, case list, dashboard, root strips, etc.)
+        // against the new state without leaving stale closures around.
+        location.reload();
+      } catch (e) {
+        alert('Could not save the imported state: ' + (e && e.message ? e.message : e));
+      }
+    };
+    reader.readAsText(file);
+  };
+  document.body.appendChild(input);
+  input.click();
+}
+
+try {
+  if (typeof window !== 'undefined') {
+    window.exportAppState = exportAppState;
+    window.importAppState = importAppState;
+  }
+} catch(_){}
+
+// ============================================================================
+// Automatic backups — triggered after meaningful data events (new case saved,
+// analysis run completed). The envelope is written to the canonical provider's
+// _Internal/_backups/ folder so it lives next to the rest of the case work
+// and rides the user's OneDrive/Drive sync to every device they use.
+//
+// Design choices:
+//   - Concurrency guard: a single in-flight flag prevents duplicate uploads
+//     when two events fire quickly (e.g. Analyze Records completing at the
+//     same moment as a case-creation callback).
+//   - Throttle: a 60-second minimum between backups keeps quick bursts (user
+//     rapidly creating three cases) from flooding the backups folder.
+//   - Silent token gate: we do NOT call msGetToken()/driveSignIn() from the
+//     auto-backup path because those can trigger a full-page redirect. We
+//     only proceed if a token is already cached. By the time Debbie has
+//     created a case or run an analysis, she will have signed in anyway —
+//     so this gate is a no-op in practice.
+//   - Failures are non-fatal: a backup error logs a warning but never
+//     toasts a red error or interrupts the workflow. The manual Export to
+//     file button is always available as a fallback.
+// ============================================================================
+const _AUTO_BACKUP_MIN_MS = 60 * 1000;
+let _autoBackupInFlight = false;
+let _autoBackupLastRun = 0;
+async function autoBackupAppState(reason) {
+  const now = Date.now();
+  if (_autoBackupInFlight) {
+    console.info('[auto-backup] skip (already running):', reason || '');
+    return;
+  }
+  if (now - _autoBackupLastRun < _AUTO_BACKUP_MIN_MS) {
+    console.info('[auto-backup] skip (throttled, last ran ' + Math.round((now - _autoBackupLastRun)/1000) + 's ago):', reason || '');
+    return;
+  }
+  _autoBackupInFlight = true;
+  try {
+    const canonical = (state && state.canonicalStorage) || 'onedrive';
+    const stamp = new Date();
+    const filename = 'chart-detectives-backup-'
+      + stamp.getFullYear() + '-' + _pad2(stamp.getMonth()+1) + '-' + _pad2(stamp.getDate())
+      + '-' + _pad2(stamp.getHours()) + _pad2(stamp.getMinutes())
+      + '.json';
+    const envelope = {
+      kind: 'chart-detectives-app-state',
+      schema: 1,
+      appVersion: (typeof APP_VERSION !== 'undefined') ? APP_VERSION : '',
+      exportedAt: stamp.toISOString(),
+      autoBackupReason: reason || '',
+      counts: {
+        cases:       Array.isArray(state.cases) ? state.cases.length : 0,
+        firms:       Array.isArray(state.firms) ? state.firms.length : 0,
+        attorneys:   Array.isArray(state.attorneys) ? state.attorneys.length : 0,
+        invoices:    Array.isArray(state.invoices) ? state.invoices.length : 0,
+        timeEntries: Array.isArray(state.timeEntries) ? state.timeEntries.length : 0,
+      },
+      state: state,
+    };
+    const json = JSON.stringify(envelope, null, 2);
+    if (canonical === 'onedrive') {
+      if (!state.oneDriveRootDriveId || !state.oneDriveRootFolderId) {
+        console.info('[auto-backup] skip: OneDrive canonical root not set');
+        return;
+      }
+      if (!_msToken) {
+        console.info('[auto-backup] skip: no cached Microsoft token (user not signed in yet)');
+        return;
+      }
+      const workRoot = await msGraphFindOrCreateFolder(state.oneDriveRootDriveId, state.oneDriveRootFolderId, WORK_ROOT_NAME);
+      const backupsFolder = await msGraphFindOrCreateFolder(state.oneDriveRootDriveId, workRoot.id, '_backups');
+      await msGraphUploadFile(state.oneDriveRootDriveId, backupsFolder.id, filename, 'application/json', json);
+      _autoBackupLastRun = now;
+      console.info('[auto-backup] saved to OneDrive _Internal/_backups/' + filename + ' — reason:', reason || '(unspecified)');
+    } else {
+      if (!state.driveRootFolderId) {
+        console.info('[auto-backup] skip: Drive root not set');
+        return;
+      }
+      if (!_driveToken) {
+        console.info('[auto-backup] skip: no cached Drive token (user not signed in yet)');
+        return;
+      }
+      const workRoot = await driveFindOrCreateFolder(state.driveRootFolderId, WORK_ROOT_NAME);
+      const backupsFolder = await driveFindOrCreateFolder(workRoot.id, '_backups');
+      await driveUploadFile(backupsFolder.id, filename, 'application/json', json);
+      _autoBackupLastRun = now;
+      console.info('[auto-backup] saved to Drive _Internal/_backups/' + filename + ' — reason:', reason || '(unspecified)');
+    }
+  } catch (e) {
+    console.warn('[auto-backup] failed (non-fatal):', e);
+  } finally {
+    _autoBackupInFlight = false;
+  }
+}
+try { if (typeof window !== 'undefined') window.autoBackupAppState = autoBackupAppState; } catch(_){}
+
 // Given a case, ensure its work folder exists and return its id. Used by
 // upload sites (analysis TXT, generated DOCX, processed cache) that run for
 // existing cases which may not have driveWorkFolderId populated yet (legacy
@@ -4477,22 +4718,60 @@ function saveCase() {
   clearCaseForm();
   populateCaseDropdowns();
   renderCases(); renderDashboard(); updateActiveCaseBadge();
-  // Fire-and-forget: if the Drive root is set and the case has both firm + attorney, try
-  // to auto-build the Firm/Attorney/Case hierarchy. We don't block the UI on this — the
-  // case is already saved and a network failure shouldn't keep the form open.
-  if (state.driveRootFolderId && c.firmId && c.attorneyId && _driveToken) {
-    ensureCaseHierarchy(c).then(h => {
-      c.driveFolderId = h.records.id;
-      c.driveFolderName = h.records.name;
-      c.driveWorkFolderId = h.work.id;
-      c.driveWorkFolderName = h.work.name;
-      save();
+  // Fire-and-forget: route through ensureCaseCanonicalHierarchy so the case
+  // folder is built on whichever provider is currently canonical. The canonical
+  // routing was introduced in Phase 6f.2; saveCase originally called the
+  // Drive-only ensureCaseHierarchy directly, which silently skipped for
+  // OneDrive-canonical users who didn't have a Drive root set. We don't block
+  // the UI on this — the case is already saved and a network failure shouldn't
+  // keep the form open.
+  const canonical = (state && state.canonicalStorage) || 'onedrive';
+  const rootReady = (canonical === 'onedrive')
+    ? !!state.oneDriveRootFolderId
+    : !!state.driveRootFolderId;
+  if (rootReady && c.firmId && c.attorneyId) {
+    ensureCaseCanonicalHierarchy(c).then(h => {
+      // ensureCaseCanonicalHierarchy stamps the canonical* + provider-specific
+      // fields internally and calls save(); we just need to refresh the UI and
+      // run the post-creation sanity check so Debbie sees in plain English
+      // which provider the case landed on.
       renderCases();
-      showToast('📁 Auto-created ' + h.records.name + ' in Drive (records shared, _Internal private).');
+      const ref = getCaseStorageRef(c);
+      const providerLabel = ref && ref.provider === 'onedrive' ? 'OneDrive'
+                          : ref && ref.provider === 'gdrive'   ? 'Google Drive'
+                          : '(unknown)';
+      // Console sanity line for DevTools — same shape dumpStorageDiagnostics emits.
+      try {
+        console.info('[new-case-check]', c.id, c.patient, {
+          provider: ref && ref.provider,
+          folderId: ref && ref.folderId,
+          folderName: ref && ref.folderName,
+          canonicalStorage: state.canonicalStorage || null,
+          expectedProvider: canonical,
+          matchesExpected: ref && ref.provider === canonical,
+        });
+      } catch(_) {}
+      if (ref && ref.provider === canonical) {
+        showToast('✓ ' + (ref.folderName || c.patient) + ' landed on ' + providerLabel
+          + ' (records shared, _Internal private).');
+      } else {
+        showToast('⚠ ' + (c.patient||c.id) + ' landed on ' + providerLabel
+          + ' but canonical storage is ' + (canonical === 'onedrive' ? 'OneDrive' : 'Google Drive')
+          + '. Verify before uploading records.');
+      }
+      // Fire-and-forget auto-backup. The 60s throttle inside autoBackupAppState
+      // prevents flooding if a user creates multiple cases in quick succession.
+      try { autoBackupAppState('new-case:' + c.id); } catch(_) {}
     }).catch(e => {
       console.warn('Hierarchy auto-create failed:', e);
-      showToast('⚠ Could not auto-organize in Drive: ' + e.message);
+      showToast('⚠ Could not auto-organize case folder: ' + (e && e.message ? e.message : e));
     });
+  } else if (c.firmId && c.attorneyId && !rootReady) {
+    // Helpful nudge when firm+attorney are set but the canonical root is not —
+    // otherwise the case silently ends up with no folder linked.
+    const rootWord = (canonical === 'onedrive') ? 'OneDrive canonical folder' : 'Drive root folder';
+    showToast('⚠ ' + (c.patient||c.id) + ' created, but no ' + rootWord
+      + ' is set. Go to Case Manager and set it before uploading records.');
   }
 }
 
@@ -9537,6 +9816,15 @@ async function finishAnalysis(res, caseInfo, type, typeLabels, area, pre) {
       showToast('⚠️ Drive save failed: ' + e.message, true);
     }
   }
+  // Fire-and-forget auto-backup on analysis completion. Analysis updates
+  // lastAnalysis, lastAnalysisFacts, analysisCostHistory, and auto-logs a
+  // time entry — all of which we want captured in a recovery point. The
+  // throttle inside autoBackupAppState prevents spam if the user re-runs
+  // analysis multiple times within 60 seconds.
+  try {
+    const caseIdForBackup = (caseInfo && caseInfo.id) ? caseInfo.id : 'unknown';
+    autoBackupAppState('analysis-complete:' + caseIdForBackup);
+  } catch(_) {}
 }
 
 // Read a File/Blob as base64 (no data: prefix).
