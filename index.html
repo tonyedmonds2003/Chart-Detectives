@@ -1200,8 +1200,8 @@ tr:hover td { background: var(--gray-50); }
 // Format: YYYY.MM.DD.N where N is the Nth change on that day (1-indexed).
 // APP_VERSION_LABEL is a human-readable caption shown on hover.
 // ============================================================================
-const APP_VERSION       = '2026.04.24.10';
-const APP_VERSION_LABEL = 'Apr 24, 2026 (x10) — Shrunk topbar + sidebar-bottom logo so they fit their containers cleanly. Topbar SVG went from 260x78 (overflowing the 60px topbar) to 160x48; sidebar-bottom SVG went from 220x66 to 180x54 with max-width:100% to prevent any future overflow in the 220px-wide sidebar. Same viewBox (1000x300) so the logo artwork is unchanged — just scaled down to the right display size. Previous: x9 Automatic backups. autoBackupAppState(reason) uploads the same envelope the manual Export button generates to {canonical}/_Internal/_backups/chart-detectives-backup-YYYY-MM-DD-HHMM.json. Wired into two triggers: saveCase success path (reason="new-case:<id>") and end of finishAnalysis (reason="analysis-complete:<caseId>"). Concurrency guard prevents duplicate uploads when two events fire within the same tick. 60-second throttle collapses rapid bursts. Silent token gate (checks _msToken / _driveToken without triggering sign-in redirects) — if the user is not signed in yet, we skip silently rather than disrupt workflow. Failures are non-fatal: console.warn only, never toasts a red error. Uses provider-aware routing through msGraphFindOrCreateFolder + msGraphUploadFile on OneDrive path and driveFindOrCreateFolder + driveUploadFile on Drive path. Updated backup strip label to explain auto-backup is on. Previous versions: x8 Backup & Restore (manual export/import). x7 saveCase canonical-hierarchy fix. x6 self-heal + diagnostics. Parse-check clean.';
+const APP_VERSION       = '2026.05.01.1';
+const APP_VERSION_LABEL = 'May 1, 2026 (x1) — Fixed Set-OneDrive-folder bug that killed setup on a fresh laptop. pickOneDriveRootFolder() previously called msSignIn() unconditionally, which always triggers a full-page redirect to Microsoft. The redirect killed the function so the paste-link prompt never fired — clicking the button just bounced the user back to the app with the canonical folder still unset. Now: function checks for a signed-in MSAL account first; if present, goes straight to the paste-link prompt; if not, stashes a "set-onedrive-root" pending action in sessionStorage before redirecting. resumePendingMsImport (which already handles the import-attorney-link resume) was generalized to dispatch on pending.action, with a new branch that re-shows the paste-link prompt automatically after redirect resume. Split _promptOneDriveRootLink out as a callable inner half so the resume path can re-enter without re-running the sign-in check. Previous: x10 Shrunk topbar + sidebar-bottom logo so they fit their containers cleanly. Topbar SVG went from 260x78 (overflowing the 60px topbar) to 160x48; sidebar-bottom SVG went from 220x66 to 180x54 with max-width:100% to prevent any future overflow in the 220px-wide sidebar. Same viewBox (1000x300) so the logo artwork is unchanged — just scaled down to the right display size. Previous: x9 Automatic backups. autoBackupAppState(reason) uploads the same envelope the manual Export button generates to {canonical}/_Internal/_backups/chart-detectives-backup-YYYY-MM-DD-HHMM.json. Wired into two triggers: saveCase success path (reason="new-case:<id>") and end of finishAnalysis (reason="analysis-complete:<caseId>"). Concurrency guard prevents duplicate uploads when two events fire within the same tick. 60-second throttle collapses rapid bursts. Silent token gate (checks _msToken / _driveToken without triggering sign-in redirects) — if the user is not signed in yet, we skip silently rather than disrupt workflow. Failures are non-fatal: console.warn only, never toasts a red error. Uses provider-aware routing through msGraphFindOrCreateFolder + msGraphUploadFile on OneDrive path and driveFindOrCreateFolder + driveUploadFile on Drive path. Updated backup strip label to explain auto-backup is on. Previous versions: x8 Backup & Restore (manual export/import). x7 saveCase canonical-hierarchy fix. x6 self-heal + diagnostics. Parse-check clean.';
 
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
 
@@ -4585,7 +4585,7 @@ async function resumePendingMsImport() {
   let pending;
   try { pending = JSON.parse(sessionStorage.getItem(MS_PENDING_KEY) || 'null'); }
   catch(_) { pending = null; }
-  if (!pending || !pending.caseId || !pending.url) return;
+  if (!pending || !pending.action) return;
   // Drop stashes older than 15 minutes — user walked away from the tab.
   if (Date.now() - (pending.ts || 0) > 15 * 60 * 1000) {
     sessionStorage.removeItem(MS_PENDING_KEY);
@@ -4596,21 +4596,36 @@ async function resumePendingMsImport() {
   try { await _initMsalInstance(); } catch(_) {}
   // Only resume if MSAL now has an account (the redirect actually succeeded).
   if (!_msalInstance || !_msalInstance.getAllAccounts().length) return;
-  // Jump to the Records page, select the case, pre-fill the URL.
-  try { showPage('records'); } catch(_) {}
-  const sel = document.getElementById('rec-case-select');
-  if (sel) {
-    sel.value = pending.caseId;
-    try { onRecCaseSelectChanged(); } catch(_) {}
+
+  // Set-OneDrive-root resume: re-show the paste-link prompt now that the user
+  // is signed in. No page navigation needed — prompt() is modal.
+  if (pending.action === 'set-onedrive-root') {
+    setTimeout(() => {
+      try { _promptOneDriveRootLink(); }
+      catch(e) { console.warn('[msal] set-onedrive-root resume failed:', e); }
+    }, 200);
+    return;
   }
-  const urlEl = document.getElementById('attorney-link-input');
-  if (urlEl) urlEl.value = pending.url;
-  const statusEl = document.getElementById('attorney-import-status');
-  if (statusEl) statusEl.innerHTML = '<span style="color:#227d3b;">✓ Signed into Microsoft — resuming import…</span>';
-  // Fire the import. We don't await so the user sees the status update first.
-  setTimeout(() => {
-    try { importFromAttorneyLink(); } catch(e) { console.warn('[msal] resume failed:', e); }
-  }, 200);
+
+  // Attorney-link import resume (the original use of this stash).
+  if (pending.action === 'import-attorney-link') {
+    if (!pending.caseId || !pending.url) return;
+    try { showPage('records'); } catch(_) {}
+    const sel = document.getElementById('rec-case-select');
+    if (sel) {
+      sel.value = pending.caseId;
+      try { onRecCaseSelectChanged(); } catch(_) {}
+    }
+    const urlEl = document.getElementById('attorney-link-input');
+    if (urlEl) urlEl.value = pending.url;
+    const statusEl = document.getElementById('attorney-import-status');
+    if (statusEl) statusEl.innerHTML = '<span style="color:#227d3b;">✓ Signed into Microsoft — resuming import…</span>';
+    // Fire the import. We don't await so the user sees the status update first.
+    setTimeout(() => {
+      try { importFromAttorneyLink(); } catch(e) { console.warn('[msal] resume failed:', e); }
+    }, 200);
+    return;
+  }
 }
 
 // ===== NAVIGATION =====
@@ -5013,8 +5028,39 @@ function renderOneDriveRootStrip() {
 // reuses the exact Graph plumbing that's proven on the read path.
 async function pickOneDriveRootFolder() {
   try {
-    // Make sure MSAL is ready + the user has consented to the WRITE scope.
-    await msSignIn(); // interactive; acquires token with Files.ReadWrite.All
+    // Make sure MSAL is initialized so handleRedirectPromise has settled and
+    // any cached account is promoted to active. Only call msSignIn() — which
+    // navigates the page away — when there is genuinely no signed-in account.
+    // Calling msSignIn() unconditionally caused the canonical-folder setup to
+    // be killed by the redirect (the prompt below never runs, because the
+    // function is gone from the page that loaded after sign-in).
+    await _initMsalInstance();
+    const accts = (_msalInstance && _msalInstance.getAllAccounts)
+      ? _msalInstance.getAllAccounts()
+      : [];
+    if (!accts.length) {
+      // Not signed in yet. Stash the intent so resumePendingMsImport can
+      // re-show the paste-link prompt automatically when the user lands
+      // back on the app after Microsoft sign-in.
+      try {
+        sessionStorage.setItem(MS_PENDING_KEY, JSON.stringify({
+          action: 'set-onedrive-root',
+          ts: Date.now()
+        }));
+      } catch(_) {}
+      await msSignIn(); // navigates away; does not return
+      return;
+    }
+    await _promptOneDriveRootLink();
+  } catch (e) {
+    alert('Could not set OneDrive root: ' + (e && e.message ? e.message : e));
+  }
+}
+
+// Inner half of pickOneDriveRootFolder: shown to a user who is already signed
+// in to Microsoft. Split out so the post-redirect resume path can call it
+// directly without re-running the sign-in check.
+async function _promptOneDriveRootLink() {
     const link = prompt('Paste a OneDrive folder share link (right-click the folder in OneDrive → Copy link):');
     if (!link) return;
     const trimmed = link.trim();
@@ -5033,10 +5079,7 @@ async function pickOneDriveRootFolder() {
     state.oneDriveRootFolderName = meta.name || 'OneDrive Folder';
     save();
     renderOneDriveRootStrip();
-    showToast('\u2601\ufe0f OneDrive root set to ' + state.oneDriveRootFolderName);
-  } catch (e) {
-    alert('Could not set OneDrive root: ' + (e && e.message ? e.message : e));
-  }
+  showToast('\u2601\ufe0f OneDrive root set to ' + state.oneDriveRootFolderName);
 }
 
 function clearOneDriveRootFolder() {
