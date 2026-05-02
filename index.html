@@ -1200,8 +1200,8 @@ tr:hover td { background: var(--gray-50); }
 // Format: YYYY.MM.DD.N where N is the Nth change on that day (1-indexed).
 // APP_VERSION_LABEL is a human-readable caption shown on hover.
 // ============================================================================
-const APP_VERSION       = '2026.05.01.2';
-const APP_VERSION_LABEL = 'May 1, 2026 (x2) — Made local-file upload (➕ Add more records) and Google Drive attorney-link import provider-aware. handleDirectRecordsUpload + the gdrive branch of importFromAttorneyLink both used to hardcode driveFolderId + driveUploadFile, which silently failed on OneDrive-canonical cases (Tony hit this on Evans: "no Drive folder linked to this case" + local upload also failing). Now both functions read storageProvider off the case (falling back to state.canonicalStorage when missing) and route to the right destination: OneDrive cases call ensureCaseCanonicalHierarchy + msGraphUploadFile / mirrorDriveTreeToGraph; Drive cases keep the existing path. mirrorDriveTreeToGraph already existed (built in 6f.1) — just wasn\'t wired into the user-facing import flow. The Records page can now pull an attorney\'s Google Drive share into a OneDrive case in a single click; cross-cloud copies stream through the browser tab the same way OneDrive→Drive imports already did. attorneyImport manifest now records destProvider so refreshAttorneyLink can pick the right mirror direction next time. Previous: x1 Fixed Set-OneDrive-folder bug that killed setup on a fresh laptop. pickOneDriveRootFolder() previously called msSignIn() unconditionally, which always triggers a full-page redirect to Microsoft. The redirect killed the function so the paste-link prompt never fired — clicking the button just bounced the user back to the app with the canonical folder still unset. Now: function checks for a signed-in MSAL account first; if present, goes straight to the paste-link prompt; if not, stashes a "set-onedrive-root" pending action in sessionStorage before redirecting. resumePendingMsImport (which already handles the import-attorney-link resume) was generalized to dispatch on pending.action, with a new branch that re-shows the paste-link prompt automatically after redirect resume. Split _promptOneDriveRootLink out as a callable inner half so the resume path can re-enter without re-running the sign-in check. Previous: x10 Shrunk topbar + sidebar-bottom logo so they fit their containers cleanly. Topbar SVG went from 260x78 (overflowing the 60px topbar) to 160x48; sidebar-bottom SVG went from 220x66 to 180x54 with max-width:100% to prevent any future overflow in the 220px-wide sidebar. Same viewBox (1000x300) so the logo artwork is unchanged — just scaled down to the right display size. Previous: x9 Automatic backups. autoBackupAppState(reason) uploads the same envelope the manual Export button generates to {canonical}/_Internal/_backups/chart-detectives-backup-YYYY-MM-DD-HHMM.json. Wired into two triggers: saveCase success path (reason="new-case:<id>") and end of finishAnalysis (reason="analysis-complete:<caseId>"). Concurrency guard prevents duplicate uploads when two events fire within the same tick. 60-second throttle collapses rapid bursts. Silent token gate (checks _msToken / _driveToken without triggering sign-in redirects) — if the user is not signed in yet, we skip silently rather than disrupt workflow. Failures are non-fatal: console.warn only, never toasts a red error. Uses provider-aware routing through msGraphFindOrCreateFolder + msGraphUploadFile on OneDrive path and driveFindOrCreateFolder + driveUploadFile on Drive path. Updated backup strip label to explain auto-backup is on. Previous versions: x8 Backup & Restore (manual export/import). x7 saveCase canonical-hierarchy fix. x6 self-heal + diagnostics. Parse-check clean.';
+const APP_VERSION       = '2026.05.01.4';
+const APP_VERSION_LABEL = 'May 1, 2026 (x4) — Added supportsAllDrives=true (and includeItemsFromAllDrives=true on listing) to Drive read paths: driveListFolder, driveGetFileBase64, driveGetFileBlob, driveGetFileMeta. When an attorney shares a folder that lives in a Shared Drive (formerly Team Drive), the API silently misses Shared-Drive content and returns 403 on ?alt=media downloads, even though drive.google.com\'s web UI handles the same files cleanly. Tony hit this on Evans: the listing returned file metadata but ?alt=media on individual files came back as 403, so the cross-cloud import we wired up in x2 couldn\'t actually download anything. driveCopyFile already passed the flag (someone caught this earlier and applied it locally) — these were the four sibling read paths still using the legacy URL form. Other Drive call sites (folder create, permissions, move) left as-is for this push since they hit folders the user owns. Previous: x3 Made the runRecordAnalysis content-fetch loop OneDrive-aware. The file list (driveFiles) and the citation URL builder were already provider-aware (loadCaseDriveFiles dispatches via getCaseStorageRef), but the actual download path inside the analysis pipeline still called driveGetFileMeta / driveGetFileBlob / driveGetFileBase64 unconditionally. For OneDrive cases the file IDs are Microsoft Graph item IDs, so every Drive call 404\'d, the loop\'s try/catch swallowed each error, contentBlocks ended up empty, and the API call came back with "ERROR: No records attached" (Tony hit this on Evans after switching to OneDrive canonical). New helpers: recordGetFileBlob / recordGetFileBase64 / recordGetFileMeta dispatch by getCaseStorageRef(caseInfo).provider — Graph download (msGraphDownloadFile + blobToBase64) for OneDrive, Drive APIs unchanged for gdrive. caseRef is computed once at the top of runRecordAnalysis so every iteration in the file loop reuses the same dispatch. Cache write/read remains disabled for OneDrive cases (the gate still requires driveFolderId) so we don\'t accidentally exercise an unverified Graph cache write path mid-run; OneDrive cases re-process fresh each time, which is slower but correct. Previous: x2 Made local-file upload + gdrive attorney-link import provider-aware. handleDirectRecordsUpload + the gdrive branch of importFromAttorneyLink both used to hardcode driveFolderId + driveUploadFile, which silently failed on OneDrive-canonical cases (Tony hit this on Evans: "no Drive folder linked to this case" + local upload also failing). Now both functions read storageProvider off the case (falling back to state.canonicalStorage when missing) and route to the right destination: OneDrive cases call ensureCaseCanonicalHierarchy + msGraphUploadFile / mirrorDriveTreeToGraph; Drive cases keep the existing path. mirrorDriveTreeToGraph already existed (built in 6f.1) — just wasn\'t wired into the user-facing import flow. The Records page can now pull an attorney\'s Google Drive share into a OneDrive case in a single click; cross-cloud copies stream through the browser tab the same way OneDrive→Drive imports already did. attorneyImport manifest now records destProvider so refreshAttorneyLink can pick the right mirror direction next time. Previous: x1 Fixed Set-OneDrive-folder bug that killed setup on a fresh laptop. pickOneDriveRootFolder() previously called msSignIn() unconditionally, which always triggers a full-page redirect to Microsoft. The redirect killed the function so the paste-link prompt never fired — clicking the button just bounced the user back to the app with the canonical folder still unset. Now: function checks for a signed-in MSAL account first; if present, goes straight to the paste-link prompt; if not, stashes a "set-onedrive-root" pending action in sessionStorage before redirecting. resumePendingMsImport (which already handles the import-attorney-link resume) was generalized to dispatch on pending.action, with a new branch that re-shows the paste-link prompt automatically after redirect resume. Split _promptOneDriveRootLink out as a callable inner half so the resume path can re-enter without re-running the sign-in check. Previous: x10 Shrunk topbar + sidebar-bottom logo so they fit their containers cleanly. Topbar SVG went from 260x78 (overflowing the 60px topbar) to 160x48; sidebar-bottom SVG went from 220x66 to 180x54 with max-width:100% to prevent any future overflow in the 220px-wide sidebar. Same viewBox (1000x300) so the logo artwork is unchanged — just scaled down to the right display size. Previous: x9 Automatic backups. autoBackupAppState(reason) uploads the same envelope the manual Export button generates to {canonical}/_Internal/_backups/chart-detectives-backup-YYYY-MM-DD-HHMM.json. Wired into two triggers: saveCase success path (reason="new-case:<id>") and end of finishAnalysis (reason="analysis-complete:<caseId>"). Concurrency guard prevents duplicate uploads when two events fire within the same tick. 60-second throttle collapses rapid bursts. Silent token gate (checks _msToken / _driveToken without triggering sign-in redirects) — if the user is not signed in yet, we skip silently rather than disrupt workflow. Failures are non-fatal: console.warn only, never toasts a red error. Uses provider-aware routing through msGraphFindOrCreateFolder + msGraphUploadFile on OneDrive path and driveFindOrCreateFolder + driveUploadFile on Drive path. Updated backup strip label to explain auto-backup is on. Previous versions: x8 Backup & Restore (manual export/import). x7 saveCase canonical-hierarchy fix. x6 self-heal + diagnostics. Parse-check clean.';
 
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
 
@@ -2183,7 +2183,12 @@ async function driveListFolder(folderId) {
   // We ask for modifiedTime + md5Checksum so callers that do diff/refresh
   // (attorney-link sync) can detect which files changed since the last import.
   const q = encodeURIComponent(`'${folderId}' in parents and trashed = false`);
-  const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,mimeType,size,modifiedTime,md5Checksum)&pageSize=1000`;
+  // supportsAllDrives + includeItemsFromAllDrives let us see content the
+  // attorney has in a Shared Drive (formerly Team Drive). Without these
+  // flags the listing silently misses Shared-Drive children, and
+  // ?alt=media downloads on individual file IDs come back as 403 even
+  // when the same files are perfectly downloadable from drive.google.com.
+  const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,mimeType,size,modifiedTime,md5Checksum)&pageSize=1000&supportsAllDrives=true&includeItemsFromAllDrives=true`;
   const res = await fetch(url, { headers: { Authorization: 'Bearer ' + _driveToken } });
   if (!res.ok) throw new Error('Drive list failed: ' + res.status + ' ' + await res.text());
   const data = await res.json();
@@ -2308,7 +2313,11 @@ async function mirrorDriveTreeTo(sourceTree, destParentId, progressCb) {
 // Download file bytes as a base64 string (for sending to Claude as a content block).
 async function driveGetFileBase64(fileId) {
   if (!_driveToken) await driveSignIn(false);
-  const url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
+  // supportsAllDrives is required when the file lives in a Shared Drive — the
+  // API returns 403 on ?alt=media without it, even though drive.google.com's
+  // own UI downloads the same file fine. Many law-firm attorney folders are
+  // in Shared Drives.
+  const url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`;
   const res = await fetch(url, { headers: { Authorization: 'Bearer ' + _driveToken } });
   if (!res.ok) throw new Error('Drive download failed: ' + res.status);
   const buf = await res.arrayBuffer();
@@ -2325,7 +2334,8 @@ async function driveGetFileBase64(fileId) {
 // Download a Drive file as a Blob (used for HEIC conversion: we need raw bytes, not base64).
 async function driveGetFileBlob(fileId, fallbackMime) {
   if (!_driveToken) await driveSignIn(false);
-  const url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
+  // See driveGetFileBase64 above re: supportsAllDrives.
+  const url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`;
   const res = await fetch(url, { headers: { Authorization: 'Bearer ' + _driveToken } });
   if (!res.ok) throw new Error('Drive download failed: ' + res.status);
   const b = await res.blob();
@@ -2440,6 +2450,58 @@ function blobToBase64(blob) {
   });
 }
 
+// ----- Provider-aware record fetch helpers (Phase 6f.4) -----
+// runRecordAnalysis used to call driveGetFileMeta / driveGetFileBlob /
+// driveGetFileBase64 unconditionally. For OneDrive cases the file IDs are
+// Microsoft Graph item IDs, so those calls 404 and the loop's try/catch
+// swallows the error — leading to "ERROR: No records attached" because
+// nothing made it into contentBlocks. These thin wrappers dispatch by the
+// case's storage provider (or the file node's own driveId, when present)
+// so the analysis pipeline works on either cloud.
+function _recordFileProvider(file, caseRef) {
+  if (caseRef && caseRef.provider) return caseRef.provider;
+  if (file && file.driveId) return 'onedrive';
+  return 'gdrive';
+}
+async function recordGetFileBlob(file, caseRef, fallbackMime) {
+  const provider = _recordFileProvider(file, caseRef);
+  if (provider === 'onedrive') {
+    const driveId = (file && file.driveId) || (caseRef && caseRef.driveId);
+    if (!driveId) throw new Error('OneDrive driveId missing on file ' + ((file && file.name) || (file && file.id) || '(unknown)'));
+    const blob = await msGraphDownloadFile(driveId, file.id);
+    return (fallbackMime && !blob.type) ? blob.slice(0, blob.size, fallbackMime) : blob;
+  }
+  return await driveGetFileBlob(file.id, fallbackMime);
+}
+async function recordGetFileBase64(file, caseRef) {
+  const provider = _recordFileProvider(file, caseRef);
+  if (provider === 'onedrive') {
+    const driveId = (file && file.driveId) || (caseRef && caseRef.driveId);
+    if (!driveId) throw new Error('OneDrive driveId missing on file ' + ((file && file.name) || (file && file.id) || '(unknown)'));
+    const blob = await msGraphDownloadFile(driveId, file.id);
+    return await blobToBase64(blob);
+  }
+  return await driveGetFileBase64(file.id);
+}
+async function recordGetFileMeta(file, caseRef) {
+  const provider = _recordFileProvider(file, caseRef);
+  if (provider === 'onedrive') {
+    // For OneDrive we trust the metadata the tree walker already populated on
+    // the file node (modifiedTime, size, quickXorHash). msGraphGetItem could
+    // be added later for a round-trip verify; until cache-on-OneDrive is
+    // wired up this is only used opportunistically, so a best-effort echo of
+    // the in-memory node is correct.
+    return {
+      id: file && file.id,
+      name: file && file.name,
+      modifiedTime: (file && file.modifiedTime) || null,
+      md5Checksum: (file && file.md5Checksum) || null,
+      size: (file && file.size) || null
+    };
+  }
+  return await driveGetFileMeta(file.id);
+}
+
 // Upload a file (Blob or string) into the named Drive folder. Returns the new file metadata.
 async function driveUploadFile(folderId, filename, mime, blobOrText) {
   if (!_driveToken) await driveSignIn(false);
@@ -2524,7 +2586,7 @@ async function driveFindOrCreateFolder(parentId, name) {
 // Look up a single Drive file's metadata (used for cache freshness: size + modifiedTime).
 async function driveGetFileMeta(fileId) {
   if (!_driveToken) await driveSignIn(false);
-  const url = 'https://www.googleapis.com/drive/v3/files/' + fileId + '?fields=id,name,mimeType,size,modifiedTime';
+  const url = 'https://www.googleapis.com/drive/v3/files/' + fileId + '?fields=id,name,mimeType,size,modifiedTime&supportsAllDrives=true';
   const res = await fetch(url, { headers: { Authorization: 'Bearer ' + _driveToken } });
   if (!res.ok) throw new Error('Drive meta fetch failed: ' + res.status);
   return res.json();
@@ -8773,6 +8835,11 @@ async function runRecordAnalysis() {
   if (rerunBtnReset) rerunBtnReset.style.display = 'none';
 
   const caseInfo = caseId ? state.cases.find(c => c.id === caseId) : null;
+  // Phase 6f.4: caseRef tells the file-fetch helpers which cloud to read from
+  // (OneDrive via Graph, Drive via Drive API). Computed once so every loop
+  // iteration below re-uses the same dispatch decision without re-walking
+  // the case record.
+  const caseRef = caseInfo ? getCaseStorageRef(caseInfo) : null;
   const caseContext = caseInfo ? `Patient: ${caseInfo.patient}, Case type: ${caseInfo.type}, Attorney: ${caseInfo.attorney}` : '';
   const typeLabels = { chronology: 'detailed medical chronology', summary: 'comprehensive narrative summary', gaps: 'analysis of care gaps and inconsistencies', providers: 'list of all providers, diagnoses, and medications', full: 'full comprehensive LNC analysis including chronology, summary, gaps, providers, and nursing care assessment' };
 
@@ -8889,7 +8956,7 @@ async function runRecordAnalysis() {
           let sourceMeta = null;
           if (processedManifest) {
             try {
-              sourceMeta = await driveGetFileMeta(f.id);
+              sourceMeta = await recordGetFileMeta(f, caseRef);
               const entry = processedManifest.entries[f.id];
               if (entry && entry.kind === 'pdfChunks' && cacheEntryIsFresh(entry, sourceMeta)) cached = entry;
             } catch (e) { console.warn('Cache freshness check failed for ' + f.name + ':', e); }
@@ -8899,7 +8966,7 @@ async function runRecordAnalysis() {
             for (let ci = 0; ci < cached.chunks.length; ci++) {
               const ck = cached.chunks[ci];
               area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Loading cached chunk ' + (ci+1) + '/' + cached.chunks.length + ' of ' + esc(f.name) + '…</span></div>';
-              const b64 = await driveGetFileBase64(ck.id);
+              const b64 = await recordGetFileBase64(ck, caseRef);
               const partTitle = (cached.chunks.length === 1)
                 ? f.name
                 : f.name.replace(/\.pdf$/i,'') + ' — pp. ' + ck.startPage + '-' + ck.endPage + ' of ' + (ck.totalPages || '?') + '.pdf';
@@ -8912,7 +8979,7 @@ async function runRecordAnalysis() {
           // a _processed folder to park them in — upload each chunk back and record it
           // in the manifest for next time.
           area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Downloading PDF ('+(idx+1)+'/'+selectedDrive.length+'): ' + esc(f.name) + '…</span></div>';
-          const blob = await driveGetFileBlob(f.id, 'application/pdf');
+          const blob = await recordGetFileBlob(f, caseRef, 'application/pdf');
           const buf  = await blob.arrayBuffer();
           area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Processing PDF: ' + esc(f.name) + '…</span></div>';
           const parts = await splitPdfIntoChunks(buf);
@@ -8955,19 +9022,19 @@ async function runRecordAnalysis() {
           let sourceMeta = null;
           if (processedManifest) {
             try {
-              sourceMeta = await driveGetFileMeta(f.id);
+              sourceMeta = await recordGetFileMeta(f, caseRef);
               const entry = processedManifest.entries[f.id];
               if (entry && entry.kind === 'heicJpeg' && cacheEntryIsFresh(entry, sourceMeta)) cachedJpeg = entry;
             } catch (e) { console.warn('HEIC cache freshness check failed:', e); }
           }
           if (cachedJpeg && cachedJpeg.jpegId) {
             area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Using cached JPEG ('+(idx+1)+'/'+selectedDrive.length+'): ' + esc(f.name) + '…</span></div>';
-            const b64jpg = await driveGetFileBase64(cachedJpeg.jpegId);
+            const b64jpg = await recordGetFileBase64({ id: cachedJpeg.jpegId, driveId: cachedJpeg.jpegDriveId || (caseRef && caseRef.driveId) }, caseRef);
             contentBlocks.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: b64jpg } });
             continue;
           }
           area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Converting HEIC ('+(idx+1)+'/'+selectedDrive.length+'): ' + esc(f.name) + '…</span></div>';
-          const heicBlob = await driveGetFileBlob(f.id, 'image/heic');
+          const heicBlob = await recordGetFileBlob(f, caseRef, 'image/heic');
           let jpegBlob  = await heicToJpegBlob(heicBlob);
           jpegBlob      = await downscaleImageBlob(jpegBlob, 1600, 0.75);
           const b64jpg  = await blobToBase64(jpegBlob);
@@ -8992,12 +9059,12 @@ async function runRecordAnalysis() {
         } else if (f.mimeType && f.mimeType.startsWith('image/')) {
           // Download, downscale, re-encode → JPEG base64. Keeps payload small for big photos.
           area.innerHTML = '<div class="ai-loading"><div class="spinner"></div><span>Processing image ('+(idx+1)+'/'+selectedDrive.length+'): ' + esc(f.name) + '…</span></div>';
-          const imgBlob = await driveGetFileBlob(f.id, f.mimeType);
+          const imgBlob = await recordGetFileBlob(f, caseRef, f.mimeType);
           const small   = await downscaleImageBlob(imgBlob, 1600, 0.75);
           const b64     = await blobToBase64(small);
           contentBlocks.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: b64 } });
         } else if (f.mimeType === 'text/plain') {
-          const b64 = await driveGetFileBase64(f.id);
+          const b64 = await recordGetFileBase64(f, caseRef);
           textAddendum += '\n\n--- ' + f.name + ' ---\n' + atob(b64);
         } else {
           textAddendum += '\n\n[Skipped ' + f.name + ' — unsupported type ' + (f.mimeType||'unknown') + ']';
