@@ -1200,8 +1200,8 @@ tr:hover td { background: var(--gray-50); }
 // Format: YYYY.MM.DD.N where N is the Nth change on that day (1-indexed).
 // APP_VERSION_LABEL is a human-readable caption shown on hover.
 // ============================================================================
-const APP_VERSION       = '2026.05.01.4';
-const APP_VERSION_LABEL = 'May 1, 2026 (x4) — Added supportsAllDrives=true (and includeItemsFromAllDrives=true on listing) to Drive read paths: driveListFolder, driveGetFileBase64, driveGetFileBlob, driveGetFileMeta. When an attorney shares a folder that lives in a Shared Drive (formerly Team Drive), the API silently misses Shared-Drive content and returns 403 on ?alt=media downloads, even though drive.google.com\'s web UI handles the same files cleanly. Tony hit this on Evans: the listing returned file metadata but ?alt=media on individual files came back as 403, so the cross-cloud import we wired up in x2 couldn\'t actually download anything. driveCopyFile already passed the flag (someone caught this earlier and applied it locally) — these were the four sibling read paths still using the legacy URL form. Other Drive call sites (folder create, permissions, move) left as-is for this push since they hit folders the user owns. Previous: x3 Made the runRecordAnalysis content-fetch loop OneDrive-aware. The file list (driveFiles) and the citation URL builder were already provider-aware (loadCaseDriveFiles dispatches via getCaseStorageRef), but the actual download path inside the analysis pipeline still called driveGetFileMeta / driveGetFileBlob / driveGetFileBase64 unconditionally. For OneDrive cases the file IDs are Microsoft Graph item IDs, so every Drive call 404\'d, the loop\'s try/catch swallowed each error, contentBlocks ended up empty, and the API call came back with "ERROR: No records attached" (Tony hit this on Evans after switching to OneDrive canonical). New helpers: recordGetFileBlob / recordGetFileBase64 / recordGetFileMeta dispatch by getCaseStorageRef(caseInfo).provider — Graph download (msGraphDownloadFile + blobToBase64) for OneDrive, Drive APIs unchanged for gdrive. caseRef is computed once at the top of runRecordAnalysis so every iteration in the file loop reuses the same dispatch. Cache write/read remains disabled for OneDrive cases (the gate still requires driveFolderId) so we don\'t accidentally exercise an unverified Graph cache write path mid-run; OneDrive cases re-process fresh each time, which is slower but correct. Previous: x2 Made local-file upload + gdrive attorney-link import provider-aware. handleDirectRecordsUpload + the gdrive branch of importFromAttorneyLink both used to hardcode driveFolderId + driveUploadFile, which silently failed on OneDrive-canonical cases (Tony hit this on Evans: "no Drive folder linked to this case" + local upload also failing). Now both functions read storageProvider off the case (falling back to state.canonicalStorage when missing) and route to the right destination: OneDrive cases call ensureCaseCanonicalHierarchy + msGraphUploadFile / mirrorDriveTreeToGraph; Drive cases keep the existing path. mirrorDriveTreeToGraph already existed (built in 6f.1) — just wasn\'t wired into the user-facing import flow. The Records page can now pull an attorney\'s Google Drive share into a OneDrive case in a single click; cross-cloud copies stream through the browser tab the same way OneDrive→Drive imports already did. attorneyImport manifest now records destProvider so refreshAttorneyLink can pick the right mirror direction next time. Previous: x1 Fixed Set-OneDrive-folder bug that killed setup on a fresh laptop. pickOneDriveRootFolder() previously called msSignIn() unconditionally, which always triggers a full-page redirect to Microsoft. The redirect killed the function so the paste-link prompt never fired — clicking the button just bounced the user back to the app with the canonical folder still unset. Now: function checks for a signed-in MSAL account first; if present, goes straight to the paste-link prompt; if not, stashes a "set-onedrive-root" pending action in sessionStorage before redirecting. resumePendingMsImport (which already handles the import-attorney-link resume) was generalized to dispatch on pending.action, with a new branch that re-shows the paste-link prompt automatically after redirect resume. Split _promptOneDriveRootLink out as a callable inner half so the resume path can re-enter without re-running the sign-in check. Previous: x10 Shrunk topbar + sidebar-bottom logo so they fit their containers cleanly. Topbar SVG went from 260x78 (overflowing the 60px topbar) to 160x48; sidebar-bottom SVG went from 220x66 to 180x54 with max-width:100% to prevent any future overflow in the 220px-wide sidebar. Same viewBox (1000x300) so the logo artwork is unchanged — just scaled down to the right display size. Previous: x9 Automatic backups. autoBackupAppState(reason) uploads the same envelope the manual Export button generates to {canonical}/_Internal/_backups/chart-detectives-backup-YYYY-MM-DD-HHMM.json. Wired into two triggers: saveCase success path (reason="new-case:<id>") and end of finishAnalysis (reason="analysis-complete:<caseId>"). Concurrency guard prevents duplicate uploads when two events fire within the same tick. 60-second throttle collapses rapid bursts. Silent token gate (checks _msToken / _driveToken without triggering sign-in redirects) — if the user is not signed in yet, we skip silently rather than disrupt workflow. Failures are non-fatal: console.warn only, never toasts a red error. Uses provider-aware routing through msGraphFindOrCreateFolder + msGraphUploadFile on OneDrive path and driveFindOrCreateFolder + driveUploadFile on Drive path. Updated backup strip label to explain auto-backup is on. Previous versions: x8 Backup & Restore (manual export/import). x7 saveCase canonical-hierarchy fix. x6 self-heal + diagnostics. Parse-check clean.';
+const APP_VERSION       = '2026.05.01.5';
+const APP_VERSION_LABEL = 'May 1, 2026 (x5) — Added API-key fallback to Drive read paths (driveListFolder, driveGetFileBase64, driveGetFileBlob, driveGetFileMeta) for "Anyone with link" public-share files. Tony confirmed the Evans share was genuinely public (downloadable in an incognito tab with no Google sign-in) yet OAuth-authenticated ?alt=media still returned 403. That\'s Drive\'s known REST-API quirk: when you call the API with a Bearer token, Drive enforces per-user permission checks even when the underlying file is link-shared, so any account that hasn\'t been explicitly added to the share gets 403 — even though the same file downloads fine via drive.google.com. API-key auth (no Authorization header) skips the per-user check and Drive serves the file based on its public-share permission alone. New _driveFetchAltMedia helper tries OAuth first (so direct-share files in user\'s My Drive still work), falls back to API key on 403/404 (so link-shared attorney folders unblock). Same fallback added inline to driveListFolder + driveGetFileMeta so the entire import + analysis read path can handle anonymous-share content. GOOGLE_API_KEY was already configured for the Drive Picker — re-using it here. Previous: x4 Added supportsAllDrives flag. driveListFolder, driveGetFileBase64, driveGetFileBlob, driveGetFileMeta. When an attorney shares a folder that lives in a Shared Drive (formerly Team Drive), the API silently misses Shared-Drive content and returns 403 on ?alt=media downloads, even though drive.google.com\'s web UI handles the same files cleanly. Tony hit this on Evans: the listing returned file metadata but ?alt=media on individual files came back as 403, so the cross-cloud import we wired up in x2 couldn\'t actually download anything. driveCopyFile already passed the flag (someone caught this earlier and applied it locally) — these were the four sibling read paths still using the legacy URL form. Other Drive call sites (folder create, permissions, move) left as-is for this push since they hit folders the user owns. Previous: x3 Made the runRecordAnalysis content-fetch loop OneDrive-aware. The file list (driveFiles) and the citation URL builder were already provider-aware (loadCaseDriveFiles dispatches via getCaseStorageRef), but the actual download path inside the analysis pipeline still called driveGetFileMeta / driveGetFileBlob / driveGetFileBase64 unconditionally. For OneDrive cases the file IDs are Microsoft Graph item IDs, so every Drive call 404\'d, the loop\'s try/catch swallowed each error, contentBlocks ended up empty, and the API call came back with "ERROR: No records attached" (Tony hit this on Evans after switching to OneDrive canonical). New helpers: recordGetFileBlob / recordGetFileBase64 / recordGetFileMeta dispatch by getCaseStorageRef(caseInfo).provider — Graph download (msGraphDownloadFile + blobToBase64) for OneDrive, Drive APIs unchanged for gdrive. caseRef is computed once at the top of runRecordAnalysis so every iteration in the file loop reuses the same dispatch. Cache write/read remains disabled for OneDrive cases (the gate still requires driveFolderId) so we don\'t accidentally exercise an unverified Graph cache write path mid-run; OneDrive cases re-process fresh each time, which is slower but correct. Previous: x2 Made local-file upload + gdrive attorney-link import provider-aware. handleDirectRecordsUpload + the gdrive branch of importFromAttorneyLink both used to hardcode driveFolderId + driveUploadFile, which silently failed on OneDrive-canonical cases (Tony hit this on Evans: "no Drive folder linked to this case" + local upload also failing). Now both functions read storageProvider off the case (falling back to state.canonicalStorage when missing) and route to the right destination: OneDrive cases call ensureCaseCanonicalHierarchy + msGraphUploadFile / mirrorDriveTreeToGraph; Drive cases keep the existing path. mirrorDriveTreeToGraph already existed (built in 6f.1) — just wasn\'t wired into the user-facing import flow. The Records page can now pull an attorney\'s Google Drive share into a OneDrive case in a single click; cross-cloud copies stream through the browser tab the same way OneDrive→Drive imports already did. attorneyImport manifest now records destProvider so refreshAttorneyLink can pick the right mirror direction next time. Previous: x1 Fixed Set-OneDrive-folder bug that killed setup on a fresh laptop. pickOneDriveRootFolder() previously called msSignIn() unconditionally, which always triggers a full-page redirect to Microsoft. The redirect killed the function so the paste-link prompt never fired — clicking the button just bounced the user back to the app with the canonical folder still unset. Now: function checks for a signed-in MSAL account first; if present, goes straight to the paste-link prompt; if not, stashes a "set-onedrive-root" pending action in sessionStorage before redirecting. resumePendingMsImport (which already handles the import-attorney-link resume) was generalized to dispatch on pending.action, with a new branch that re-shows the paste-link prompt automatically after redirect resume. Split _promptOneDriveRootLink out as a callable inner half so the resume path can re-enter without re-running the sign-in check. Previous: x10 Shrunk topbar + sidebar-bottom logo so they fit their containers cleanly. Topbar SVG went from 260x78 (overflowing the 60px topbar) to 160x48; sidebar-bottom SVG went from 220x66 to 180x54 with max-width:100% to prevent any future overflow in the 220px-wide sidebar. Same viewBox (1000x300) so the logo artwork is unchanged — just scaled down to the right display size. Previous: x9 Automatic backups. autoBackupAppState(reason) uploads the same envelope the manual Export button generates to {canonical}/_Internal/_backups/chart-detectives-backup-YYYY-MM-DD-HHMM.json. Wired into two triggers: saveCase success path (reason="new-case:<id>") and end of finishAnalysis (reason="analysis-complete:<caseId>"). Concurrency guard prevents duplicate uploads when two events fire within the same tick. 60-second throttle collapses rapid bursts. Silent token gate (checks _msToken / _driveToken without triggering sign-in redirects) — if the user is not signed in yet, we skip silently rather than disrupt workflow. Failures are non-fatal: console.warn only, never toasts a red error. Uses provider-aware routing through msGraphFindOrCreateFolder + msGraphUploadFile on OneDrive path and driveFindOrCreateFolder + driveUploadFile on Drive path. Updated backup strip label to explain auto-backup is on. Previous versions: x8 Backup & Restore (manual export/import). x7 saveCase canonical-hierarchy fix. x6 self-heal + diagnostics. Parse-check clean.';
 
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
 
@@ -2185,11 +2185,18 @@ async function driveListFolder(folderId) {
   const q = encodeURIComponent(`'${folderId}' in parents and trashed = false`);
   // supportsAllDrives + includeItemsFromAllDrives let us see content the
   // attorney has in a Shared Drive (formerly Team Drive). Without these
-  // flags the listing silently misses Shared-Drive children, and
-  // ?alt=media downloads on individual file IDs come back as 403 even
-  // when the same files are perfectly downloadable from drive.google.com.
+  // flags the listing silently misses Shared-Drive children.
   const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,mimeType,size,modifiedTime,md5Checksum)&pageSize=1000&supportsAllDrives=true&includeItemsFromAllDrives=true`;
-  const res = await fetch(url, { headers: { Authorization: 'Bearer ' + _driveToken } });
+  // OAuth first; on 403/404 fall back to API-key auth — same rationale as
+  // _driveFetchAltMedia: "anyone with link" attorney folders are visible to
+  // unauthenticated requests by design, but Drive's REST API enforces
+  // per-user permission checks for OAuth requests, so a token belonging to
+  // an account that hasn't been added to the share returns 403 even for
+  // listing. API-key requests skip that check.
+  let res = await fetch(url, { headers: { Authorization: 'Bearer ' + _driveToken } });
+  if ((res.status === 403 || res.status === 404) && GOOGLE_API_KEY) {
+    res = await fetch(url + '&key=' + encodeURIComponent(GOOGLE_API_KEY));
+  }
   if (!res.ok) throw new Error('Drive list failed: ' + res.status + ' ' + await res.text());
   const data = await res.json();
   return data.files || [];
@@ -2310,16 +2317,31 @@ async function mirrorDriveTreeTo(sourceTree, destParentId, progressCb) {
   return copies;
 }
 
+// Two-tier fetch for Drive ?alt=media: OAuth first (covers files the user has
+// direct access to), then API-key on 403/404 (covers "Anyone with link" public
+// shares — Drive's REST API enforces per-user permission checks for OAuth
+// requests even when the underlying share is public, but API-key auth is
+// designed exactly for unauthenticated public-resource access and bypasses
+// that check). This is the documented fix for the recurring "I can download
+// it in the browser but the API 403s" pattern that hits attorney shares.
+async function _driveFetchAltMedia(fileId) {
+  if (!_driveToken) await driveSignIn(false);
+  const base = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`;
+  let res = await fetch(base, { headers: { Authorization: 'Bearer ' + _driveToken } });
+  if ((res.status === 403 || res.status === 404) && GOOGLE_API_KEY) {
+    // Retry with API key. Critically, NO Authorization header — the presence
+    // of a Bearer token forces user-context evaluation, which is what just
+    // failed. Plain API key + the file's own "anyone with link" permission
+    // is enough.
+    res = await fetch(base + '&key=' + encodeURIComponent(GOOGLE_API_KEY));
+  }
+  if (!res.ok) throw new Error('Drive download failed: ' + res.status);
+  return res;
+}
+
 // Download file bytes as a base64 string (for sending to Claude as a content block).
 async function driveGetFileBase64(fileId) {
-  if (!_driveToken) await driveSignIn(false);
-  // supportsAllDrives is required when the file lives in a Shared Drive — the
-  // API returns 403 on ?alt=media without it, even though drive.google.com's
-  // own UI downloads the same file fine. Many law-firm attorney folders are
-  // in Shared Drives.
-  const url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`;
-  const res = await fetch(url, { headers: { Authorization: 'Bearer ' + _driveToken } });
-  if (!res.ok) throw new Error('Drive download failed: ' + res.status);
+  const res = await _driveFetchAltMedia(fileId);
   const buf = await res.arrayBuffer();
   // Convert ArrayBuffer → base64 (chunked to avoid call-stack overflow on large files)
   const bytes = new Uint8Array(buf);
@@ -2333,11 +2355,7 @@ async function driveGetFileBase64(fileId) {
 
 // Download a Drive file as a Blob (used for HEIC conversion: we need raw bytes, not base64).
 async function driveGetFileBlob(fileId, fallbackMime) {
-  if (!_driveToken) await driveSignIn(false);
-  // See driveGetFileBase64 above re: supportsAllDrives.
-  const url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`;
-  const res = await fetch(url, { headers: { Authorization: 'Bearer ' + _driveToken } });
-  if (!res.ok) throw new Error('Drive download failed: ' + res.status);
+  const res = await _driveFetchAltMedia(fileId);
   const b = await res.blob();
   // Some Drive responses may not carry the right content-type — re-wrap if we know better.
   return (fallbackMime && !b.type) ? b.slice(0, b.size, fallbackMime) : b;
@@ -2587,7 +2605,11 @@ async function driveFindOrCreateFolder(parentId, name) {
 async function driveGetFileMeta(fileId) {
   if (!_driveToken) await driveSignIn(false);
   const url = 'https://www.googleapis.com/drive/v3/files/' + fileId + '?fields=id,name,mimeType,size,modifiedTime&supportsAllDrives=true';
-  const res = await fetch(url, { headers: { Authorization: 'Bearer ' + _driveToken } });
+  // OAuth-first, API-key fallback — see _driveFetchAltMedia for the rationale.
+  let res = await fetch(url, { headers: { Authorization: 'Bearer ' + _driveToken } });
+  if ((res.status === 403 || res.status === 404) && GOOGLE_API_KEY) {
+    res = await fetch(url + '&key=' + encodeURIComponent(GOOGLE_API_KEY));
+  }
   if (!res.ok) throw new Error('Drive meta fetch failed: ' + res.status);
   return res.json();
 }
