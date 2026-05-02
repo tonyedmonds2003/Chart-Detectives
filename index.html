@@ -1200,8 +1200,8 @@ tr:hover td { background: var(--gray-50); }
 // Format: YYYY.MM.DD.N where N is the Nth change on that day (1-indexed).
 // APP_VERSION_LABEL is a human-readable caption shown on hover.
 // ============================================================================
-const APP_VERSION       = '2026.05.01.1';
-const APP_VERSION_LABEL = 'May 1, 2026 (x1) — Fixed Set-OneDrive-folder bug that killed setup on a fresh laptop. pickOneDriveRootFolder() previously called msSignIn() unconditionally, which always triggers a full-page redirect to Microsoft. The redirect killed the function so the paste-link prompt never fired — clicking the button just bounced the user back to the app with the canonical folder still unset. Now: function checks for a signed-in MSAL account first; if present, goes straight to the paste-link prompt; if not, stashes a "set-onedrive-root" pending action in sessionStorage before redirecting. resumePendingMsImport (which already handles the import-attorney-link resume) was generalized to dispatch on pending.action, with a new branch that re-shows the paste-link prompt automatically after redirect resume. Split _promptOneDriveRootLink out as a callable inner half so the resume path can re-enter without re-running the sign-in check. Previous: x10 Shrunk topbar + sidebar-bottom logo so they fit their containers cleanly. Topbar SVG went from 260x78 (overflowing the 60px topbar) to 160x48; sidebar-bottom SVG went from 220x66 to 180x54 with max-width:100% to prevent any future overflow in the 220px-wide sidebar. Same viewBox (1000x300) so the logo artwork is unchanged — just scaled down to the right display size. Previous: x9 Automatic backups. autoBackupAppState(reason) uploads the same envelope the manual Export button generates to {canonical}/_Internal/_backups/chart-detectives-backup-YYYY-MM-DD-HHMM.json. Wired into two triggers: saveCase success path (reason="new-case:<id>") and end of finishAnalysis (reason="analysis-complete:<caseId>"). Concurrency guard prevents duplicate uploads when two events fire within the same tick. 60-second throttle collapses rapid bursts. Silent token gate (checks _msToken / _driveToken without triggering sign-in redirects) — if the user is not signed in yet, we skip silently rather than disrupt workflow. Failures are non-fatal: console.warn only, never toasts a red error. Uses provider-aware routing through msGraphFindOrCreateFolder + msGraphUploadFile on OneDrive path and driveFindOrCreateFolder + driveUploadFile on Drive path. Updated backup strip label to explain auto-backup is on. Previous versions: x8 Backup & Restore (manual export/import). x7 saveCase canonical-hierarchy fix. x6 self-heal + diagnostics. Parse-check clean.';
+const APP_VERSION       = '2026.05.01.2';
+const APP_VERSION_LABEL = 'May 1, 2026 (x2) — Made local-file upload (➕ Add more records) and Google Drive attorney-link import provider-aware. handleDirectRecordsUpload + the gdrive branch of importFromAttorneyLink both used to hardcode driveFolderId + driveUploadFile, which silently failed on OneDrive-canonical cases (Tony hit this on Evans: "no Drive folder linked to this case" + local upload also failing). Now both functions read storageProvider off the case (falling back to state.canonicalStorage when missing) and route to the right destination: OneDrive cases call ensureCaseCanonicalHierarchy + msGraphUploadFile / mirrorDriveTreeToGraph; Drive cases keep the existing path. mirrorDriveTreeToGraph already existed (built in 6f.1) — just wasn\'t wired into the user-facing import flow. The Records page can now pull an attorney\'s Google Drive share into a OneDrive case in a single click; cross-cloud copies stream through the browser tab the same way OneDrive→Drive imports already did. attorneyImport manifest now records destProvider so refreshAttorneyLink can pick the right mirror direction next time. Previous: x1 Fixed Set-OneDrive-folder bug that killed setup on a fresh laptop. pickOneDriveRootFolder() previously called msSignIn() unconditionally, which always triggers a full-page redirect to Microsoft. The redirect killed the function so the paste-link prompt never fired — clicking the button just bounced the user back to the app with the canonical folder still unset. Now: function checks for a signed-in MSAL account first; if present, goes straight to the paste-link prompt; if not, stashes a "set-onedrive-root" pending action in sessionStorage before redirecting. resumePendingMsImport (which already handles the import-attorney-link resume) was generalized to dispatch on pending.action, with a new branch that re-shows the paste-link prompt automatically after redirect resume. Split _promptOneDriveRootLink out as a callable inner half so the resume path can re-enter without re-running the sign-in check. Previous: x10 Shrunk topbar + sidebar-bottom logo so they fit their containers cleanly. Topbar SVG went from 260x78 (overflowing the 60px topbar) to 160x48; sidebar-bottom SVG went from 220x66 to 180x54 with max-width:100% to prevent any future overflow in the 220px-wide sidebar. Same viewBox (1000x300) so the logo artwork is unchanged — just scaled down to the right display size. Previous: x9 Automatic backups. autoBackupAppState(reason) uploads the same envelope the manual Export button generates to {canonical}/_Internal/_backups/chart-detectives-backup-YYYY-MM-DD-HHMM.json. Wired into two triggers: saveCase success path (reason="new-case:<id>") and end of finishAnalysis (reason="analysis-complete:<caseId>"). Concurrency guard prevents duplicate uploads when two events fire within the same tick. 60-second throttle collapses rapid bursts. Silent token gate (checks _msToken / _driveToken without triggering sign-in redirects) — if the user is not signed in yet, we skip silently rather than disrupt workflow. Failures are non-fatal: console.warn only, never toasts a red error. Uses provider-aware routing through msGraphFindOrCreateFolder + msGraphUploadFile on OneDrive path and driveFindOrCreateFolder + driveUploadFile on Drive path. Updated backup strip label to explain auto-backup is on. Previous versions: x8 Backup & Restore (manual export/import). x7 saveCase canonical-hierarchy fix. x6 self-heal + diagnostics. Parse-check clean.';
 
 const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
 
@@ -5588,15 +5588,43 @@ async function importFromAttorneyLink() {
   }
 
   // --- Google Drive import path ---
+  // Source is always Google Drive here (the attorney's link). Destination
+  // depends on the case's storageProvider: same-cloud Drive→Drive for legacy
+  // gdrive cases, cross-cloud Drive→OneDrive for OneDrive-canonical cases.
   if (!_driveToken) {
     try { await driveSignIn(true); }
     catch(e) { setStatus('<span style="color:#c94646;">Could not connect to Google Drive: ' + esc(e.message) + '</span>'); return; }
   }
 
-  // Make sure the case has a Records folder in Debbie's Drive. Also guard
-  // against the case accidentally pointing at the Chart Detectives root
-  // (legacy/stale data, aborted hierarchy build) — rebuilding is idempotent.
-  {
+  const destProvider = caseInfo.storageProvider
+    || (state.canonicalStorage === 'onedrive' ? 'onedrive' : 'gdrive');
+
+  // Make sure the case has a Records folder in the right destination cloud.
+  // For OneDrive-canonical cases, ensureCaseCanonicalHierarchy builds the
+  // Firm/Attorney/Case tree on OneDrive (and the parallel _Internal tree).
+  // For Drive-canonical cases, we use the legacy ensureCaseHierarchy + the
+  // root-pointer guard that prevents files landing at the Chart Detectives
+  // root (the old self-heal scenario).
+  if (destProvider === 'onedrive') {
+    if (!caseInfo.canonicalFolderId || !caseInfo.canonicalDriveId) {
+      if (!caseInfo.firmId) {
+        setStatus('<span style="color:#c94646;">This case needs a firm assigned before records can be filed in OneDrive. Open Case Manager → edit and set the firm first.</span>');
+        return;
+      }
+      try {
+        setStatus('Verifying case folder in your OneDrive…');
+        await msGetToken();
+        await ensureCaseCanonicalHierarchy(caseInfo);
+      } catch(e) {
+        setStatus('<span style="color:#c94646;">Could not create OneDrive case folder: ' + esc(e.message) + '</span>');
+        return;
+      }
+    }
+    if (!caseInfo.canonicalFolderId || !caseInfo.canonicalDriveId) {
+      setStatus('<span style="color:#c94646;">Could not resolve a OneDrive folder for this case.</span>');
+      return;
+    }
+  } else {
     const needsHierarchy =
       !caseInfo.driveFolderId ||
       (state.driveRootFolderId && caseInfo.driveFolderId === state.driveRootFolderId);
@@ -5656,9 +5684,16 @@ async function importFromAttorneyLink() {
     return;
   }
 
+  const destFolderName = (destProvider === 'onedrive')
+    ? (caseInfo.canonicalFolderName || 'Records')
+    : (caseInfo.driveFolderName || 'Records');
+  const destCloudName = (destProvider === 'onedrive') ? 'OneDrive' : 'Google Drive';
+  const crossCloudNote = (destProvider === 'onedrive')
+    ? '\n\nCross-cloud copies stream through this browser tab, so expect a few minutes for large record sets — keep this tab open.'
+    : '\n\nThe folder tree will be preserved. This can take a few minutes for large record sets.';
   if (!confirm('Found ' + total + ' file(s) in the attorney\'s link.\n\n'
-    + 'Mirror them into the "' + (caseInfo.driveFolderName || 'Records') + '" folder in your Drive?\n\n'
-    + 'The folder tree will be preserved. This can take a few minutes for large record sets.')) {
+    + 'Mirror them into the "' + destFolderName + '" folder in your ' + destCloudName + '?'
+    + crossCloudNote)) {
     setStatus('Import cancelled.');
     return;
   }
@@ -5666,9 +5701,20 @@ async function importFromAttorneyLink() {
   setStatus('Importing 0 / ' + total + '…');
   let copies;
   try {
-    copies = await mirrorDriveTreeTo(sourceTree, caseInfo.driveFolderId, (done, tot, currentName) => {
-      setStatus('Importing ' + done + ' / ' + tot + ' — <span style="color:var(--gray-500);">' + esc(currentName) + '</span>');
-    });
+    if (destProvider === 'onedrive') {
+      copies = await mirrorDriveTreeToGraph(
+        sourceTree,
+        caseInfo.canonicalDriveId,
+        caseInfo.canonicalFolderId,
+        (done, tot, currentName) => {
+          setStatus('Importing ' + done + ' / ' + tot + ' — <span style="color:var(--gray-500);">' + esc(currentName) + '</span>');
+        }
+      );
+    } else {
+      copies = await mirrorDriveTreeTo(sourceTree, caseInfo.driveFolderId, (done, tot, currentName) => {
+        setStatus('Importing ' + done + ' / ' + tot + ' — <span style="color:var(--gray-500);">' + esc(currentName) + '</span>');
+      });
+    }
   } catch(e) {
     setStatus('<span style="color:#c94646;">Import failed partway through: ' + esc(e.message)
       + '. You can click Refresh to resume — already-copied files will be skipped.</span>');
@@ -5676,7 +5722,8 @@ async function importFromAttorneyLink() {
   }
 
   caseInfo.attorneyImport = {
-    provider: 'gdrive',
+    provider: 'gdrive',                  // SOURCE provider — the attorney's link
+    destProvider: destProvider,          // where the mirror landed (refresh needs this)
     sourceUrl: parsed.url,
     sourceKind: sourceKind,
     sourceId: parsed.id,
@@ -5694,7 +5741,7 @@ async function importFromAttorneyLink() {
   save();
 
   setStatus('<span style="color:#227d3b;">✓ Imported ' + copies.length
-    + ' file(s) from the attorney\'s link into your Drive. Citations will point to your copies.</span>');
+    + ' file(s) from the attorney\'s link into your ' + destCloudName + '. Citations will point to your copies.</span>');
   renderAttorneyImportBadge();
   try { await loadCaseDriveFiles(); } catch(_e) {}
 }
@@ -6076,17 +6123,44 @@ async function handleDirectRecordsUpload(event) {
   if (!caseId) { alert('Pick a case first.'); return; }
   const caseInfo = state.cases.find(c => c.id === caseId);
   if (!caseInfo) return;
-  if (!_driveToken) {
-    try { await driveSignIn(true); }
-    catch(e) { alert('Could not connect to Google Drive: ' + e.message); return; }
-  }
-  if (!caseInfo.driveFolderId) {
-    try {
-      const hier = await ensureCaseHierarchy(caseInfo);
-      caseInfo.driveFolderId = hier.records.id;
-      caseInfo.driveFolderName = hier.records.name;
-      save();
-    } catch(e) { alert('Could not create case folder: ' + e.message); return; }
+
+  // Provider-aware destination resolution. A case created on OneDrive-canonical
+  // storage gets storageProvider='onedrive' and stores its Records folder as
+  // canonicalDriveId / canonicalFolderId. The legacy gdrive path used
+  // driveFolderId. Earlier versions of this function always called
+  // driveSignIn + driveUploadFile, so OneDrive cases failed silently with
+  // "no Drive folder linked" — exactly what Tony hit on Evans.
+  const destProvider = caseInfo.storageProvider
+    || (state.canonicalStorage === 'onedrive' ? 'onedrive' : 'gdrive');
+
+  if (destProvider === 'onedrive') {
+    try { await msGetToken(); }
+    catch(e) { alert('Could not connect to Microsoft: ' + (e && e.message ? e.message : e)); return; }
+    if (!caseInfo.canonicalFolderId || !caseInfo.canonicalDriveId) {
+      if (!caseInfo.firmId) {
+        alert('This case needs a firm assigned before records can be filed in OneDrive. Open Case Manager → edit and set the firm first.');
+        return;
+      }
+      try { await ensureCaseCanonicalHierarchy(caseInfo); }
+      catch(e) { alert('Could not create OneDrive case folder: ' + (e && e.message ? e.message : e)); return; }
+    }
+    if (!caseInfo.canonicalFolderId || !caseInfo.canonicalDriveId) {
+      alert('Could not resolve a OneDrive folder for this case.');
+      return;
+    }
+  } else {
+    if (!_driveToken) {
+      try { await driveSignIn(true); }
+      catch(e) { alert('Could not connect to Google Drive: ' + e.message); return; }
+    }
+    if (!caseInfo.driveFolderId) {
+      try {
+        const hier = await ensureCaseHierarchy(caseInfo);
+        caseInfo.driveFolderId = hier.records.id;
+        caseInfo.driveFolderName = hier.records.name;
+        save();
+      } catch(e) { alert('Could not create case folder: ' + e.message); return; }
+    }
   }
 
   const statusEl = document.getElementById('attorney-import-status');
@@ -6099,7 +6173,11 @@ async function handleDirectRecordsUpload(event) {
     try {
       setStatus('Uploading ' + (done+1) + ' / ' + total + ' — <span style="color:var(--gray-500);">' + esc(f.name) + '</span>');
       const mime = f.type || 'application/octet-stream';
-      await driveUploadFile(caseInfo.driveFolderId, f.name, mime, f);
+      if (destProvider === 'onedrive') {
+        await msGraphUploadFile(caseInfo.canonicalDriveId, caseInfo.canonicalFolderId, f.name, mime, f);
+      } else {
+        await driveUploadFile(caseInfo.driveFolderId, f.name, mime, f);
+      }
       done += 1;
     } catch(e) {
       setStatus('<span style="color:#c94646;">Upload failed on "' + esc(f.name) + '": ' + esc(e.message) + '</span>');
